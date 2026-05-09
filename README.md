@@ -1,0 +1,2 @@
+# FXNews
+FXNews EA

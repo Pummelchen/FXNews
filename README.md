@@ -7,7 +7,6 @@ The EA does not trade. It never opens, closes, modifies, or manages positions.
 ## Files
 
 - `FXNews.mq5`: production MT5 Expert Advisor.
-- `NewsScan.mq5`: legacy indicator source kept for reference.
 - `scripts/sync_to_mt5.sh`: mirrors the production EA into the local MT5 `Experts/FXNews` folder.
 - `wiki/`: GitHub wiki source pages mirrored to the repository for versioned documentation.
 

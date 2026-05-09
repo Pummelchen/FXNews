@@ -1,0 +1,9 @@
+.DS_Store
+*.ex5
+*.log
+*.out
+*.tmp
+*.bak
+MQL5/Logs/
+MQL5/Profiles/
+MQL5/Tester/

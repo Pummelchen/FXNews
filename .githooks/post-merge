@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+set -u
+
+ROOT_DIR="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+"$ROOT_DIR/scripts/sync_to_mt5.sh" >/dev/null 2>&1 || {
+  echo "FXNews warning: MT5 sync failed after merge." >&2
+}

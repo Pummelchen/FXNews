@@ -37,7 +37,7 @@ This repository also includes local git hooks in `.githooks/`. In this checkout,
 
 ## Output
 
-The chart dashboard keeps the last five active signal messages. The newest message is on top and older messages shift down. Timestamps use the user's local computer time via `TimeLocal()`, not broker/server time.
+The chart dashboard keeps the last five signal messages. The newest message is on top and older messages shift down. Timestamps use the user's local computer time via `TimeLocal()`, not broker/server time.
 
 ```text
 BREAKOUT RADAR

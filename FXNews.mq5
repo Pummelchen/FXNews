@@ -175,7 +175,7 @@ int OnInit()
 
    if(ParseSymbols() <= 0)
    {
-      Print("ChartOnlyBreakoutRadarEA: no valid symbols were provided.");
+      Print("FXNews: no valid symbols were provided.");
       return INIT_PARAMETERS_INCORRECT;
    }
 
@@ -187,7 +187,7 @@ int OnInit()
    ResetLastError();
    if(!EventSetTimer(IntMax(1, ScanIntervalSeconds)))
    {
-      PrintFormat("ChartOnlyBreakoutRadarEA: EventSetTimer failed, error %d", GetLastError());
+      PrintFormat("FXNews: EventSetTimer failed, error %d", GetLastError());
       return INIT_FAILED;
    }
 
@@ -210,33 +210,33 @@ bool ValidateInputs()
 {
    if(ScanIntervalSeconds < 1 || DisplayUpdateSeconds < 1 || MaxQuoteAgeSeconds < 1)
    {
-      Print("ChartOnlyBreakoutRadarEA: scan, display, and quote-age inputs must be positive.");
+      Print("FXNews: scan, display, and quote-age inputs must be positive.");
       return false;
    }
 
    if(MinDisplayConfidence < 1.0 || MinDisplayConfidence > 99.0 ||
       StrongAlertConfidence < MinDisplayConfidence || StrongAlertConfidence > 100.0)
    {
-      Print("ChartOnlyBreakoutRadarEA: confidence inputs are inconsistent.");
+      Print("FXNews: confidence inputs are inconsistent.");
       return false;
    }
 
    if(RangeLookbackM1 < 10 || ATRPeriod < 2 ||
       BreakoutBufferATR < 0.0 || MinBreakoutBufferPips < 0.0)
    {
-      Print("ChartOnlyBreakoutRadarEA: range and ATR inputs are outside supported bounds.");
+      Print("FXNews: range and ATR inputs are outside supported bounds.");
       return false;
    }
 
    if(MaxSpreadPips <= 0.0 || MaxSpreadMedianMultiplier <= 1.0)
    {
-      Print("ChartOnlyBreakoutRadarEA: spread filters are outside supported bounds.");
+      Print("FXNews: spread filters are outside supported bounds.");
       return false;
    }
 
    if(FailedSignalCooldownSeconds < 1 || ValidSignalCooldownSeconds < 1)
    {
-      Print("ChartOnlyBreakoutRadarEA: cooldown inputs must be positive.");
+      Print("FXNews: cooldown inputs must be positive.");
       return false;
    }
 
@@ -248,7 +248,7 @@ int ParseSymbols()
    ArrayResize(g_profiles, 0);
    if(ParseTimeframes() <= 0)
    {
-      Print("ChartOnlyBreakoutRadarEA: no valid scan timeframes were provided.");
+      Print("FXNews: no valid scan timeframes were provided.");
       return 0;
    }
 
@@ -318,7 +318,7 @@ int ParseTimeframes()
       string label = "";
       if(!ParseTimeframeToken(token, timeframe, label))
       {
-         PrintFormat("ChartOnlyBreakoutRadarEA: unsupported timeframe token '%s' skipped.", token);
+         PrintFormat("FXNews: unsupported timeframe token '%s' skipped.", token);
          continue;
       }
 
@@ -1596,7 +1596,7 @@ void EnsureDashboardObjects()
          ResetLastError();
          if(!ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0))
          {
-            PrintFormat("ChartOnlyBreakoutRadarEA: failed to create dashboard object %s, error %d",
+            PrintFormat("FXNews: failed to create dashboard object %s, error %d",
                         name, GetLastError());
             continue;
          }

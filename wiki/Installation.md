@@ -5,7 +5,7 @@
 The project sync script copies the production EA to:
 
 ```text
-/Users/andreborchert/Library/Application Support/net.metaquotes.wine.metatrader5/drive_c/Program Files/MetaTrader 5/MQL5/Experts/FXNews/ChartOnlyBreakoutRadarEA.mq5
+/Users/andreborchert/Library/Application Support/net.metaquotes.wine.metatrader5/drive_c/Program Files/MetaTrader 5/MQL5/Experts/FXNews/FXNews.mq5
 ```
 
 Run:
@@ -19,10 +19,10 @@ scripts/sync_to_mt5.sh
 Open MetaEditor and compile:
 
 ```text
-MQL5/Experts/FXNews/ChartOnlyBreakoutRadarEA.mq5
+MQL5/Experts/FXNews/FXNews.mq5
 ```
 
-Attach `ChartOnlyBreakoutRadarEA` to one chart. The attached chart symbol does not need to be the only symbol scanned.
+Attach `FXNews` to one chart. The attached chart symbol does not need to be the only symbol scanned.
 
 ## Broker Symbols
 

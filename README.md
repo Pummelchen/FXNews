@@ -1,12 +1,12 @@
 # FXNews
 
-FXNews is a chart-only MetaTrader 5 breakout radar for manual FX day traders. The main deliverable is `ChartOnlyBreakoutRadarEA.mq5`, an Expert Advisor that scans many configured symbols from one attached chart and writes red chart messages when fresh breakout behavior is detected.
+FXNews is a chart-only MetaTrader 5 breakout radar for manual FX day traders. The main deliverable is `FXNews.mq5`, an Expert Advisor that scans many configured symbols from one attached chart and writes red chart messages when fresh breakout behavior is detected.
 
 The EA does not trade. It never opens, closes, modifies, or manages positions.
 
 ## Files
 
-- `ChartOnlyBreakoutRadarEA.mq5`: production MT5 Expert Advisor.
+- `FXNews.mq5`: production MT5 Expert Advisor.
 - `NewsScan.mq5`: legacy indicator source kept for reference.
 - `scripts/sync_to_mt5.sh`: mirrors the production EA into the local MT5 `Experts/FXNews` folder.
 - `wiki/`: GitHub wiki source pages mirrored to the repository for versioned documentation.
@@ -31,8 +31,8 @@ This repository also includes local git hooks in `.githooks/`. In this checkout,
 
 1. Run `scripts/sync_to_mt5.sh`.
 2. Open MetaEditor.
-3. Compile `MQL5/Experts/FXNews/ChartOnlyBreakoutRadarEA.mq5`.
-4. Attach `ChartOnlyBreakoutRadarEA` to one chart, for example `EURUSD`.
+3. Compile `MQL5/Experts/FXNews/FXNews.mq5`.
+4. Attach `FXNews` to one chart, for example `EURUSD`.
 5. Configure `SymbolsToScan` with the FX pairs your broker exposes.
 6. Configure `TimeframesToScan` with the scan timeframes you want, for example `M1,M5,M15,M30,H1,H4,H8,H12,D1`.
 

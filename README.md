@@ -34,6 +34,7 @@ This repository also includes local git hooks in `.githooks/`. In this checkout,
 3. Compile `MQL5/Experts/FXNews/ChartOnlyBreakoutRadarEA.mq5`.
 4. Attach `ChartOnlyBreakoutRadarEA` to one chart, for example `EURUSD`.
 5. Configure `SymbolsToScan` with the FX pairs your broker exposes.
+6. Configure `TimeframesToScan` with the scan timeframes you want, for example `M1,M5,M15,M30,H1,H4,H8,H12,D1`.
 
 ## Output
 
@@ -42,19 +43,19 @@ The chart dashboard keeps the last five signal messages. The newest message is o
 ```text
 BREAKOUT RADAR
 
-2026-05-16 15:35:45 - EURUSD UP - 75%
-2026-05-16 15:32:10 - GBPJPY DOWN - 69%
-2026-05-16 15:28:41 - AUDJPY UP - 65%
+2026-05-16 15:35:45 - EURUSD M15 UP - 75%
+2026-05-16 15:32:10 - GBPJPY H1 DOWN - 69%
+2026-05-16 15:28:41 - AUDJPY M5 UP - 65%
 ```
 
-`UP` means the base currency is strengthening against the quote currency. `DOWN` means the base currency is weakening against the quote currency. The percentage is the EA's internal signal-quality score, not a guaranteed win probability.
+`UP` means the base currency is strengthening against the quote currency. `DOWN` means the base currency is weakening against the quote currency. The timeframe between the symbol and direction is the scan timeframe that produced the signal. The percentage is the EA's internal signal-quality score, not a guaranteed win probability.
 
 ## Detection Logic
 
 FXNews is price-action based only. It does not use the MT5 economic calendar, external news feeds, `WebRequest`, or DLLs. It combines:
 
-- M1 technical range breakout scoring.
-- News-like impulse scoring from short-term price speed, M1 candle expansion, and tick-volume surge.
+- Technical range breakout scoring on each configured scan timeframe.
+- News-like impulse scoring from short-term price speed, scan-timeframe candle expansion, and tick-volume surge.
 - Currency-strength confirmation across the configured symbol basket.
 - Spread, stale quote, rollover, fakeout, M5, and M15 context filters.
 - Per-symbol cooldowns to avoid repeated chart spam.
@@ -62,11 +63,12 @@ FXNews is price-action based only. It does not use the MT5 economic calendar, ex
 Important inputs:
 
 - `SymbolsToScan`: comma-separated symbol list.
+- `TimeframesToScan`: comma-separated timeframe list. Default `M1,M5,M15,M30,H1,H4,H8,H12,D1`.
 - `ScanIntervalSeconds`: calculation interval. Default `1`.
 - `DisplayUpdateSeconds`: chart refresh throttle. Default `5`.
 - `MinDisplayConfidence`: minimum score shown on chart. Default `60`.
 - `StrongAlertConfidence`: strong alert threshold. Default `70`.
-- `RangeLookbackM1`: completed M1 candles used for the range box. Default `30`.
+- `RangeLookbackM1`: completed bars used for each scan-timeframe range box. The name is retained for settings compatibility. Default `30`.
 - `MaxSpreadPips`: hard spread rejection. Default `5`.
 
 ## Safety Boundaries

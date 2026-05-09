@@ -3,6 +3,7 @@
 
 input string SymbolsToScan =
 "EURUSD,GBPUSD,USDJPY,USDCHF,AUDUSD,NZDUSD,USDCAD,EURJPY,GBPJPY,EURGBP,EURAUD,EURNZD,EURCAD,EURCHF,GBPAUD,GBPNZD,GBPCAD,GBPCHF,AUDJPY,NZDJPY,CADJPY,CHFJPY,AUDNZD,AUDCAD,AUDCHF,NZDCAD,NZDCHF,CADCHF";
+input string TimeframesToScan = "M1,M5,M15,M30,H1,H4,H8,H12,D1";
 
 input int ScanIntervalSeconds = 1;
 input int DisplayUpdateSeconds = 5;
@@ -61,6 +62,7 @@ struct SignalHistoryEntry
 {
    bool used;
    string symbol;
+   string timeframe_label;
    int direction;
    datetime local_time;
    double score;
@@ -70,6 +72,8 @@ struct SignalHistoryEntry
 struct SymbolProfile
 {
    string symbol;
+   ENUM_TIMEFRAMES scan_timeframe;
+   string timeframe_label;
    bool valid;
    bool selected;
    int base_index;
@@ -89,6 +93,7 @@ struct SymbolProfile
    double spread_pips;
    double median_spread_pips;
 
+   // M1-named fields hold the trigger timeframe data for each scan profile.
    bool has_m1;
    bool has_m5;
    bool has_m15;
@@ -152,6 +157,8 @@ PriceSnapshot g_snapshots[];
 double g_spread_history[];
 SignalHistoryEntry g_signal_history[SIGNAL_HISTORY_SIZE];
 int g_signal_history_count = 0;
+ENUM_TIMEFRAMES g_scan_timeframes[];
+string g_scan_timeframe_labels[];
 double g_currency_strength[CURRENCY_COUNT];
 int g_currency_samples[CURRENCY_COUNT];
 string g_currency_codes[CURRENCY_COUNT] = {"EUR","USD","GBP","JPY","CHF","AUD","NZD","CAD"};
@@ -239,12 +246,61 @@ bool ValidateInputs()
 int ParseSymbols()
 {
    ArrayResize(g_profiles, 0);
+   if(ParseTimeframes() <= 0)
+   {
+      Print("ChartOnlyBreakoutRadarEA: no valid scan timeframes were provided.");
+      return 0;
+   }
 
    string cleaned = SymbolsToScan;
    StringReplace(cleaned, ";", ",");
    StringReplace(cleaned, "\r", ",");
    StringReplace(cleaned, "\n", ",");
    StringReplace(cleaned, "\t", ",");
+
+   string parts[];
+   ushort comma = StringGetCharacter(",", 0);
+   int total = StringSplit(cleaned, comma, parts);
+   string symbols[];
+
+   for(int i = 0; i < total; i++)
+   {
+      string token = parts[i];
+      StringTrimLeft(token);
+      StringTrimRight(token);
+      if(token == "")
+         continue;
+
+      AddUniqueSymbol(symbols, token);
+   }
+
+   for(int symbol_index = 0; symbol_index < ArraySize(symbols); symbol_index++)
+   {
+      for(int timeframe_index = 0; timeframe_index < ArraySize(g_scan_timeframes); timeframe_index++)
+      {
+         int next = ArraySize(g_profiles);
+         ArrayResize(g_profiles, next + 1);
+         ResetProfile(g_profiles[next],
+                      symbols[symbol_index],
+                      g_scan_timeframes[timeframe_index],
+                      g_scan_timeframe_labels[timeframe_index]);
+      }
+   }
+
+   return ArraySize(g_profiles);
+}
+
+int ParseTimeframes()
+{
+   ArrayResize(g_scan_timeframes, 0);
+   ArrayResize(g_scan_timeframe_labels, 0);
+
+   string cleaned = TimeframesToScan;
+   StringReplace(cleaned, ";", ",");
+   StringReplace(cleaned, "\r", ",");
+   StringReplace(cleaned, "\n", ",");
+   StringReplace(cleaned, "\t", ",");
+   StringReplace(cleaned, " ", "");
 
    string parts[];
    ushort comma = StringGetCharacter(",", 0);
@@ -258,20 +314,126 @@ int ParseSymbols()
       if(token == "")
          continue;
 
-      if(SymbolAlreadyAdded(token))
+      ENUM_TIMEFRAMES timeframe = PERIOD_CURRENT;
+      string label = "";
+      if(!ParseTimeframeToken(token, timeframe, label))
+      {
+         PrintFormat("ChartOnlyBreakoutRadarEA: unsupported timeframe token '%s' skipped.", token);
+         continue;
+      }
+
+      if(TimeframeAlreadyAdded(timeframe))
          continue;
 
-      int next = ArraySize(g_profiles);
-      ArrayResize(g_profiles, next + 1);
-      ResetProfile(g_profiles[next], token);
+      int next = ArraySize(g_scan_timeframes);
+      ArrayResize(g_scan_timeframes, next + 1);
+      ArrayResize(g_scan_timeframe_labels, next + 1);
+      g_scan_timeframes[next] = timeframe;
+      g_scan_timeframe_labels[next] = label;
    }
 
-   return ArraySize(g_profiles);
+   return ArraySize(g_scan_timeframes);
 }
 
-void ResetProfile(SymbolProfile &profile, const string symbol)
+bool ParseTimeframeToken(const string raw_token,
+                         ENUM_TIMEFRAMES &timeframe,
+                         string &label)
+{
+   string token = UpperAscii(raw_token);
+   StringReplace(token, "_", "");
+   StringReplace(token, "PERIOD", "");
+
+   if(token == "1" || token == "M1")
+   {
+      timeframe = PERIOD_M1;
+      label = "M1";
+      return true;
+   }
+   if(token == "5" || token == "M5")
+   {
+      timeframe = PERIOD_M5;
+      label = "M5";
+      return true;
+   }
+   if(token == "15" || token == "M15")
+   {
+      timeframe = PERIOD_M15;
+      label = "M15";
+      return true;
+   }
+   if(token == "30" || token == "M30")
+   {
+      timeframe = PERIOD_M30;
+      label = "M30";
+      return true;
+   }
+   if(token == "60" || token == "H1")
+   {
+      timeframe = PERIOD_H1;
+      label = "H1";
+      return true;
+   }
+   if(token == "240" || token == "H4")
+   {
+      timeframe = PERIOD_H4;
+      label = "H4";
+      return true;
+   }
+   if(token == "480" || token == "H8")
+   {
+      timeframe = PERIOD_H8;
+      label = "H8";
+      return true;
+   }
+   if(token == "720" || token == "H12")
+   {
+      timeframe = PERIOD_H12;
+      label = "H12";
+      return true;
+   }
+   if(token == "1440" || token == "D1")
+   {
+      timeframe = PERIOD_D1;
+      label = "D1";
+      return true;
+   }
+
+   return false;
+}
+
+bool TimeframeAlreadyAdded(const ENUM_TIMEFRAMES timeframe)
+{
+   for(int i = 0; i < ArraySize(g_scan_timeframes); i++)
+   {
+      if(g_scan_timeframes[i] == timeframe)
+         return true;
+   }
+   return false;
+}
+
+bool AddUniqueSymbol(string &symbols[], const string symbol)
+{
+   string candidate = UpperAscii(symbol);
+   for(int i = 0; i < ArraySize(symbols); i++)
+   {
+      if(UpperAscii(symbols[i]) == candidate)
+         return false;
+   }
+
+   int next = ArraySize(symbols);
+   ArrayResize(symbols, next + 1);
+   symbols[next] = symbol;
+   return true;
+}
+
+void ResetProfile(SymbolProfile &profile,
+                  const string symbol,
+                  const ENUM_TIMEFRAMES scan_timeframe,
+                  const string timeframe_label)
 {
    profile.symbol = symbol;
+   profile.scan_timeframe = scan_timeframe;
+   profile.timeframe_label = timeframe_label;
    profile.valid = false;
    profile.selected = false;
    profile.base_index = -1;
@@ -350,17 +512,6 @@ void ResetProfile(SymbolProfile &profile, const string symbol)
    profile.status_message = "";
 }
 
-bool SymbolAlreadyAdded(const string symbol)
-{
-   string candidate = UpperAscii(symbol);
-   for(int i = 0; i < ArraySize(g_profiles); i++)
-   {
-      if(UpperAscii(g_profiles[i].symbol) == candidate)
-         return true;
-   }
-   return false;
-}
-
 void AllocateHistoryBuffers()
 {
    int symbol_count = ArraySize(g_profiles);
@@ -414,7 +565,7 @@ bool EnsureSymbolReady(const int index)
       int initial_error = GetLastError();
       string resolved_symbol = "";
       if(!FindBrokerSymbolMatch(symbol, resolved_symbol) ||
-         SymbolUsedByAnotherProfile(index, resolved_symbol))
+         SymbolTimeframeUsedByAnotherProfile(index, resolved_symbol, g_profiles[index].scan_timeframe))
       {
          g_profiles[index].valid = false;
          g_profiles[index].selected = false;
@@ -440,11 +591,12 @@ bool EnsureSymbolReady(const int index)
       symbol = resolved_symbol;
    }
 
-   if(SymbolUsedByAnotherProfile(index, symbol))
+   if(SymbolTimeframeUsedByAnotherProfile(index, symbol, g_profiles[index].scan_timeframe))
    {
       g_profiles[index].valid = false;
       g_profiles[index].selected = false;
-      g_profiles[index].status_message = symbol + ": duplicate resolved symbol.";
+      g_profiles[index].status_message = StringFormat("%s %s: duplicate resolved scan profile.",
+                                                      symbol, g_profiles[index].timeframe_label);
       return false;
    }
 
@@ -520,15 +672,21 @@ bool FindBrokerSymbolMatch(const string requested_symbol, string &resolved_symbo
    return true;
 }
 
-bool SymbolUsedByAnotherProfile(const int current_index, const string symbol)
+bool SymbolTimeframeUsedByAnotherProfile(const int current_index,
+                                         const string symbol,
+                                         const ENUM_TIMEFRAMES timeframe)
 {
    string target = UpperAscii(symbol);
    for(int i = 0; i < ArraySize(g_profiles); i++)
    {
       if(i == current_index)
          continue;
-      if(UpperAscii(g_profiles[i].symbol) == target && g_profiles[i].selected)
+      if(UpperAscii(g_profiles[i].symbol) == target &&
+         g_profiles[i].scan_timeframe == timeframe &&
+         g_profiles[i].selected)
+      {
          return true;
+      }
    }
    return false;
 }
@@ -612,35 +770,25 @@ void ClearRuntimeMarketFlags(const int index)
 void UpdateRatesData(const int index)
 {
    string symbol = g_profiles[index].symbol;
-   int need_m1 = IntMax(RangeLookbackM1 + ATRPeriod + 20, 80);
-   int min_m1 = IntMax(RangeLookbackM1 + 2, ATRPeriod + 3);
+   int need_trigger = IntMax(RangeLookbackM1 + ATRPeriod + 20, 80);
+   int min_trigger = IntMax(RangeLookbackM1 + 2, ATRPeriod + 3);
 
-   MqlRates m1[];
-   ArraySetAsSeries(m1, true);
-   int copied_m1 = CopyRates(symbol, PERIOD_M1, 0, need_m1, m1);
-   g_profiles[index].has_m1 = (copied_m1 >= min_m1);
+   MqlRates trigger_rates[];
+   ArraySetAsSeries(trigger_rates, true);
+   int copied_trigger = CopyRates(symbol, g_profiles[index].scan_timeframe, 0, need_trigger, trigger_rates);
+   g_profiles[index].has_m1 = (copied_trigger >= min_trigger);
 
    if(g_profiles[index].has_m1)
    {
-      g_profiles[index].atr_m1 = CalculateATRFromRates(m1, copied_m1, ATRPeriod);
-      BuildM1RangeBox(index, m1, copied_m1);
-      g_profiles[index].current_m1_open = m1[0].open;
-      g_profiles[index].current_m1_high = m1[0].high;
-      g_profiles[index].current_m1_low = m1[0].low;
-      g_profiles[index].current_m1_close = m1[0].close;
-      g_profiles[index].current_m1_tick_volume = (double)m1[0].tick_volume;
-      g_profiles[index].last_completed_m1_tick_volume = (double)m1[1].tick_volume;
-      g_profiles[index].average_m1_tick_volume = AverageM1TickVolume(m1, copied_m1);
-
-      if(copied_m1 > 5)
-         g_profiles[index].movement_5m_pips = (g_profiles[index].mid - m1[5].close) / g_profiles[index].pip_size;
-      else
-         g_profiles[index].movement_5m_pips = 0.0;
-
-      if(copied_m1 > 15)
-         g_profiles[index].movement_15m_pips = (g_profiles[index].mid - m1[15].close) / g_profiles[index].pip_size;
-      else
-         g_profiles[index].movement_15m_pips = g_profiles[index].movement_5m_pips;
+      g_profiles[index].atr_m1 = CalculateATRFromRates(trigger_rates, copied_trigger, ATRPeriod);
+      BuildRangeBox(index, trigger_rates, copied_trigger);
+      g_profiles[index].current_m1_open = trigger_rates[0].open;
+      g_profiles[index].current_m1_high = trigger_rates[0].high;
+      g_profiles[index].current_m1_low = trigger_rates[0].low;
+      g_profiles[index].current_m1_close = trigger_rates[0].close;
+      g_profiles[index].current_m1_tick_volume = (double)trigger_rates[0].tick_volume;
+      g_profiles[index].last_completed_m1_tick_volume = (double)trigger_rates[1].tick_volume;
+      g_profiles[index].average_m1_tick_volume = AverageTickVolume(trigger_rates, copied_trigger);
    }
    else
    {
@@ -649,6 +797,26 @@ void UpdateRatesData(const int index)
       g_profiles[index].range_low = 0.0;
       g_profiles[index].range_width = 0.0;
    }
+
+   int context_source = FindFreshContextProfile(index);
+   if(context_source >= 0)
+   {
+      CopyContextRatesData(index, context_source);
+      return;
+   }
+
+   MqlRates short_m1[];
+   ArraySetAsSeries(short_m1, true);
+   int copied_short_m1 = CopyRates(symbol, PERIOD_M1, 0, 20, short_m1);
+   if(copied_short_m1 > 5)
+      g_profiles[index].movement_5m_pips = (g_profiles[index].mid - short_m1[5].close) / g_profiles[index].pip_size;
+   else
+      g_profiles[index].movement_5m_pips = 0.0;
+
+   if(copied_short_m1 > 15)
+      g_profiles[index].movement_15m_pips = (g_profiles[index].mid - short_m1[15].close) / g_profiles[index].pip_size;
+   else
+      g_profiles[index].movement_15m_pips = g_profiles[index].movement_5m_pips;
 
    MqlRates m5[];
    ArraySetAsSeries(m5, true);
@@ -681,7 +849,37 @@ void UpdateRatesData(const int index)
       g_profiles[index].m15_move_atr = 0.0;
 }
 
-void BuildM1RangeBox(const int index, MqlRates &rates[], const int copied)
+int FindFreshContextProfile(const int index)
+{
+   string symbol = UpperAscii(g_profiles[index].symbol);
+   long quote_time_msc = g_profiles[index].quote_time_msc;
+   if(quote_time_msc <= 0)
+      return -1;
+
+   for(int i = index - 1; i >= 0; i--)
+   {
+      if(UpperAscii(g_profiles[i].symbol) != symbol)
+         continue;
+      if(g_profiles[i].quote_time_msc != quote_time_msc)
+         continue;
+      return i;
+   }
+
+   return -1;
+}
+
+void CopyContextRatesData(const int target_index, const int source_index)
+{
+   g_profiles[target_index].movement_5m_pips = g_profiles[source_index].movement_5m_pips;
+   g_profiles[target_index].movement_15m_pips = g_profiles[source_index].movement_15m_pips;
+   g_profiles[target_index].has_m5 = g_profiles[source_index].has_m5;
+   g_profiles[target_index].atr_m5 = g_profiles[source_index].atr_m5;
+   g_profiles[target_index].m5_move_atr = g_profiles[source_index].m5_move_atr;
+   g_profiles[target_index].has_m15 = g_profiles[source_index].has_m15;
+   g_profiles[target_index].m15_move_atr = g_profiles[source_index].m15_move_atr;
+}
+
+void BuildRangeBox(const int index, MqlRates &rates[], const int copied)
 {
    int usable = IntMin(RangeLookbackM1, copied - 1);
    if(usable < RangeLookbackM1)
@@ -729,7 +927,7 @@ double CalculateATRFromRates(MqlRates &rates[], const int copied, const int peri
    return total / (double)counted;
 }
 
-double AverageM1TickVolume(MqlRates &rates[], const int copied)
+double AverageTickVolume(MqlRates &rates[], const int copied)
 {
    int lookback = IntMin(20, copied - 2);
    if(lookback <= 0)
@@ -1336,10 +1534,12 @@ void PushSignalHistory(const int index,
 
    g_signal_history[0].used = true;
    g_signal_history[0].symbol = g_profiles[index].symbol;
+   g_signal_history[0].timeframe_label = g_profiles[index].timeframe_label;
    g_signal_history[0].direction = direction;
    g_signal_history[0].local_time = local_time;
    g_signal_history[0].score = score;
    g_signal_history[0].text = FormatSignalHistoryText(g_signal_history[0].symbol,
+                                                      g_signal_history[0].timeframe_label,
                                                       direction,
                                                       score,
                                                       local_time);
@@ -1360,11 +1560,13 @@ void UpdateSignalHistory(const int index, const int direction, const double scor
          continue;
 
       if(g_signal_history[i].symbol == g_profiles[index].symbol &&
+         g_signal_history[i].timeframe_label == g_profiles[index].timeframe_label &&
          g_signal_history[i].direction == direction &&
          g_signal_history[i].local_time == local_time)
       {
          g_signal_history[i].score = score;
          g_signal_history[i].text = FormatSignalHistoryText(g_signal_history[i].symbol,
+                                                            g_signal_history[i].timeframe_label,
                                                             direction,
                                                             score,
                                                             local_time);
@@ -1377,6 +1579,7 @@ void CopySignalHistoryEntry(const SignalHistoryEntry &source, SignalHistoryEntry
 {
    target.used = source.used;
    target.symbol = source.symbol;
+   target.timeframe_label = source.timeframe_label;
    target.direction = source.direction;
    target.local_time = source.local_time;
    target.score = source.score;
@@ -1426,19 +1629,25 @@ string FormatSignalText(const int index, const int direction, const double score
 {
    string direction_text = (direction == DIR_UP ? "UP" : "DOWN");
    int confidence = (int)MathRound(Clamp(score, 0.0, 100.0));
-   return StringFormat("%s %s - %d%%", g_profiles[index].symbol, direction_text, confidence);
+   return StringFormat("%s %s %s - %d%%",
+                       g_profiles[index].symbol,
+                       g_profiles[index].timeframe_label,
+                       direction_text,
+                       confidence);
 }
 
 string FormatSignalHistoryText(const string symbol,
+                               const string timeframe_label,
                                const int direction,
                                const double score,
                                const datetime local_time)
 {
    string direction_text = (direction == DIR_UP ? "UP" : "DOWN");
    int confidence = (int)MathRound(Clamp(score, 0.0, 100.0));
-   return StringFormat("%s - %s %s - %d%%",
+   return StringFormat("%s - %s %s %s - %d%%",
                        FormatLocalTimestamp(local_time),
                        symbol,
+                       timeframe_label,
                        direction_text,
                        confidence);
 }

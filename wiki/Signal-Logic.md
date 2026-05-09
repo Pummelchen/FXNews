@@ -4,7 +4,7 @@ FXNews combines two weighted engines and displays only fresh events above the co
 
 ## Technical Breakout Engine
 
-The technical engine builds an M1 range from completed candles, calculates a dynamic breakout buffer from spread, ATR, and minimum pips, then scores directional breaks using:
+The technical engine builds a range from completed candles on each configured scan timeframe, calculates a dynamic breakout buffer from spread, ATR, and minimum pips, then scores directional breaks using:
 
 - Range compression quality.
 - Clean distance beyond the range.
@@ -19,7 +19,7 @@ The technical engine builds an M1 range from completed candles, calculates a dyn
 The impulse engine detects news-like behavior from broker data only:
 
 - Abnormal price speed over short windows.
-- Current M1 candle expansion versus ATR.
+- Current scan-timeframe candle expansion versus ATR.
 - Tick-volume surge.
 - Currency basket confirmation.
 - Continuation after the first push.

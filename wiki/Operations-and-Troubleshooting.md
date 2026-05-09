@@ -7,15 +7,15 @@ The chart shows a red title and up to five newest signal messages:
 ```text
 BREAKOUT RADAR
 
-2026-05-16 15:35:45 - EURUSD UP - 75%
-2026-05-16 15:32:10 - GBPJPY DOWN - 69%
+2026-05-16 15:35:45 - EURUSD M15 UP - 75%
+2026-05-16 15:32:10 - GBPJPY H1 DOWN - 69%
 ```
 
-Timestamps use local computer time.
+Timestamps use local computer time. The timeframe between symbol and direction is the scan timeframe that generated the message.
 
 ## No Signals
 
-Check that the broker symbols exist, Market Watch can select them, M1/M5/M15 history is loaded, and spreads are below the configured filters. If needed, lower `MinDisplayConfidence` temporarily to inspect signal flow.
+Check that the broker symbols exist, Market Watch can select them, the configured timeframe history is loaded, M1/M5/M15 context history is available, and spreads are below the configured filters. If needed, lower `MinDisplayConfidence` temporarily to inspect signal flow.
 
 ## Too Many Signals
 

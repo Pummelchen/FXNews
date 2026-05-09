@@ -31,3 +31,9 @@ Configure `SymbolsToScan` with the symbols as your broker exposes them. The EA a
 ```text
 EUR, USD, GBP, JPY, CHF, AUD, NZD, CAD
 ```
+
+Configure `TimeframesToScan` with the scan timeframes to evaluate:
+
+```text
+M1,M5,M15,M30,H1,H4,H8,H12,D1
+```

@@ -53,12 +53,17 @@ BREAKOUT RADAR
 
 ## Detection Logic
 
-FXNews is price-action based only. It does not use the MT5 economic calendar, external news feeds, `WebRequest`, or DLLs. It combines:
+The chart output format is unchanged, but the percentage is now a composite event-quality score for manual radar use. It is not a guaranteed win probability and it is not an auto-entry instruction.
 
-- Technical range breakout scoring on each configured scan timeframe.
-- News-like impulse scoring from short-term price speed, scan-timeframe candle expansion, and tick-volume surge.
-- Currency-strength confirmation across the configured symbol basket.
-- Spread, stale quote, rollover, fakeout, M5, and M15 context filters.
+FXNews remains broker-data based. It does not use external feeds, `WebRequest`, or DLLs. Optional built-in MT5 economic calendar context is available through `UseEconomicCalendarContext=false` by default. The score combines:
+
+- Technical range breakout quality on each configured scan timeframe.
+- News-like impulse quality from robust short-window speed, acceleration, candle expansion, tick rate, and tick-volume surge.
+- Execution quality from spread, median spread, spread z-score, quote freshness, tick gaps, and spread cost versus ATR.
+- Currency-flow confirmation across the configured symbol basket.
+- Regime and session context, including M5/M15 agreement and volatility regime.
+- Optional MT5 economic-calendar context, cached per currency when enabled.
+- Fakeout, overextension, weak candle, snapback, context-conflict, aging-event, and execution caps.
 - Per-symbol cooldowns to avoid repeated chart spam.
 
 Important inputs:
@@ -71,6 +76,16 @@ Important inputs:
 - `StrongAlertConfidence`: strong alert threshold. Default `70`.
 - `RangeLookbackM1`: completed bars used for each scan-timeframe range box. The name is retained for settings compatibility. Default `30`.
 - `MaxSpreadPips`: hard spread rejection. Default `5`.
+- `UseStrictExecutionGate`: blocks severe execution-cost problems before scoring. Default `true`.
+- `UseEconomicCalendarContext`: optional built-in MT5 calendar context. Default `false`.
+- `EnableSignalLogging`: writes signal and outcome audit rows to CSV. Default `true`.
+- `UseScoreCalibrationFile`: optionally maps raw score buckets from a calibration CSV. Default `false`.
+
+## Score Audit Logs
+
+When `EnableSignalLogging=true`, FXNews writes `FXNews_signals.csv` in the terminal files area. `SIGNAL` rows include the displayed score, raw score, calibrated score, component scores, execution-cost fields, cap reasons, and entry reference price. If `EnableOutcomeLabeling=true`, later `OUTCOME` rows append 5/15/30 minute MFE and MAE labels for the same `signal_id`.
+
+Use these rows to validate score buckets empirically. For example, compare 60-69, 70-79, 80-89, and 90+ buckets by MFE/MAE, target-before-stop rate, and continuation score. Higher scores should behave like stronger radar events over time, not like automatic trade instructions.
 
 ## Safety Boundaries
 

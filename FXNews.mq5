@@ -34,6 +34,50 @@ input bool EnablePushNotification = false;
 
 input int MaxQuoteAgeSeconds = 15;
 
+input bool UseStrictExecutionGate = true;
+input double MaxSpreadToAtrRatio = 0.18;
+input double MaxTickGapSeconds = 8.0;
+input double MaxSpreadZScore = 3.0;
+
+input int MinHoldSecondsForHighScore = 3;
+input int FullHoldScoreSeconds = 12;
+input double MaxOverextensionAtr = 1.8;
+
+input double MinImpulseZForSignal = 1.25;
+input double MaxExhaustionAtr = 2.2;
+input bool UseTickRateScoring = true;
+
+input bool UseRobustCurrencyStrength = true;
+input double MinBasketAgreementForHighScore = 0.60;
+input double MinDirectionalEdgeForHighScore = 0.20;
+
+input bool UseEconomicCalendarContext = false;
+input int CalendarLookbackMinutes = 10;
+input int CalendarLookaheadMinutes = 30;
+input bool CalendarHighImpactOnly = true;
+input bool BlockImmediatelyBeforeHighImpactNews = false;
+input int CalendarPreNewsBlockMinutes = 3;
+
+input bool UseMultiTimeframeContextCaps = true;
+input double M5RejectAtr = -0.35;
+input double M15RejectAtr = -0.25;
+
+input bool EnableSignalLogging = true;
+input bool EnableOutcomeLabeling = true;
+input string SignalLogFile = "FXNews_signals.csv";
+input int OutcomeHorizonMinutes1 = 5;
+input int OutcomeHorizonMinutes2 = 15;
+input int OutcomeHorizonMinutes3 = 30;
+input double OutcomeTargetAtr = 0.50;
+input double OutcomeStopAtr = 0.35;
+
+input bool UseScoreCalibrationFile = false;
+input string ScoreCalibrationFile = "FXNews_calibration.csv";
+input int MinCalibrationSamples = 50;
+
+input bool DebugScoreBreakdown = false;
+input bool DebugPrintToJournal = false;
+
 #define DIR_NONE 0
 #define DIR_UP 1
 #define DIR_DOWN -1
@@ -42,6 +86,8 @@ input int MaxQuoteAgeSeconds = 15;
 #define CURRENCY_COUNT 8
 #define DASHBOARD_MAX_OBJECTS 40
 #define SIGNAL_HISTORY_SIZE 5
+#define MAX_PENDING_OUTCOMES 500
+#define CALENDAR_REFRESH_SECONDS 60
 
 enum BreakoutEventState
 {
@@ -50,6 +96,164 @@ enum BreakoutEventState
    STATE_CANDIDATE = 2,
    STATE_ACTIVE_SIGNAL = 3,
    STATE_COOLDOWN = 4
+};
+
+enum SignalBlockReason
+{
+   BLOCK_NONE = 0,
+   BLOCK_STALE_QUOTE = 1,
+   BLOCK_BAD_SPREAD = 2,
+   BLOCK_ROLLOVER = 3,
+   BLOCK_NO_ATR = 4,
+   BLOCK_NO_RANGE = 5,
+   BLOCK_NO_MOVEMENT_DATA = 6,
+   BLOCK_FAKEOUT = 7,
+   BLOCK_CONTEXT_CONFLICT = 8
+};
+
+struct FeatureScore
+{
+   double value;      // normalized 0..1
+   double weight;     // composite contribution weight
+   string name;
+};
+
+struct ExecutionQuality
+{
+   bool pass;
+   double score;              // 0..1
+   double spread_pips;
+   double median_spread_pips;
+   double spread_ratio;
+   double spread_z;
+   double quote_age_sec;
+   double tick_gap_sec;
+   double cost_to_atr;
+   SignalBlockReason block_reason;
+};
+
+struct BreakoutStructure
+{
+   bool pass;
+   double score;              // 0..1
+   double compression_score;
+   double distance_score;
+   double close_location_score;
+   double hold_score;
+   double body_quality_score;
+   double wick_rejection_penalty;
+   double fakeout_penalty;
+};
+
+struct ImpulseQuality
+{
+   bool pass;
+   double score;              // 0..1
+   double speed_5s_z;
+   double speed_10s_z;
+   double speed_30s_z;
+   double speed_60s_z;
+   double acceleration_score;
+   double atr_expansion_score;
+   double tick_rate_z;
+   double tick_volume_z;
+   double exhaustion_penalty;
+};
+
+struct CurrencyFlowQuality
+{
+   bool pass;
+   double score;              // 0..1
+   double base_strength;
+   double quote_strength;
+   double directional_edge;
+   double basket_agreement;
+   double conflict_penalty;
+};
+
+struct RegimeContext
+{
+   bool pass;
+   double score;              // 0..1
+   double session_score;
+   double mtf_alignment_score;
+   double m5_context_score;
+   double m15_context_score;
+   double volatility_regime_score;
+   double rollover_penalty;
+};
+
+struct CalendarContext
+{
+   bool available;
+   bool relevant_event_nearby;
+   bool high_impact_nearby;
+   bool just_released;
+   double score;              // 0..1
+   double proximity_minutes;
+   double importance_score;
+   double surprise_score;
+   double uncertainty_penalty;
+};
+
+struct CompositeSignalScore
+{
+   bool valid;
+   int direction;
+   double raw_score;          // 0..100 before calibration/caps
+   double calibrated_score;   // 0..100 after optional calibration
+   double displayed_score;    // rounded dashboard score source
+   ExecutionQuality execution;
+   BreakoutStructure breakout;
+   ImpulseQuality impulse;
+   CurrencyFlowQuality flow;
+   RegimeContext regime;
+   CalendarContext calendar;
+   SignalBlockReason block_reason;
+   string reason_summary;
+};
+
+struct PendingOutcome
+{
+   bool active;
+   string signal_id;
+   string symbol;
+   string timeframe_label;
+   int direction;
+   datetime signal_server_time;
+   datetime signal_local_time;
+   double entry_mid;
+   double atr_price;
+   double pip_size;
+   double mfe_pips;
+   double mae_pips;
+   bool horizon1_written;
+   bool horizon2_written;
+   bool horizon3_written;
+};
+
+struct CalibrationEntry
+{
+   string symbol;
+   string timeframe_label;
+   string session_name;
+   int score_bucket;
+   double calibrated_score;
+   int sample_count;
+};
+
+struct CurrencyCalendarCache
+{
+   string currency;
+   datetime refreshed_at;
+   bool available;
+   bool relevant_event_nearby;
+   bool high_impact_nearby;
+   bool just_released;
+   double score;
+   double proximity_minutes;
+   double importance_score;
+   double uncertainty_penalty;
 };
 
 struct PriceSnapshot
@@ -92,6 +296,9 @@ struct SymbolProfile
    double last_mid;
    double spread_pips;
    double median_spread_pips;
+   double spread_z;
+   double tick_gap_sec;
+   double tick_rate_per_sec;
 
    // M1-named fields hold the trigger timeframe data for each scan profile.
    bool has_m1;
@@ -126,6 +333,8 @@ struct SymbolProfile
    double impulse_score_down;
    double final_score_up;
    double final_score_down;
+   CompositeSignalScore composite_up;
+   CompositeSignalScore composite_down;
 
    int active_direction;
    BreakoutEventState event_state;
@@ -143,6 +352,8 @@ struct SymbolProfile
 
    datetime outside_since_up;
    datetime outside_since_down;
+   datetime reentered_since_up;
+   datetime reentered_since_down;
 
    int snapshot_write_index;
    int snapshot_count;
@@ -161,7 +372,14 @@ ENUM_TIMEFRAMES g_scan_timeframes[];
 string g_scan_timeframe_labels[];
 double g_currency_strength[CURRENCY_COUNT];
 int g_currency_samples[CURRENCY_COUNT];
+double g_currency_weight[CURRENCY_COUNT];
 string g_currency_codes[CURRENCY_COUNT] = {"EUR","USD","GBP","JPY","CHF","AUD","NZD","CAD"};
+PendingOutcome g_pending_outcomes[];
+CalibrationEntry g_calibration_entries[];
+CurrencyCalendarCache g_calendar_cache[CURRENCY_COUNT];
+long g_signal_sequence = 0;
+bool g_calibration_warning_printed = false;
+bool g_signal_log_header_checked = false;
 
 datetime g_last_dashboard_update = 0;
 string g_object_prefix = "COBR_";
@@ -178,6 +396,10 @@ int OnInit()
       Print("FXNews: no valid symbols were provided.");
       return INIT_PARAMETERS_INCORRECT;
    }
+
+   InitializeCalendarCache();
+   LoadScoreCalibration();
+   ArrayResize(g_pending_outcomes, 0);
 
    AllocateHistoryBuffers();
 
@@ -237,6 +459,41 @@ bool ValidateInputs()
    if(FailedSignalCooldownSeconds < 1 || ValidSignalCooldownSeconds < 1)
    {
       Print("FXNews: cooldown inputs must be positive.");
+      return false;
+   }
+
+   if(MaxSpreadToAtrRatio <= 0.0 || MaxTickGapSeconds <= 0.0 || MaxSpreadZScore <= 0.0)
+   {
+      Print("FXNews: execution gate inputs must be positive.");
+      return false;
+   }
+
+   if(MinHoldSecondsForHighScore < 0 || FullHoldScoreSeconds < 1 ||
+      FullHoldScoreSeconds < MinHoldSecondsForHighScore || MaxOverextensionAtr <= 0.0)
+   {
+      Print("FXNews: breakout-quality inputs are outside supported bounds.");
+      return false;
+   }
+
+   if(MinImpulseZForSignal < 0.0 || MaxExhaustionAtr <= 0.0 ||
+      MinBasketAgreementForHighScore < 0.0 || MinBasketAgreementForHighScore > 1.0 ||
+      MinDirectionalEdgeForHighScore < 0.0)
+   {
+      Print("FXNews: impulse or basket-quality inputs are outside supported bounds.");
+      return false;
+   }
+
+   if(CalendarLookbackMinutes < 0 || CalendarLookaheadMinutes < 0 || CalendarPreNewsBlockMinutes < 0)
+   {
+      Print("FXNews: calendar inputs must not be negative.");
+      return false;
+   }
+
+   if(OutcomeHorizonMinutes1 < 1 || OutcomeHorizonMinutes2 < OutcomeHorizonMinutes1 ||
+      OutcomeHorizonMinutes3 < OutcomeHorizonMinutes2 || OutcomeTargetAtr <= 0.0 ||
+      OutcomeStopAtr <= 0.0 || MinCalibrationSamples < 1)
+   {
+      Print("FXNews: logging/outcome inputs are inconsistent.");
       return false;
    }
 
@@ -453,6 +710,9 @@ void ResetProfile(SymbolProfile &profile,
    profile.last_mid = 0.0;
    profile.spread_pips = 0.0;
    profile.median_spread_pips = 0.0;
+   profile.spread_z = 0.0;
+   profile.tick_gap_sec = 0.0;
+   profile.tick_rate_per_sec = 0.0;
 
    profile.has_m1 = false;
    profile.has_m5 = false;
@@ -486,6 +746,8 @@ void ResetProfile(SymbolProfile &profile,
    profile.impulse_score_down = 0.0;
    profile.final_score_up = 0.0;
    profile.final_score_down = 0.0;
+   ResetCompositeSignalScore(profile.composite_up, DIR_UP);
+   ResetCompositeSignalScore(profile.composite_down, DIR_DOWN);
 
    profile.active_direction = DIR_NONE;
    profile.event_state = STATE_IDLE;
@@ -503,6 +765,8 @@ void ResetProfile(SymbolProfile &profile,
 
    profile.outside_since_up = 0;
    profile.outside_since_down = 0;
+   profile.reentered_since_up = 0;
+   profile.reentered_since_down = 0;
 
    profile.snapshot_write_index = 0;
    profile.snapshot_count = 0;
@@ -546,6 +810,8 @@ void ScanAll(const bool force_dashboard)
          return;
       CalculateScoresAndUpdateState(i, now);
    }
+
+   UpdatePendingOutcomes(now);
 
    if(force_dashboard || g_last_dashboard_update == 0 ||
       now - g_last_dashboard_update >= DisplayUpdateSeconds)
@@ -741,6 +1007,8 @@ bool UpdateMarketData(const int index, const datetime now)
    if(g_profiles[index].quote_time_msc <= 0)
       g_profiles[index].quote_time_msc = (long)tick.time * 1000;
 
+   g_profiles[index].tick_gap_sec = TickGapSeconds(index, g_profiles[index].quote_time_msc);
+
    g_profiles[index].quote_fresh = (now - tick.time <= MaxQuoteAgeSeconds);
    g_profiles[index].bid = tick.bid;
    g_profiles[index].ask = tick.ask;
@@ -751,6 +1019,8 @@ bool UpdateMarketData(const int index, const datetime now)
    AddSnapshot(index, g_profiles[index].quote_time_msc, g_profiles[index].mid);
    AddSpreadSample(index, g_profiles[index].spread_pips);
    g_profiles[index].median_spread_pips = CalculateMedianSpread(index);
+   g_profiles[index].spread_z = SpreadRobustZ(index);
+   g_profiles[index].tick_rate_per_sec = TickRateFromSnapshots(index, 30);
 
    UpdateRatesData(index);
    UpdateMovementData(index);
@@ -765,6 +1035,8 @@ void ClearRuntimeMarketFlags(const int index)
    g_profiles[index].has_m1 = false;
    g_profiles[index].has_m5 = false;
    g_profiles[index].has_m15 = false;
+   g_profiles[index].tick_gap_sec = 0.0;
+   g_profiles[index].tick_rate_per_sec = 0.0;
 }
 
 void UpdateRatesData(const int index)
@@ -967,7 +1239,11 @@ void UpdateOutsideTimers(const int index, const datetime now)
          g_profiles[index].outside_since_up = now;
    }
    else
+   {
+      if(g_profiles[index].outside_since_up > 0)
+         g_profiles[index].reentered_since_up = now;
       g_profiles[index].outside_since_up = 0;
+   }
 
    if(g_profiles[index].mid < down_boundary)
    {
@@ -975,7 +1251,11 @@ void UpdateOutsideTimers(const int index, const datetime now)
          g_profiles[index].outside_since_down = now;
    }
    else
+   {
+      if(g_profiles[index].outside_since_down > 0)
+         g_profiles[index].reentered_since_down = now;
       g_profiles[index].outside_since_down = 0;
+   }
 }
 
 void AddSnapshot(const int index, const long time_msc, const double mid)
@@ -1045,6 +1325,7 @@ void CalculateCurrencyStrength()
    {
       g_currency_strength[i] = 0.0;
       g_currency_samples[i] = 0;
+      g_currency_weight[i] = 0.0;
    }
 
    if(!UseCurrencyStrength)
@@ -1059,23 +1340,41 @@ void CalculateCurrencyStrength()
          continue;
       }
 
+      if(g_profiles[i].spread_pips <= 0.0 || g_profiles[i].spread_pips > MaxSpreadPips ||
+         (g_profiles[i].median_spread_pips > 0.0 &&
+          g_profiles[i].spread_pips > g_profiles[i].median_spread_pips * MaxSpreadMedianMultiplier))
+      {
+         continue;
+      }
+
       double atr_pips = MathMax(g_profiles[i].atr_m1 / g_profiles[i].pip_size, 0.1);
       double n30 = Clamp(g_profiles[i].speed_30s_pips / (atr_pips * 0.35), -1.5, 1.5);
       double n60 = Clamp(g_profiles[i].speed_60s_pips / (atr_pips * 0.55), -1.5, 1.5);
       double n5m = Clamp(g_profiles[i].movement_5m_pips / (atr_pips * 1.50), -1.5, 1.5);
       double pair_strength = n30 * 0.45 + n60 * 0.25 + n5m * 0.30;
+      double weight = 1.0;
+      if(UseRobustCurrencyStrength)
+      {
+         double spread_penalty = 1.0 / MathMax(1.0, g_profiles[i].spread_pips / MathMax(g_profiles[i].median_spread_pips, 0.1));
+         weight = spread_penalty / MathMax(atr_pips, 0.5);
+         weight = Clamp(weight, 0.05, 2.0);
+      }
 
       int base = g_profiles[i].base_index;
       int quote = g_profiles[i].quote_index;
-      g_currency_strength[base] += pair_strength;
-      g_currency_strength[quote] -= pair_strength;
+      g_currency_strength[base] += pair_strength * weight;
+      g_currency_strength[quote] -= pair_strength * weight;
+      g_currency_weight[base] += weight;
+      g_currency_weight[quote] += weight;
       g_currency_samples[base]++;
       g_currency_samples[quote]++;
    }
 
    for(int i = 0; i < CURRENCY_COUNT; i++)
    {
-      if(g_currency_samples[i] > 0)
+      if(g_currency_weight[i] > 0.0)
+         g_currency_strength[i] /= g_currency_weight[i];
+      else if(g_currency_samples[i] > 0)
          g_currency_strength[i] /= (double)g_currency_samples[i];
    }
 }
@@ -1088,229 +1387,1058 @@ void CalculateScoresAndUpdateState(const int index, const datetime now)
    g_profiles[index].impulse_score_down = 0.0;
    g_profiles[index].final_score_up = 0.0;
    g_profiles[index].final_score_down = 0.0;
+   ResetCompositeSignalScore(g_profiles[index].composite_up, DIR_UP);
+   ResetCompositeSignalScore(g_profiles[index].composite_down, DIR_DOWN);
 
-   if(!HardRejectProfile(index, now))
-   {
-      g_profiles[index].technical_score_up = CalculateTechnicalScore(index, DIR_UP);
-      g_profiles[index].technical_score_down = CalculateTechnicalScore(index, DIR_DOWN);
-      g_profiles[index].impulse_score_up = CalculateImpulseScore(index, DIR_UP);
-      g_profiles[index].impulse_score_down = CalculateImpulseScore(index, DIR_DOWN);
+   BuildCompositeSignalScore(index, DIR_UP, now, g_profiles[index].composite_up);
+   BuildCompositeSignalScore(index, DIR_DOWN, now, g_profiles[index].composite_down);
 
-      double raw_up = CombineEngineScores(g_profiles[index].technical_score_up,
-                                          g_profiles[index].impulse_score_up);
-      double raw_down = CombineEngineScores(g_profiles[index].technical_score_down,
-                                            g_profiles[index].impulse_score_down);
+   g_profiles[index].technical_score_up = g_profiles[index].composite_up.breakout.score * 100.0;
+   g_profiles[index].technical_score_down = g_profiles[index].composite_down.breakout.score * 100.0;
+   g_profiles[index].impulse_score_up = g_profiles[index].composite_up.impulse.score * 100.0;
+   g_profiles[index].impulse_score_down = g_profiles[index].composite_down.impulse.score * 100.0;
 
-      if(!HardRejectDirection(index, DIR_UP, raw_up))
-      {
-         double penalties_up = ApplyFakeoutPenalties(index, DIR_UP, now, raw_up);
-         g_profiles[index].final_score_up = Clamp(raw_up - penalties_up, 0.0, 100.0);
-      }
-
-      if(!HardRejectDirection(index, DIR_DOWN, raw_down))
-      {
-         double penalties_down = ApplyFakeoutPenalties(index, DIR_DOWN, now, raw_down);
-         g_profiles[index].final_score_down = Clamp(raw_down - penalties_down, 0.0, 100.0);
-      }
-   }
+   if(g_profiles[index].composite_up.valid)
+      g_profiles[index].final_score_up = g_profiles[index].composite_up.displayed_score;
+   if(g_profiles[index].composite_down.valid)
+      g_profiles[index].final_score_down = g_profiles[index].composite_down.displayed_score;
 
    UpdateSignalState(index, now);
 }
 
-double CalculateTechnicalScore(const int index, const int direction)
+void ResetCompositeSignalScore(CompositeSignalScore &score, const int direction)
 {
-   if(!UseTechnicalBreakoutEngine)
-      return 0.0;
+   score.valid = false;
+   score.direction = direction;
+   score.raw_score = 0.0;
+   score.calibrated_score = 0.0;
+   score.displayed_score = 0.0;
+   score.block_reason = BLOCK_NONE;
+   score.reason_summary = "";
 
-   double breakout_distance = BreakoutDistance(index, direction);
-   if(breakout_distance <= 0.0)
-      return 0.0;
+   score.execution.pass = false;
+   score.execution.score = 0.0;
+   score.execution.spread_pips = 0.0;
+   score.execution.median_spread_pips = 0.0;
+   score.execution.spread_ratio = 0.0;
+   score.execution.spread_z = 0.0;
+   score.execution.quote_age_sec = 0.0;
+   score.execution.tick_gap_sec = 0.0;
+   score.execution.cost_to_atr = 0.0;
+   score.execution.block_reason = BLOCK_NONE;
 
-   double buffer = BreakoutBufferPrice(index);
-   double compression = RangeCompressionScore(index);
-   double clean_break = LinearScore(breakout_distance / MathMax(buffer, g_profiles[index].point),
-                                    0.05, 2.00);
-   double momentum = DirectionalMovementScore(index, direction);
-   double volume = TickVolumeScore(index);
-   double hold = OutsideHoldScore(index, direction);
-   double currency = CurrencyConfirmationScore(index, direction);
-   double spread = SpreadQualityScore(index);
+   score.breakout.pass = false;
+   score.breakout.score = 0.0;
+   score.breakout.compression_score = 0.0;
+   score.breakout.distance_score = 0.0;
+   score.breakout.close_location_score = 0.0;
+   score.breakout.hold_score = 0.0;
+   score.breakout.body_quality_score = 0.0;
+   score.breakout.wick_rejection_penalty = 0.0;
+   score.breakout.fakeout_penalty = 0.0;
 
-   return compression * 0.15 +
-          clean_break * 0.20 +
-          momentum * 0.20 +
-          volume * 0.10 +
-          hold * 0.15 +
-          currency * 0.15 +
-          spread * 0.05;
+   score.impulse.pass = false;
+   score.impulse.score = 0.0;
+   score.impulse.speed_5s_z = 0.0;
+   score.impulse.speed_10s_z = 0.0;
+   score.impulse.speed_30s_z = 0.0;
+   score.impulse.speed_60s_z = 0.0;
+   score.impulse.acceleration_score = 0.0;
+   score.impulse.atr_expansion_score = 0.0;
+   score.impulse.tick_rate_z = 0.0;
+   score.impulse.tick_volume_z = 0.0;
+   score.impulse.exhaustion_penalty = 0.0;
+
+   score.flow.pass = false;
+   score.flow.score = 0.0;
+   score.flow.base_strength = 0.0;
+   score.flow.quote_strength = 0.0;
+   score.flow.directional_edge = 0.0;
+   score.flow.basket_agreement = 0.0;
+   score.flow.conflict_penalty = 0.0;
+
+   score.regime.pass = false;
+   score.regime.score = 0.0;
+   score.regime.session_score = 0.0;
+   score.regime.mtf_alignment_score = 0.0;
+   score.regime.m5_context_score = 0.0;
+   score.regime.m15_context_score = 0.0;
+   score.regime.volatility_regime_score = 0.0;
+   score.regime.rollover_penalty = 0.0;
+
+   score.calendar.available = false;
+   score.calendar.relevant_event_nearby = false;
+   score.calendar.high_impact_nearby = false;
+   score.calendar.just_released = false;
+   score.calendar.score = 0.0;
+   score.calendar.proximity_minutes = 0.0;
+   score.calendar.importance_score = 0.0;
+   score.calendar.surprise_score = 0.0;
+   score.calendar.uncertainty_penalty = 0.0;
 }
 
-double CalculateImpulseScore(const int index, const int direction)
+void BuildCompositeSignalScore(const int index,
+                               const int direction,
+                               const datetime now,
+                               CompositeSignalScore &score)
 {
-   if(!UseImpulseBreakoutEngine)
-      return 0.0;
+   ResetCompositeSignalScore(score, direction);
 
-   double speed = DirectionalMovementScore(index, direction);
-   double candle = CandleExpansionScore(index, direction);
-   if(speed < 22.0 && candle < 25.0)
-      return 0.0;
-
-   double volume = TickVolumeScore(index);
-   double currency = CurrencyConfirmationScore(index, direction);
-   double continuation = ContinuationScore(index, direction);
-   double spread = SpreadQualityScore(index);
-
-   return speed * 0.25 +
-          candle * 0.20 +
-          volume * 0.15 +
-          currency * 0.20 +
-          continuation * 0.15 +
-          spread * 0.05;
-}
-
-double CombineEngineScores(const double technical_score, const double impulse_score)
-{
-   double raw = MathMax(technical_score, impulse_score);
-   if(technical_score >= 40.0 && impulse_score >= 40.0)
-      raw += 7.0;
-   return Clamp(raw, 0.0, 100.0);
-}
-
-bool HardRejectProfile(const int index, const datetime now)
-{
-   if(!g_profiles[index].valid || !g_profiles[index].selected)
-      return true;
-
-   if(!g_profiles[index].quote_fresh)
-      return true;
-
-   if(!g_profiles[index].has_m1 || !g_profiles[index].has_m5 || !g_profiles[index].has_m15)
-      return true;
-
-   if(g_profiles[index].spread_pips <= 0.0 || g_profiles[index].spread_pips > MaxSpreadPips)
-      return true;
-
-   if(g_profiles[index].median_spread_pips > 0.0 &&
-      g_profiles[index].spread_pips > g_profiles[index].median_spread_pips * MaxSpreadMedianMultiplier)
+   EvaluateExecutionQuality(index, now, score.execution);
+   if(!score.execution.pass)
    {
-      return true;
+      score.block_reason = score.execution.block_reason;
+      score.reason_summary = "blocked=" + BlockReasonText(score.block_reason);
+      return;
    }
 
-   if(g_profiles[index].atr_m1 <= 0.0 ||
-      g_profiles[index].atr_m1 / g_profiles[index].pip_size < 0.10)
+   EvaluateBreakoutStructure(index, direction, now, score.breakout);
+   EvaluateImpulseQuality(index, direction, score.impulse);
+   EvaluateCurrencyFlowQuality(index, direction, score.flow);
+   EvaluateRegimeContext(index, direction, now, score.regime);
+   EvaluateCalendarContext(index, direction, now, score.calendar);
+
+   if(CalendarPreNewsBlock(score.calendar))
    {
-      return true;
+      score.block_reason = BLOCK_CONTEXT_CONFLICT;
+      score.reason_summary = "blocked=calendar_pre_news";
+      return;
+   }
+
+   bool engine_pass = ((UseTechnicalBreakoutEngine && score.breakout.pass) ||
+                       (UseImpulseBreakoutEngine && score.impulse.pass));
+   if(!engine_pass)
+   {
+      score.block_reason = BLOCK_NO_MOVEMENT_DATA;
+      score.reason_summary = "blocked=no_breakout_or_impulse";
+      return;
+   }
+
+   if(SpreadOnlyBreakout(index, direction))
+   {
+      score.block_reason = BLOCK_BAD_SPREAD;
+      score.reason_summary = "blocked=spread_only_breakout";
+      return;
+   }
+
+   if(UseStrictExecutionGate && score.flow.conflict_penalty >= 0.80)
+   {
+      score.block_reason = BLOCK_CONTEXT_CONFLICT;
+      score.reason_summary = "blocked=currency_flow_conflict";
+      return;
+   }
+
+   double breakout_weight = (UseTechnicalBreakoutEngine ? 0.22 : 0.0);
+   double impulse_weight = (UseImpulseBreakoutEngine ? 0.22 : 0.0);
+   double execution_weight = 0.18;
+   double flow_weight = 0.16;
+   double regime_weight = 0.14;
+   double calendar_weight = (UseEconomicCalendarContext && score.calendar.available ? 0.08 : 0.0);
+
+   double total_weight = breakout_weight + impulse_weight + execution_weight +
+                         flow_weight + regime_weight + calendar_weight;
+   if(total_weight <= 0.0)
+      total_weight = 1.0;
+
+   double raw01 = (score.breakout.score * breakout_weight +
+                   score.impulse.score * impulse_weight +
+                   score.execution.score * execution_weight +
+                   score.flow.score * flow_weight +
+                   score.regime.score * regime_weight +
+                   score.calendar.score * calendar_weight) / total_weight;
+
+   if(score.breakout.score >= 0.45 && score.impulse.score >= 0.45)
+      raw01 = Clamp01(raw01 + 0.05);
+
+   score.raw_score = 100.0 * SmoothStep(0.35, 0.92, raw01);
+   score.calibrated_score = ApplyScoreCalibration(index, score.raw_score, now);
+
+   double capped = Clamp(score.calibrated_score, 0.0, 100.0);
+   string caps = "";
+
+   if(!UseEconomicCalendarContext || !score.calendar.available)
+      capped = ApplyScoreCap(capped, 94.0, caps, "no_calendar_cap");
+
+   if(!UseCurrencyStrength)
+      capped = ApplyScoreCap(capped, 84.0, caps, "flow_disabled_cap");
+   else if(!score.flow.pass && score.flow.conflict_penalty < 0.35)
+      capped = ApplyScoreCap(capped, 84.0, caps, "flow_absent_cap");
+   else if(score.flow.conflict_penalty >= 0.35)
+      capped = ApplyScoreCap(capped, 69.0, caps, "flow_conflict_cap");
+
+   if(score.execution.score < 0.68 ||
+      score.execution.cost_to_atr > MaxSpreadToAtrRatio * 0.70 ||
+      score.execution.spread_ratio > MathMax(1.30, MaxSpreadMedianMultiplier * 0.65))
+   {
+      capped = ApplyScoreCap(capped, 69.0, caps, "execution_mediocre_cap");
+   }
+
+   if(score.breakout.pass && score.breakout.hold_score < 0.35)
+      capped = ApplyScoreCap(capped, 74.0, caps, "weak_hold_cap");
+   if(score.breakout.pass && score.breakout.body_quality_score < 0.35)
+      capped = ApplyScoreCap(capped, 79.0, caps, "weak_body_cap");
+   if(score.breakout.fakeout_penalty >= 0.45)
+      capped = ApplyScoreCap(capped, 64.0, caps, "range_snapback_cap");
+
+   if(UseMultiTimeframeContextCaps)
+   {
+      if(score.regime.m5_context_score <= 0.20 || score.regime.m15_context_score <= 0.20)
+         capped = ApplyScoreCap(capped, 69.0, caps, "mtf_reject_cap");
+   }
+
+   if(score.impulse.score >= 0.60 &&
+      UseTickRateScoring &&
+      score.impulse.tick_rate_z < 0.0 &&
+      score.impulse.tick_volume_z < 0.0)
+   {
+      capped = ApplyScoreCap(capped, 72.0, caps, "unsupported_impulse_cap");
+   }
+
+   if(score.impulse.exhaustion_penalty >= 0.45)
+      capped = ApplyScoreCap(capped, 75.0, caps, "overextended_cap");
+
+   int age = EventAgeSeconds(index, direction, now);
+   if(age > 300)
+      capped = 0.0;
+   else if(age > 180)
+      capped = ApplyScoreCap(capped, 70.0, caps, "late_event_cap");
+   else if(age > 60)
+      capped = ApplyScoreCap(capped, 84.0, caps, "aging_event_cap");
+
+   if(score.calendar.available && score.calendar.uncertainty_penalty >= 0.35)
+      capped = ApplyScoreCap(capped, 88.0, caps, "calendar_uncertainty_cap");
+
+   if(capped > 80.0 &&
+      (score.execution.score < 0.78 || MathMax(score.breakout.score, score.impulse.score) < 0.58))
+   {
+      capped = ApplyScoreCap(capped, 79.0, caps, "single_feature_cap");
+   }
+
+   if(capped > 90.0 &&
+      (score.execution.score < 0.88 || score.breakout.hold_score < 0.75 ||
+       score.flow.score < 0.70 || score.regime.score < 0.65 ||
+       score.calendar.uncertainty_penalty > 0.20))
+   {
+      capped = ApplyScoreCap(capped, 89.0, caps, "elite_score_cap");
+   }
+
+   if(capped > 95.0)
+      capped = 95.0;
+
+   score.displayed_score = Clamp(capped, 0.0, 100.0);
+   score.valid = (score.displayed_score > 0.0);
+   score.reason_summary = BuildReasonSummary(score, caps);
+
+   if(DebugScoreBreakdown && DebugPrintToJournal && score.displayed_score >= MinDisplayConfidence)
+   {
+      PrintFormat("FXNews score %s %s %s %d%% raw=%.1f cal=%.1f %s",
+                  g_profiles[index].symbol,
+                  g_profiles[index].timeframe_label,
+                  (direction == DIR_UP ? "UP" : "DOWN"),
+                  (int)MathRound(score.displayed_score),
+                  score.raw_score,
+                  score.calibrated_score,
+                  score.reason_summary);
+   }
+}
+
+void EvaluateExecutionQuality(const int index, const datetime now, ExecutionQuality &execution)
+{
+   execution.pass = false;
+   execution.score = 0.0;
+   execution.spread_pips = g_profiles[index].spread_pips;
+   execution.median_spread_pips = (g_profiles[index].median_spread_pips > 0.0 ?
+                                   g_profiles[index].median_spread_pips :
+                                   g_profiles[index].spread_pips);
+   execution.spread_ratio = SafeDiv(execution.spread_pips, execution.median_spread_pips, 1.0);
+   execution.spread_z = g_profiles[index].spread_z;
+   execution.quote_age_sec = (g_profiles[index].quote_time > 0 ? (double)(now - g_profiles[index].quote_time) : 9999.0);
+   execution.tick_gap_sec = g_profiles[index].tick_gap_sec;
+   execution.cost_to_atr = SafeDiv(MathMax(g_profiles[index].ask - g_profiles[index].bid, 0.0),
+                                   g_profiles[index].atr_m1,
+                                   999.0);
+   execution.block_reason = BLOCK_NONE;
+
+   if(!g_profiles[index].valid || !g_profiles[index].selected ||
+      !g_profiles[index].quote_fresh || g_profiles[index].bid <= 0.0 ||
+      g_profiles[index].ask <= 0.0 || g_profiles[index].ask < g_profiles[index].bid)
+   {
+      execution.block_reason = BLOCK_STALE_QUOTE;
+      return;
+   }
+
+   if(!g_profiles[index].has_m1 || !g_profiles[index].has_m5 || !g_profiles[index].has_m15 ||
+      g_profiles[index].atr_m1 <= 0.0 ||
+      SafeDiv(g_profiles[index].atr_m1, g_profiles[index].pip_size, 0.0) < 0.10)
+   {
+      execution.block_reason = BLOCK_NO_ATR;
+      return;
+   }
+
+   if(g_profiles[index].range_width <= 0.0)
+   {
+      execution.block_reason = BLOCK_NO_RANGE;
+      return;
    }
 
    if(IgnoreRolloverTime && IsRolloverTime(now))
-      return true;
-
-   return false;
-}
-
-bool HardRejectDirection(const int index, const int direction, const double raw_score)
-{
-   if(raw_score <= 0.0)
-      return true;
-
-   double breakout_distance = BreakoutDistance(index, direction);
-   double spread_price = g_profiles[index].ask - g_profiles[index].bid;
-   double directional_10s = DirectionalValue(g_profiles[index].speed_10s_pips, direction);
-
-   if(breakout_distance > 0.0 && breakout_distance <= spread_price * 1.20 &&
-      directional_10s < g_profiles[index].spread_pips * 0.60)
    {
-      return true;
+      execution.block_reason = BLOCK_ROLLOVER;
+      return;
    }
 
-   return false;
+   if(execution.spread_pips <= 0.0 || execution.spread_pips > MaxSpreadPips ||
+      execution.spread_ratio > MaxSpreadMedianMultiplier)
+   {
+      execution.block_reason = BLOCK_BAD_SPREAD;
+      return;
+   }
+
+   if(UseStrictExecutionGate)
+   {
+      if(execution.cost_to_atr > MaxSpreadToAtrRatio ||
+         execution.spread_z > MaxSpreadZScore)
+      {
+         execution.block_reason = BLOCK_BAD_SPREAD;
+         return;
+      }
+
+      if(execution.tick_gap_sec > MaxTickGapSeconds)
+      {
+         execution.block_reason = BLOCK_STALE_QUOTE;
+         return;
+      }
+   }
+
+   double spread_abs_score = 1.0 - SmoothStep(MaxSpreadPips * 0.45, MaxSpreadPips, execution.spread_pips);
+   double spread_rel_score = 1.0 - SmoothStep(1.0, MaxSpreadMedianMultiplier, execution.spread_ratio);
+   double cost_score = 1.0 - SmoothStep(MaxSpreadToAtrRatio * 0.45, MaxSpreadToAtrRatio, execution.cost_to_atr);
+   double spread_z_score = 1.0 - SmoothStep(1.25, MaxSpreadZScore, execution.spread_z);
+   double quote_fresh_score = 1.0 - SmoothStep((double)MaxQuoteAgeSeconds * 0.45,
+                                               (double)MaxQuoteAgeSeconds,
+                                               execution.quote_age_sec);
+   double tick_gap_score = 1.0 - SmoothStep(MaxTickGapSeconds * 0.45,
+                                            MaxTickGapSeconds,
+                                            execution.tick_gap_sec);
+
+   execution.score = Clamp01(spread_abs_score * 0.18 +
+                             spread_rel_score * 0.20 +
+                             cost_score * 0.24 +
+                             spread_z_score * 0.14 +
+                             quote_fresh_score * 0.12 +
+                             tick_gap_score * 0.12);
+   execution.pass = true;
 }
 
-double ApplyFakeoutPenalties(const int index,
-                             const int direction,
-                             const datetime now,
-                             const double raw_score)
+void EvaluateBreakoutStructure(const int index,
+                               const int direction,
+                               const datetime now,
+                               BreakoutStructure &breakout)
 {
-   if(raw_score <= 0.0)
-      return 100.0;
+   breakout.pass = false;
+   breakout.score = 0.0;
+   breakout.compression_score = 0.0;
+   breakout.distance_score = 0.0;
+   breakout.close_location_score = 0.0;
+   breakout.hold_score = 0.0;
+   breakout.body_quality_score = 0.0;
+   breakout.wick_rejection_penalty = 0.0;
+   breakout.fakeout_penalty = 0.0;
 
-   double penalties = 0.0;
-   double buffer = BreakoutBufferPrice(index);
+   if(!UseTechnicalBreakoutEngine || g_profiles[index].atr_m1 <= 0.0 ||
+      g_profiles[index].range_width <= 0.0)
+   {
+      return;
+   }
 
-   if(direction == DIR_UP && g_profiles[index].mid <= g_profiles[index].range_high)
-      penalties += (g_profiles[index].mid < g_profiles[index].range_high - buffer ? 35.0 : 22.0);
-   else if(direction == DIR_DOWN && g_profiles[index].mid >= g_profiles[index].range_low)
-      penalties += (g_profiles[index].mid > g_profiles[index].range_low + buffer ? 35.0 : 22.0);
+   double atr = g_profiles[index].atr_m1;
+   double range_atr = g_profiles[index].range_width / atr;
+   double not_dead = SmoothStep(0.65, 1.80, range_atr);
+   double not_chaotic = 1.0 - SmoothStep(7.0, 16.0, range_atr);
+   breakout.compression_score = Clamp01(0.10 + 0.90 * not_dead * not_chaotic);
+
+   double distance = BreakoutDistance(index, direction);
+   double buffer = MathMax(BreakoutBufferPrice(index), g_profiles[index].point);
+   double distance_units = distance / buffer;
+   double distance_atr = SafeDiv(distance, atr, 0.0);
+   double extension_penalty = SmoothStep(MaxOverextensionAtr, MaxOverextensionAtr * 1.80, distance_atr);
+   breakout.distance_score = Clamp01(SmoothStep(0.20, 1.60, distance_units) * (1.0 - extension_penalty * 0.45));
 
    double candle_range = g_profiles[index].current_m1_high - g_profiles[index].current_m1_low;
-   double body = MathAbs(g_profiles[index].current_m1_close - g_profiles[index].current_m1_open);
    if(candle_range > 0.0)
    {
-      double against_wick = 0.0;
       if(direction == DIR_UP)
-         against_wick = g_profiles[index].current_m1_high -
-                        MathMax(g_profiles[index].current_m1_open, g_profiles[index].current_m1_close);
+         breakout.close_location_score = Clamp01((g_profiles[index].current_m1_close - g_profiles[index].current_m1_low) / candle_range);
       else
-         against_wick = MathMin(g_profiles[index].current_m1_open, g_profiles[index].current_m1_close) -
-                        g_profiles[index].current_m1_low;
+         breakout.close_location_score = Clamp01((g_profiles[index].current_m1_high - g_profiles[index].current_m1_close) / candle_range);
 
-      double wick_ratio = against_wick / candle_range;
-      if(wick_ratio > 0.65)
-         penalties += 25.0;
-      else if(wick_ratio > 0.45)
-         penalties += 14.0;
-
+      double body = MathAbs(g_profiles[index].current_m1_close - g_profiles[index].current_m1_open);
       double body_ratio = body / candle_range;
-      if(body_ratio < 0.15)
-         penalties += 15.0;
-      else if(body_ratio < 0.28)
-         penalties += 8.0;
+      double directional_body = DirectionalValue(g_profiles[index].current_m1_close - g_profiles[index].current_m1_open,
+                                                 direction) / candle_range;
+      breakout.body_quality_score = Clamp01(SmoothStep(0.18, 0.62, body_ratio) * 0.65 +
+                                            SmoothStep(0.03, 0.38, directional_body) * 0.35);
+
+      double rejection_wick = 0.0;
+      if(direction == DIR_UP)
+         rejection_wick = g_profiles[index].current_m1_high -
+                          MathMax(g_profiles[index].current_m1_open, g_profiles[index].current_m1_close);
+      else
+         rejection_wick = MathMin(g_profiles[index].current_m1_open, g_profiles[index].current_m1_close) -
+                          g_profiles[index].current_m1_low;
+      breakout.wick_rejection_penalty = Clamp01(rejection_wick / candle_range);
    }
 
-   double volume_score = TickVolumeScore(index);
-   if(volume_score < 25.0)
-      penalties += 15.0;
-   else if(volume_score < 45.0)
-      penalties += 7.0;
+   datetime outside_since = (direction == DIR_UP ? g_profiles[index].outside_since_up :
+                             g_profiles[index].outside_since_down);
+   if(outside_since > 0)
+   {
+      double seconds = (double)MathMax(0, (int)(now - outside_since));
+      breakout.hold_score = SmoothStep((double)MinHoldSecondsForHighScore,
+                                       (double)FullHoldScoreSeconds,
+                                       seconds);
+   }
 
-   double currency_score = CurrencyConfirmationScore(index, direction);
-   if(currency_score < 25.0)
-      penalties += 25.0;
-   else if(currency_score < 45.0)
-      penalties += 12.0;
+   datetime reentered_since = (direction == DIR_UP ? g_profiles[index].reentered_since_up :
+                               g_profiles[index].reentered_since_down);
+   if(reentered_since > 0 && now - reentered_since <= 30)
+      breakout.fakeout_penalty = 1.0 - SmoothStep(0.0, 30.0, (double)(now - reentered_since));
 
-   double m5_context = g_profiles[index].m5_move_atr * (double)direction;
-   if(m5_context < -0.70)
-      penalties += 15.0;
-   else if(m5_context < -0.35)
-      penalties += 8.0;
+   breakout.score = Clamp01(breakout.compression_score * 0.17 +
+                            breakout.distance_score * 0.24 +
+                            breakout.close_location_score * 0.17 +
+                            breakout.hold_score * 0.20 +
+                            breakout.body_quality_score * 0.17 -
+                            breakout.wick_rejection_penalty * 0.15 -
+                            breakout.fakeout_penalty * 0.25);
+   breakout.pass = (distance > 0.0 && breakout.score > 0.06);
+}
 
-   double m15_context = g_profiles[index].m15_move_atr * (double)direction;
-   if(m15_context < -0.60)
-      penalties += 20.0;
-   else if(m15_context < -0.25)
-      penalties += 9.0;
+void EvaluateImpulseQuality(const int index, const int direction, ImpulseQuality &impulse)
+{
+   impulse.pass = false;
+   impulse.score = 0.0;
+   impulse.speed_5s_z = 0.0;
+   impulse.speed_10s_z = 0.0;
+   impulse.speed_30s_z = 0.0;
+   impulse.speed_60s_z = 0.0;
+   impulse.acceleration_score = 0.0;
+   impulse.atr_expansion_score = 0.0;
+   impulse.tick_rate_z = 0.0;
+   impulse.tick_volume_z = 0.0;
+   impulse.exhaustion_penalty = 0.0;
 
-   int age_seconds = EventAgeSeconds(index, direction, now);
-   if(age_seconds > 300)
-      penalties += 100.0;
-   else if(age_seconds > 180)
-      penalties += 10.0 + (double)(age_seconds - 180) / 120.0 * 20.0;
-   else if(age_seconds > 60)
-      penalties += (double)(age_seconds - 60) / 120.0 * 10.0;
+   if(!UseImpulseBreakoutEngine || g_profiles[index].atr_m1 <= 0.0 ||
+      g_profiles[index].pip_size <= 0.0 || g_profiles[index].snapshot_count < 3)
+   {
+      return;
+   }
+
+   impulse.speed_5s_z = SpeedRobustZ(index, direction, 5);
+   impulse.speed_10s_z = SpeedRobustZ(index, direction, 10);
+   impulse.speed_30s_z = SpeedRobustZ(index, direction, 30);
+   impulse.speed_60s_z = SpeedRobustZ(index, direction, 60);
+
+   double speed_score = Clamp01(ScoreFromZ(Max3(impulse.speed_5s_z,
+                                               impulse.speed_10s_z,
+                                               impulse.speed_30s_z),
+                                           MinImpulseZForSignal,
+                                           MinImpulseZForSignal + 2.75));
+   double short_rate = SafeDiv(DirectionalValue(g_profiles[index].speed_5s_pips, direction), 5.0, 0.0);
+   double long_rate = SafeDiv(DirectionalValue(g_profiles[index].speed_30s_pips, direction), 30.0, 0.0);
+   impulse.acceleration_score = SmoothStep(0.0, 0.10, short_rate - long_rate);
+
+   double candle_directional_range = 0.0;
+   if(direction == DIR_UP)
+      candle_directional_range = g_profiles[index].current_m1_high - g_profiles[index].current_m1_open;
+   else
+      candle_directional_range = g_profiles[index].current_m1_open - g_profiles[index].current_m1_low;
+   impulse.atr_expansion_score = SmoothStep(0.20, 1.25, SafeDiv(candle_directional_range,
+                                                               g_profiles[index].atr_m1,
+                                                               0.0));
+
+   impulse.tick_rate_z = TickRateZ(index);
+   impulse.tick_volume_z = TickVolumeRobustZ(index);
+   double tick_rate_score = (UseTickRateScoring ? ScoreFromZ(impulse.tick_rate_z, 0.50, 2.50) : 0.65);
+   double volume_score = ScoreFromZ(impulse.tick_volume_z, 0.50, 2.80);
+   double continuation = ContinuationScore(index, direction) / 100.0;
 
    double atr_pips = MathMax(g_profiles[index].atr_m1 / g_profiles[index].pip_size, 0.1);
-   double extended = DirectionalValue(g_profiles[index].movement_5m_pips, direction) / atr_pips;
-   if(extended > 4.0)
-      penalties += 25.0;
-   else if(extended > 2.5)
-      penalties += (extended - 2.5) / 1.5 * 18.0;
+   double extended_atr = DirectionalValue(g_profiles[index].movement_5m_pips, direction) / atr_pips;
+   impulse.exhaustion_penalty = SmoothStep(MaxExhaustionAtr, MaxExhaustionAtr * 1.70, extended_atr);
 
-   double spread_quality = SpreadQualityScore(index);
-   if(spread_quality < 70.0)
-      penalties += (70.0 - spread_quality) / 70.0 * 20.0;
+   impulse.score = Clamp01(speed_score * 0.25 +
+                           impulse.atr_expansion_score * 0.20 +
+                           volume_score * 0.15 +
+                           tick_rate_score * 0.10 +
+                           impulse.acceleration_score * 0.15 +
+                           continuation * 0.15 -
+                           impulse.exhaustion_penalty * 0.22);
+   impulse.pass = (Max3(impulse.speed_5s_z, impulse.speed_10s_z, impulse.speed_30s_z) >= MinImpulseZForSignal ||
+                   impulse.atr_expansion_score >= 0.45);
+}
 
-   return Clamp(penalties, 0.0, 100.0);
+void EvaluateCurrencyFlowQuality(const int index,
+                                 const int direction,
+                                 CurrencyFlowQuality &flow)
+{
+   flow.pass = false;
+   flow.score = 0.62;
+   flow.base_strength = 0.0;
+   flow.quote_strength = 0.0;
+   flow.directional_edge = 0.0;
+   flow.basket_agreement = 0.50;
+   flow.conflict_penalty = 0.0;
+
+   if(!UseCurrencyStrength)
+      return;
+
+   int base = g_profiles[index].base_index;
+   int quote = g_profiles[index].quote_index;
+   if(base < 0 || quote < 0)
+   {
+      flow.score = 0.52;
+      return;
+   }
+
+   if(g_currency_samples[base] <= 0 || g_currency_samples[quote] <= 0)
+   {
+      flow.score = 0.62;
+      flow.basket_agreement = 0.50;
+      return;
+   }
+
+   flow.base_strength = g_currency_strength[base];
+   flow.quote_strength = g_currency_strength[quote];
+   flow.directional_edge = (flow.base_strength - flow.quote_strength) * (double)direction;
+   flow.basket_agreement = CalculateBasketAgreement(index, direction);
+
+   double edge_score = SmoothStep(MinDirectionalEdgeForHighScore * 0.20,
+                                  MinDirectionalEdgeForHighScore,
+                                  flow.directional_edge);
+   double agreement_score = SmoothStep(0.45,
+                                       MinBasketAgreementForHighScore,
+                                       flow.basket_agreement);
+   flow.conflict_penalty = 0.0;
+   if(flow.directional_edge < -MinDirectionalEdgeForHighScore * 0.50)
+      flow.conflict_penalty += 0.45;
+   if(flow.basket_agreement < 0.35)
+      flow.conflict_penalty += 0.45;
+   flow.conflict_penalty = Clamp01(flow.conflict_penalty);
+
+   flow.score = Clamp01(edge_score * 0.55 + agreement_score * 0.45 - flow.conflict_penalty * 0.35);
+   flow.pass = (flow.conflict_penalty < 0.55);
+}
+
+void EvaluateRegimeContext(const int index,
+                           const int direction,
+                           const datetime now,
+                           RegimeContext &regime)
+{
+   regime.pass = true;
+   regime.session_score = SessionQualityScore(now);
+   regime.m5_context_score = SmoothStep(M5RejectAtr, 0.35, g_profiles[index].m5_move_atr * (double)direction);
+   regime.m15_context_score = SmoothStep(M15RejectAtr, 0.30, g_profiles[index].m15_move_atr * (double)direction);
+   regime.mtf_alignment_score = Clamp01(regime.m5_context_score * 0.55 + regime.m15_context_score * 0.45);
+
+   double range_atr = SafeDiv(g_profiles[index].range_width, g_profiles[index].atr_m1, 0.0);
+   double active_enough = SmoothStep(0.70, 2.20, range_atr);
+   double not_chaotic = 1.0 - SmoothStep(14.0, 24.0, range_atr);
+   regime.volatility_regime_score = Clamp01(active_enough * not_chaotic);
+   regime.rollover_penalty = (IgnoreRolloverTime && IsRolloverTime(now) ? 1.0 : 0.0);
+   regime.score = Clamp01(regime.session_score * 0.25 +
+                          regime.mtf_alignment_score * 0.42 +
+                          regime.volatility_regime_score * 0.33 -
+                          regime.rollover_penalty);
+   if(UseMultiTimeframeContextCaps &&
+      (regime.m5_context_score <= 0.10 || regime.m15_context_score <= 0.10))
+   {
+      regime.pass = false;
+   }
+}
+
+void EvaluateCalendarContext(const int index,
+                             const int direction,
+                             const datetime now,
+                             CalendarContext &calendar)
+{
+   calendar.available = false;
+   calendar.relevant_event_nearby = false;
+   calendar.high_impact_nearby = false;
+   calendar.just_released = false;
+   calendar.score = 0.65;
+   calendar.proximity_minutes = 0.0;
+   calendar.importance_score = 0.0;
+   calendar.surprise_score = 0.0;
+   calendar.uncertainty_penalty = 0.0;
+
+   if(!UseEconomicCalendarContext)
+      return;
+
+   int base = g_profiles[index].base_index;
+   int quote = g_profiles[index].quote_index;
+   if(base < 0 || quote < 0)
+      return;
+
+   RefreshCalendarCache(base, now);
+   RefreshCalendarCache(quote, now);
+
+   CurrencyCalendarCache base_cache = g_calendar_cache[base];
+   CurrencyCalendarCache quote_cache = g_calendar_cache[quote];
+   calendar.available = (base_cache.available || quote_cache.available);
+   if(!calendar.available)
+      return;
+
+   calendar.relevant_event_nearby = (base_cache.relevant_event_nearby || quote_cache.relevant_event_nearby);
+   calendar.high_impact_nearby = (base_cache.high_impact_nearby || quote_cache.high_impact_nearby);
+   calendar.just_released = (base_cache.just_released || quote_cache.just_released);
+   calendar.importance_score = MathMax(base_cache.importance_score, quote_cache.importance_score);
+   calendar.uncertainty_penalty = MathMax(base_cache.uncertainty_penalty, quote_cache.uncertainty_penalty);
+
+   if(base_cache.proximity_minutes <= 0.0)
+      calendar.proximity_minutes = quote_cache.proximity_minutes;
+   else if(quote_cache.proximity_minutes <= 0.0)
+      calendar.proximity_minutes = base_cache.proximity_minutes;
+   else
+      calendar.proximity_minutes = MathMin(base_cache.proximity_minutes, quote_cache.proximity_minutes);
+
+   double release_bonus = (calendar.just_released ? 0.20 : 0.0);
+   double high_bonus = (calendar.high_impact_nearby ? 0.10 : 0.0);
+   calendar.score = Clamp01(0.60 + release_bonus + high_bonus -
+                            calendar.uncertainty_penalty * 0.30);
+}
+
+bool CalendarPreNewsBlock(const CalendarContext &calendar)
+{
+   if(!UseEconomicCalendarContext || !BlockImmediatelyBeforeHighImpactNews ||
+      !calendar.available || !calendar.high_impact_nearby || calendar.just_released)
+   {
+      return false;
+   }
+
+   return (calendar.proximity_minutes >= 0.0 &&
+           calendar.proximity_minutes <= (double)CalendarPreNewsBlockMinutes);
+}
+
+double ApplyScoreCap(const double score,
+                     const double cap,
+                     string &cap_reasons,
+                     const string reason)
+{
+   if(score <= cap)
+      return score;
+
+   if(cap_reasons != "")
+      cap_reasons += "|";
+   cap_reasons += reason;
+   return cap;
+}
+
+string BuildReasonSummary(const CompositeSignalScore &score, const string caps)
+{
+   string names[6];
+   double values[6];
+   int count = 0;
+   names[count] = "exec";
+   values[count] = score.execution.score;
+   count++;
+   names[count] = "breakout";
+   values[count] = score.breakout.score;
+   count++;
+   names[count] = "impulse";
+   values[count] = score.impulse.score;
+   count++;
+   names[count] = "flow";
+   values[count] = score.flow.score;
+   count++;
+   names[count] = "regime";
+   values[count] = score.regime.score;
+   count++;
+   if(score.calendar.available)
+   {
+      names[count] = "calendar";
+      values[count] = score.calendar.score;
+      count++;
+   }
+
+   string positives = TopReasonSummary(names, values, count, 3);
+   if(caps == "")
+      return "positive=" + positives;
+   return "positive=" + positives + "; caps=" + FirstDelimitedItems(caps, 3);
+}
+
+string TopReasonSummary(string &names[], double &values[], const int count, const int max_items)
+{
+   string summary = "";
+   bool used[];
+   ArrayResize(used, count);
+   for(int i = 0; i < count; i++)
+      used[i] = false;
+
+   for(int item = 0; item < max_items; item++)
+   {
+      int best_index = -1;
+      double best_value = -1.0;
+      for(int i = 0; i < count; i++)
+      {
+         if(used[i])
+            continue;
+         if(values[i] > best_value)
+         {
+            best_value = values[i];
+            best_index = i;
+         }
+      }
+
+      if(best_index < 0 || best_value < 0.50)
+         break;
+
+      used[best_index] = true;
+      if(summary != "")
+         summary += "|";
+      summary += StringFormat("%s=%.2f", names[best_index], best_value);
+   }
+
+   if(summary == "")
+      summary = "none";
+   return summary;
+}
+
+string FirstDelimitedItems(const string text, const int max_items)
+{
+   string parts[];
+   ushort separator = StringGetCharacter("|", 0);
+   int count = StringSplit(text, separator, parts);
+   if(count <= 0)
+      return text;
+
+   string result = "";
+   int take = IntMin(count, max_items);
+   for(int i = 0; i < take; i++)
+   {
+      if(result != "")
+         result += "|";
+      result += parts[i];
+   }
+
+   return result;
+}
+
+double CalculateBasketAgreement(const int index, const int direction)
+{
+   int base = g_profiles[index].base_index;
+   int quote = g_profiles[index].quote_index;
+   if(base < 0 || quote < 0)
+      return 0.50;
+
+   double agreeing_weight = 0.0;
+   double total_weight = 0.0;
+
+   for(int i = 0; i < ArraySize(g_profiles); i++)
+   {
+      if(i == index || !g_profiles[i].valid || !g_profiles[i].quote_fresh ||
+         g_profiles[i].atr_m1 <= 0.0 || g_profiles[i].pip_size <= 0.0 ||
+         g_profiles[i].base_index < 0 || g_profiles[i].quote_index < 0 ||
+         g_profiles[i].spread_pips <= 0.0 || g_profiles[i].spread_pips > MaxSpreadPips)
+      {
+         continue;
+      }
+
+      bool relevant = (g_profiles[i].base_index == base || g_profiles[i].quote_index == base ||
+                       g_profiles[i].base_index == quote || g_profiles[i].quote_index == quote);
+      if(!relevant)
+         continue;
+
+      double atr_pips = MathMax(g_profiles[i].atr_m1 / g_profiles[i].pip_size, 0.1);
+      double pair_move = Clamp(g_profiles[i].movement_5m_pips / (atr_pips * 1.2), -1.0, 1.0);
+      double expected = 0.0;
+
+      if(g_profiles[i].base_index == base)
+         expected += (double)direction;
+      if(g_profiles[i].quote_index == base)
+         expected -= (double)direction;
+      if(g_profiles[i].base_index == quote)
+         expected -= (double)direction;
+      if(g_profiles[i].quote_index == quote)
+         expected += (double)direction;
+
+      if(expected == 0.0)
+         continue;
+
+      double spread_weight = 1.0 / MathMax(1.0, SafeDiv(g_profiles[i].spread_pips,
+                                                        g_profiles[i].median_spread_pips,
+                                                        1.0));
+      double weight = Clamp(spread_weight / MathMax(atr_pips, 0.5), 0.05, 1.50);
+      total_weight += weight;
+
+      if(pair_move * expected > 0.03)
+         agreeing_weight += weight;
+      else if(pair_move * expected > -0.03)
+         agreeing_weight += weight * 0.50;
+   }
+
+   if(total_weight <= 0.0)
+      return 0.50;
+
+   return Clamp01(agreeing_weight / total_weight);
+}
+
+bool SpreadOnlyBreakout(const int index, const int direction)
+{
+   double breakout_distance = BreakoutDistance(index, direction);
+   if(breakout_distance <= 0.0)
+      return false;
+
+   double spread_price = MathMax(g_profiles[index].ask - g_profiles[index].bid, 0.0);
+   double directional_10s = DirectionalValue(g_profiles[index].speed_10s_pips, direction);
+   double directional_30s = DirectionalValue(g_profiles[index].speed_30s_pips, direction);
+
+   return (breakout_distance <= spread_price * 1.20 &&
+           directional_10s < g_profiles[index].spread_pips * 0.60 &&
+           directional_30s < g_profiles[index].spread_pips * 0.90);
+}
+
+double SessionQualityScore(const datetime now)
+{
+   MqlDateTime parts;
+   TimeToStruct(now, parts);
+   int hour = parts.hour;
+
+   if(hour >= 7 && hour <= 16)
+      return 1.00;  // London and early New York liquidity.
+   if(hour >= 17 && hour <= 20)
+      return 0.82;  // Late New York can still trend but liquidity decays.
+   if(hour >= 1 && hour <= 6)
+      return 0.72;  // Asia can move JPY/AUD/NZD but basket breakouts need confirmation.
+   if(hour >= 21 && hour <= 22)
+      return 0.55;
+   return 0.35;
+}
+
+void InitializeCalendarCache()
+{
+   for(int i = 0; i < CURRENCY_COUNT; i++)
+   {
+      g_calendar_cache[i].currency = g_currency_codes[i];
+      g_calendar_cache[i].refreshed_at = 0;
+      g_calendar_cache[i].available = false;
+      g_calendar_cache[i].relevant_event_nearby = false;
+      g_calendar_cache[i].high_impact_nearby = false;
+      g_calendar_cache[i].just_released = false;
+      g_calendar_cache[i].score = 0.65;
+      g_calendar_cache[i].proximity_minutes = 0.0;
+      g_calendar_cache[i].importance_score = 0.0;
+      g_calendar_cache[i].uncertainty_penalty = 0.0;
+   }
+}
+
+void RefreshCalendarCache(const int currency_index, const datetime now)
+{
+   if(currency_index < 0 || currency_index >= CURRENCY_COUNT)
+      return;
+   if(!UseEconomicCalendarContext)
+      return;
+   if(g_calendar_cache[currency_index].refreshed_at > 0 &&
+      now - g_calendar_cache[currency_index].refreshed_at < CALENDAR_REFRESH_SECONDS)
+   {
+      return;
+   }
+
+   CurrencyCalendarCache cache;
+   cache.currency = g_currency_codes[currency_index];
+   cache.refreshed_at = now;
+   cache.available = false;
+   cache.relevant_event_nearby = false;
+   cache.high_impact_nearby = false;
+   cache.just_released = false;
+   cache.score = 0.65;
+   cache.proximity_minutes = 0.0;
+   cache.importance_score = 0.0;
+   cache.uncertainty_penalty = 0.0;
+
+   datetime server_now = TimeTradeServer();
+   if(server_now <= 0)
+      server_now = now;
+
+   datetime from_time = server_now - CalendarLookbackMinutes * 60;
+   datetime to_time = server_now + CalendarLookaheadMinutes * 60;
+   MqlCalendarValue values[];
+   ResetLastError();
+   int count = CalendarValueHistory(values, from_time, to_time, NULL, cache.currency);
+   if(count <= 0)
+   {
+      cache.available = false;
+      g_calendar_cache[currency_index] = cache;
+      return;
+   }
+
+   cache.available = true;
+   double nearest_abs_minutes = 999999.0;
+   for(int i = 0; i < count; i++)
+   {
+      MqlCalendarEvent calendar_event;
+      if(!CalendarEventById(values[i].event_id, calendar_event))
+         continue;
+
+      int importance = (int)calendar_event.importance;
+      bool high_impact = (importance >= 3);
+      if(CalendarHighImpactOnly && !high_impact)
+         continue;
+
+      double minutes_signed = (double)(values[i].time - server_now) / 60.0;
+      double abs_minutes = MathAbs(minutes_signed);
+      if(abs_minutes < nearest_abs_minutes)
+      {
+         nearest_abs_minutes = abs_minutes;
+         cache.proximity_minutes = minutes_signed;
+      }
+
+      cache.relevant_event_nearby = true;
+      cache.high_impact_nearby = (cache.high_impact_nearby || high_impact);
+      cache.just_released = (cache.just_released ||
+                             (minutes_signed <= 0.0 &&
+                              MathAbs(minutes_signed) <= (double)CalendarLookbackMinutes));
+      cache.importance_score = MathMax(cache.importance_score, Clamp01((double)importance / 3.0));
+      if(!cache.just_released && abs_minutes <= (double)CalendarLookaheadMinutes)
+         cache.uncertainty_penalty = MathMax(cache.uncertainty_penalty, high_impact ? 0.55 : 0.25);
+   }
+
+   if(cache.relevant_event_nearby)
+      cache.score = Clamp01(0.58 + (cache.high_impact_nearby ? 0.16 : 0.06) +
+                            (cache.just_released ? 0.18 : 0.0) -
+                            cache.uncertainty_penalty * 0.25);
+
+   g_calendar_cache[currency_index] = cache;
+}
+
+double ApplyScoreCalibration(const int index, const double raw_score, const datetime now)
+{
+   if(!UseScoreCalibrationFile || ArraySize(g_calibration_entries) <= 0)
+      return raw_score;
+
+   int bucket = (int)MathFloor(Clamp(raw_score, 0.0, 100.0) / 10.0) * 10;
+   string session = SessionName(now);
+   string symbol = UpperAscii(g_profiles[index].symbol);
+   string timeframe_label = g_profiles[index].timeframe_label;
+
+   for(int i = 0; i < ArraySize(g_calibration_entries); i++)
+   {
+      if(g_calibration_entries[i].sample_count < MinCalibrationSamples)
+         continue;
+      if(UpperAscii(g_calibration_entries[i].symbol) != symbol)
+         continue;
+      if(g_calibration_entries[i].timeframe_label != timeframe_label)
+         continue;
+      if(g_calibration_entries[i].session_name != session)
+         continue;
+      if(g_calibration_entries[i].score_bucket != bucket)
+         continue;
+
+      return Clamp(g_calibration_entries[i].calibrated_score, 0.0, 100.0);
+   }
+
+   return raw_score;
+}
+
+void LoadScoreCalibration()
+{
+   ArrayResize(g_calibration_entries, 0);
+   if(!UseScoreCalibrationFile)
+      return;
+
+   ResetLastError();
+   int handle = FileOpen(ScoreCalibrationFile, FILE_READ | FILE_CSV | FILE_ANSI, ',');
+   if(handle == INVALID_HANDLE)
+   {
+      if(!g_calibration_warning_printed)
+      {
+         PrintFormat("FXNews: calibration file '%s' not loaded, error %d. Raw scores will be used.",
+                     ScoreCalibrationFile,
+                     GetLastError());
+         g_calibration_warning_printed = true;
+      }
+      return;
+   }
+
+   bool first_row = true;
+   while(!FileIsEnding(handle))
+   {
+      string symbol = FileReadString(handle);
+      if(FileIsEnding(handle) && symbol == "")
+         break;
+      string timeframe_label = FileReadString(handle);
+      string session_name = FileReadString(handle);
+      string bucket_text = FileReadString(handle);
+      string calibrated_text = FileReadString(handle);
+      string samples_text = FileReadString(handle);
+      FileReadString(handle); // win_rate, kept for external analysis
+      FileReadString(handle); // avg_mfe_atr
+      FileReadString(handle); // avg_mae_atr
+
+      if(first_row)
+      {
+         first_row = false;
+         if(UpperAscii(symbol) == "SYMBOL")
+            continue;
+      }
+
+      if(symbol == "" || timeframe_label == "" || session_name == "")
+         continue;
+
+      CalibrationEntry entry;
+      entry.symbol = symbol;
+      entry.timeframe_label = timeframe_label;
+      entry.session_name = session_name;
+      entry.score_bucket = (int)StringToInteger(bucket_text);
+      entry.calibrated_score = StringToDouble(calibrated_text);
+      entry.sample_count = (int)StringToInteger(samples_text);
+
+      int next = ArraySize(g_calibration_entries);
+      ArrayResize(g_calibration_entries, next + 1);
+      g_calibration_entries[next] = entry;
+   }
+
+   FileClose(handle);
+   PrintFormat("FXNews: loaded %d calibration rows from %s.",
+               ArraySize(g_calibration_entries),
+               ScoreCalibrationFile);
+}
+
+string SessionName(const datetime now)
+{
+   MqlDateTime parts;
+   TimeToStruct(now, parts);
+   int hour = parts.hour;
+   if(hour >= 7 && hour <= 16)
+      return "LONDON_NY";
+   if(hour >= 17 && hour <= 20)
+      return "NY_LATE";
+   if(hour >= 1 && hour <= 6)
+      return "ASIA";
+   if(hour >= 21 && hour <= 22)
+      return "POST_NY";
+   return "ROLLOVER";
+}
+
+string BlockReasonText(const SignalBlockReason reason)
+{
+   if(reason == BLOCK_STALE_QUOTE)
+      return "stale_quote";
+   if(reason == BLOCK_BAD_SPREAD)
+      return "bad_spread";
+   if(reason == BLOCK_ROLLOVER)
+      return "rollover";
+   if(reason == BLOCK_NO_ATR)
+      return "no_atr";
+   if(reason == BLOCK_NO_RANGE)
+      return "no_range";
+   if(reason == BLOCK_NO_MOVEMENT_DATA)
+      return "no_movement_data";
+   if(reason == BLOCK_FAKEOUT)
+      return "fakeout";
+   if(reason == BLOCK_CONTEXT_CONFLICT)
+      return "context_conflict";
+   return "none";
 }
 
 void UpdateSignalState(const int index, const datetime now)
@@ -1434,6 +2562,7 @@ void ActivateSignal(const int index,
       g_profiles[index].strong_alert_sent = false;
       g_profiles[index].active_displayed = true;
       PushSignalHistory(index, direction, score, g_profiles[index].event_local_time);
+      RecordDisplayedSignal(index, direction, score, now);
       SendOptionalAlert(index, direction, score, now, false);
    }
    else if(score >= StrongAlertConfidence && !g_profiles[index].strong_alert_sent)
@@ -1495,6 +2624,393 @@ void SendOptionalAlert(const int index,
       SendNotification(prefix + text);
 
    g_profiles[index].last_alert_sent_time = now;
+}
+
+void RecordDisplayedSignal(const int index,
+                           const int direction,
+                           const double score,
+                           const datetime now)
+{
+   if(!EnableSignalLogging && !EnableOutcomeLabeling)
+      return;
+
+   CompositeSignalScore composite;
+   if(direction == DIR_UP)
+      composite = g_profiles[index].composite_up;
+   else
+      composite = g_profiles[index].composite_down;
+
+   g_signal_sequence++;
+   string signal_id = StringFormat("%I64d_%s_%s_%d",
+                                   (long)now,
+                                   g_profiles[index].symbol,
+                                   g_profiles[index].timeframe_label,
+                                   (int)g_signal_sequence);
+
+   if(EnableSignalLogging)
+      AppendSignalLogRow(signal_id, index, direction, score, now, composite);
+
+   if(EnableOutcomeLabeling && EnableSignalLogging)
+      AddPendingOutcome(signal_id, index, direction, now);
+}
+
+void AddPendingOutcome(const string signal_id,
+                       const int index,
+                       const int direction,
+                       const datetime now)
+{
+   int slot = -1;
+   for(int i = 0; i < ArraySize(g_pending_outcomes); i++)
+   {
+      if(!g_pending_outcomes[i].active)
+      {
+         slot = i;
+         break;
+      }
+   }
+
+   if(slot < 0)
+   {
+      if(ArraySize(g_pending_outcomes) < MAX_PENDING_OUTCOMES)
+      {
+         slot = ArraySize(g_pending_outcomes);
+         ArrayResize(g_pending_outcomes, slot + 1);
+      }
+      else
+      {
+         slot = 0;
+      }
+   }
+
+   g_pending_outcomes[slot].active = true;
+   g_pending_outcomes[slot].signal_id = signal_id;
+   g_pending_outcomes[slot].symbol = g_profiles[index].symbol;
+   g_pending_outcomes[slot].timeframe_label = g_profiles[index].timeframe_label;
+   g_pending_outcomes[slot].direction = direction;
+   g_pending_outcomes[slot].signal_server_time = now;
+   g_pending_outcomes[slot].signal_local_time = g_profiles[index].event_local_time;
+   g_pending_outcomes[slot].entry_mid = g_profiles[index].mid;
+   g_pending_outcomes[slot].atr_price = g_profiles[index].atr_m1;
+   g_pending_outcomes[slot].pip_size = g_profiles[index].pip_size;
+   g_pending_outcomes[slot].mfe_pips = 0.0;
+   g_pending_outcomes[slot].mae_pips = 0.0;
+   g_pending_outcomes[slot].horizon1_written = false;
+   g_pending_outcomes[slot].horizon2_written = false;
+   g_pending_outcomes[slot].horizon3_written = false;
+}
+
+void UpdatePendingOutcomes(const datetime now)
+{
+   if(!EnableOutcomeLabeling || !EnableSignalLogging)
+      return;
+
+   for(int i = 0; i < ArraySize(g_pending_outcomes); i++)
+   {
+      if(!g_pending_outcomes[i].active)
+         continue;
+
+      double mid = 0.0;
+      if(!FindCurrentMidForSymbol(g_pending_outcomes[i].symbol, mid))
+         continue;
+
+      double directional_move_pips = DirectionalValue(mid - g_pending_outcomes[i].entry_mid,
+                                                      g_pending_outcomes[i].direction) /
+                                     MathMax(g_pending_outcomes[i].pip_size, 0.00000001);
+      double adverse_move_pips = -directional_move_pips;
+      if(directional_move_pips > g_pending_outcomes[i].mfe_pips)
+         g_pending_outcomes[i].mfe_pips = directional_move_pips;
+      if(adverse_move_pips > g_pending_outcomes[i].mae_pips)
+         g_pending_outcomes[i].mae_pips = adverse_move_pips;
+
+      int age_seconds = (int)(now - g_pending_outcomes[i].signal_server_time);
+      if(!g_pending_outcomes[i].horizon1_written && age_seconds >= OutcomeHorizonMinutes1 * 60)
+      {
+         AppendOutcomeLogRow(g_pending_outcomes[i], OutcomeHorizonMinutes1, now);
+         g_pending_outcomes[i].horizon1_written = true;
+      }
+      if(!g_pending_outcomes[i].horizon2_written && age_seconds >= OutcomeHorizonMinutes2 * 60)
+      {
+         AppendOutcomeLogRow(g_pending_outcomes[i], OutcomeHorizonMinutes2, now);
+         g_pending_outcomes[i].horizon2_written = true;
+      }
+      if(!g_pending_outcomes[i].horizon3_written && age_seconds >= OutcomeHorizonMinutes3 * 60)
+      {
+         AppendOutcomeLogRow(g_pending_outcomes[i], OutcomeHorizonMinutes3, now);
+         g_pending_outcomes[i].horizon3_written = true;
+         g_pending_outcomes[i].active = false;
+      }
+   }
+}
+
+bool FindCurrentMidForSymbol(const string symbol, double &mid)
+{
+   string target = UpperAscii(symbol);
+   for(int i = 0; i < ArraySize(g_profiles); i++)
+   {
+      if(UpperAscii(g_profiles[i].symbol) == target &&
+         g_profiles[i].quote_fresh &&
+         g_profiles[i].mid > 0.0)
+      {
+         mid = g_profiles[i].mid;
+         return true;
+      }
+   }
+
+   mid = 0.0;
+   return false;
+}
+
+void AppendSignalLogRow(const string signal_id,
+                        const int index,
+                        const int direction,
+                        const double score,
+                        const datetime now,
+                        const CompositeSignalScore &composite)
+{
+   int handle = OpenSignalLogForAppend();
+   if(handle == INVALID_HANDLE)
+      return;
+
+   FileWrite(handle,
+             "SIGNAL",
+             signal_id,
+             FormatLocalTimestamp(TimeLocal()),
+             TimeToString(now, TIME_DATE | TIME_SECONDS),
+             g_profiles[index].symbol,
+             g_profiles[index].timeframe_label,
+             DirectionText(direction),
+             (int)MathRound(score),
+             DoubleToString(composite.raw_score, 2),
+             DoubleToString(composite.calibrated_score, 2),
+             DoubleToString(composite.execution.spread_pips, 2),
+             DoubleToString(composite.execution.median_spread_pips, 2),
+             DoubleToString(composite.execution.spread_ratio, 3),
+             DoubleToString(composite.execution.cost_to_atr, 4),
+             DoubleToString(g_profiles[index].atr_m1, g_profiles[index].digits),
+             DoubleToString(g_profiles[index].range_width, g_profiles[index].digits),
+             DoubleToString(composite.breakout.compression_score, 3),
+             DoubleToString(composite.breakout.distance_score, 3),
+             DoubleToString(composite.breakout.close_location_score, 3),
+             DoubleToString(composite.breakout.hold_score, 3),
+             DoubleToString(composite.breakout.body_quality_score, 3),
+             DoubleToString(composite.breakout.wick_rejection_penalty, 3),
+             DoubleToString(composite.breakout.fakeout_penalty, 3),
+             DoubleToString(composite.impulse.speed_5s_z, 3),
+             DoubleToString(composite.impulse.speed_10s_z, 3),
+             DoubleToString(composite.impulse.speed_30s_z, 3),
+             DoubleToString(composite.impulse.speed_60s_z, 3),
+             DoubleToString(composite.impulse.acceleration_score, 3),
+             DoubleToString(composite.impulse.atr_expansion_score, 3),
+             DoubleToString(composite.impulse.tick_rate_z, 3),
+             DoubleToString(composite.impulse.tick_volume_z, 3),
+             DoubleToString(composite.impulse.exhaustion_penalty, 3),
+             DoubleToString(composite.flow.base_strength, 3),
+             DoubleToString(composite.flow.quote_strength, 3),
+             DoubleToString(composite.flow.directional_edge, 3),
+             DoubleToString(composite.flow.basket_agreement, 3),
+             DoubleToString(composite.flow.conflict_penalty, 3),
+             DoubleToString(composite.regime.session_score, 3),
+             DoubleToString(composite.regime.mtf_alignment_score, 3),
+             DoubleToString(composite.regime.m5_context_score, 3),
+             DoubleToString(composite.regime.m15_context_score, 3),
+             DoubleToString(composite.regime.volatility_regime_score, 3),
+             DoubleToString(composite.calendar.score, 3),
+             DoubleToString(composite.calendar.proximity_minutes, 2),
+             DoubleToString(composite.calendar.importance_score, 3),
+             BlockReasonText(composite.block_reason),
+             composite.reason_summary,
+             DoubleToString(g_profiles[index].mid, g_profiles[index].digits),
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "");
+
+   FileClose(handle);
+}
+
+void AppendOutcomeLogRow(const PendingOutcome &outcome,
+                         const int horizon_minutes,
+                         const datetime now)
+{
+   int handle = OpenSignalLogForAppend();
+   if(handle == INVALID_HANDLE)
+      return;
+
+   double atr_pips = MathMax(outcome.atr_price / MathMax(outcome.pip_size, 0.00000001), 0.1);
+   double mfe_atr = outcome.mfe_pips / atr_pips;
+   double mae_atr = outcome.mae_pips / atr_pips;
+   bool target_hit = (mfe_atr >= OutcomeTargetAtr && mae_atr < OutcomeStopAtr);
+   double continuation_score = Clamp01((mfe_atr - mae_atr + 0.50) / 1.50);
+   string label = "NEUTRAL";
+   if(target_hit)
+      label = "TARGET_BEFORE_STOP";
+   else if(mae_atr >= OutcomeStopAtr && mfe_atr < OutcomeTargetAtr)
+      label = "STOP_BEFORE_TARGET";
+   else if(mfe_atr >= OutcomeTargetAtr)
+      label = "TARGET_AND_STOP_UNKNOWN_ORDER";
+
+   FileWrite(handle,
+             "OUTCOME",
+             outcome.signal_id,
+             FormatLocalTimestamp(TimeLocal()),
+             TimeToString(now, TIME_DATE | TIME_SECONDS),
+             outcome.symbol,
+             outcome.timeframe_label,
+             DirectionText(outcome.direction),
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             "",
+             DoubleToString(outcome.entry_mid, 8),
+             horizon_minutes,
+             DoubleToString(outcome.mfe_pips, 2),
+             DoubleToString(outcome.mae_pips, 2),
+             DoubleToString(mfe_atr, 3),
+             DoubleToString(mae_atr, 3),
+             (target_hit ? "1" : "0"),
+             DoubleToString(continuation_score, 3),
+             label);
+
+   FileClose(handle);
+}
+
+int OpenSignalLogForAppend()
+{
+   if(SignalLogFile == "")
+      return INVALID_HANDLE;
+
+   ResetLastError();
+   int handle = FileOpen(SignalLogFile,
+                         FILE_READ | FILE_WRITE | FILE_CSV | FILE_ANSI | FILE_SHARE_READ,
+                         ',');
+   if(handle == INVALID_HANDLE)
+   {
+      PrintFormat("FXNews: could not open signal log '%s', error %d.",
+                  SignalLogFile,
+                  GetLastError());
+      return INVALID_HANDLE;
+   }
+
+   bool empty_file = (FileSize(handle) == 0);
+   FileSeek(handle, 0, SEEK_END);
+   if(empty_file || !g_signal_log_header_checked)
+   {
+      if(empty_file)
+         WriteSignalLogHeader(handle);
+      g_signal_log_header_checked = true;
+   }
+
+   return handle;
+}
+
+void WriteSignalLogHeader(const int handle)
+{
+   FileWrite(handle,
+             "row_type",
+             "signal_id",
+             "local_time",
+             "server_time",
+             "symbol",
+             "timeframe",
+             "direction",
+             "displayed_score",
+             "raw_score",
+             "calibrated_score",
+             "spread_pips",
+             "median_spread_pips",
+             "spread_ratio",
+             "cost_to_atr",
+             "atr",
+             "range_width",
+             "breakout_compression",
+             "breakout_distance",
+             "breakout_close_location",
+             "breakout_hold",
+             "breakout_body_quality",
+             "breakout_wick_penalty",
+             "breakout_fakeout_penalty",
+             "impulse_speed_5s_z",
+             "impulse_speed_10s_z",
+             "impulse_speed_30s_z",
+             "impulse_speed_60s_z",
+             "impulse_acceleration",
+             "impulse_atr_expansion",
+             "impulse_tick_rate_z",
+             "impulse_tick_volume_z",
+             "impulse_exhaustion_penalty",
+             "flow_base_strength",
+             "flow_quote_strength",
+             "flow_directional_edge",
+             "flow_basket_agreement",
+             "flow_conflict_penalty",
+             "regime_session",
+             "regime_mtf_alignment",
+             "regime_m5_context",
+             "regime_m15_context",
+             "regime_volatility",
+             "calendar_score",
+             "calendar_proximity_minutes",
+             "calendar_importance",
+             "block_reason",
+             "reason_summary",
+             "entry_reference_price",
+             "outcome_horizon_minutes",
+             "mfe_pips",
+             "mae_pips",
+             "mfe_atr",
+             "mae_atr",
+             "target_hit_before_stop",
+             "continuation_score",
+             "final_outcome_label");
+}
+
+string DirectionText(const int direction)
+{
+   if(direction == DIR_UP)
+      return "UP";
+   if(direction == DIR_DOWN)
+      return "DOWN";
+   return "NONE";
 }
 
 void UpdateDashboard()
@@ -1717,117 +3233,6 @@ double BreakoutDistance(const int index, const int direction)
    return 0.0;
 }
 
-double RangeCompressionScore(const int index)
-{
-   if(g_profiles[index].atr_m1 <= 0.0 || g_profiles[index].range_width <= 0.0)
-      return 0.0;
-
-   double range_atr = g_profiles[index].range_width / g_profiles[index].atr_m1;
-   if(range_atr <= 2.0)
-      return 100.0;
-   if(range_atr <= 5.0)
-      return 100.0 - (range_atr - 2.0) / 3.0 * 45.0;
-   if(range_atr <= 8.0)
-      return 55.0 - (range_atr - 5.0) / 3.0 * 40.0;
-   if(range_atr <= 10.0)
-      return 10.0;
-   return 0.0;
-}
-
-double DirectionalMovementScore(const int index, const int direction)
-{
-   double atr_pips = MathMax(g_profiles[index].atr_m1 / g_profiles[index].pip_size, 0.1);
-
-   double m5 = DirectionalValue(g_profiles[index].speed_5s_pips, direction);
-   double m10 = DirectionalValue(g_profiles[index].speed_10s_pips, direction);
-   double m30 = DirectionalValue(g_profiles[index].speed_30s_pips, direction);
-
-   double s5 = LinearScore(m5 / atr_pips, 0.02, 0.16);
-   double s10 = LinearScore(m10 / atr_pips, 0.04, 0.28);
-   double s30 = LinearScore(m30 / atr_pips, 0.08, 0.55);
-
-   return Clamp(s5 * 0.35 + s10 * 0.35 + s30 * 0.30, 0.0, 100.0);
-}
-
-double TickVolumeScore(const int index)
-{
-   double average_volume = g_profiles[index].average_m1_tick_volume;
-   if(average_volume <= 0.0)
-      return 45.0;
-
-   double active_volume = MathMax(g_profiles[index].current_m1_tick_volume,
-                                  g_profiles[index].last_completed_m1_tick_volume * 0.85);
-   double ratio = active_volume / average_volume;
-   return LinearScore(ratio, 0.70, 2.20);
-}
-
-double OutsideHoldScore(const int index, const int direction)
-{
-   datetime outside_since = (direction == DIR_UP ?
-                             g_profiles[index].outside_since_up :
-                             g_profiles[index].outside_since_down);
-   if(outside_since <= 0)
-      return 0.0;
-
-   int seconds = (int)(TimeCurrent() - outside_since);
-   if(seconds >= 8)
-      return 100.0;
-   if(seconds >= 4)
-      return 75.0;
-   if(seconds >= 2)
-      return 45.0;
-   return 20.0;
-}
-
-double CurrencyConfirmationScore(const int index, const int direction)
-{
-   if(!UseCurrencyStrength)
-      return 65.0;
-
-   int base = g_profiles[index].base_index;
-   int quote = g_profiles[index].quote_index;
-   if(base < 0 || quote < 0)
-      return 55.0;
-
-   double delta = (g_currency_strength[base] - g_currency_strength[quote]) * (double)direction;
-   return Clamp(55.0 + delta * 35.0, 0.0, 100.0);
-}
-
-double SpreadQualityScore(const int index)
-{
-   double spread = g_profiles[index].spread_pips;
-   if(spread <= 0.0 || spread > MaxSpreadPips)
-      return 0.0;
-
-   double median = g_profiles[index].median_spread_pips;
-   if(median <= 0.0)
-      median = spread;
-
-   double absolute_score = 100.0 - LinearScore(spread, MaxSpreadPips * 0.45, MaxSpreadPips) * 0.85;
-   double relative_score = 100.0 - LinearScore(spread / MathMax(median, 0.1), 1.0,
-                                               MaxSpreadMedianMultiplier) * 0.80;
-   return Clamp(MathMin(absolute_score, relative_score), 0.0, 100.0);
-}
-
-double CandleExpansionScore(const int index, const int direction)
-{
-   if(g_profiles[index].atr_m1 <= 0.0)
-      return 0.0;
-
-   double body_move = (g_profiles[index].current_m1_close - g_profiles[index].current_m1_open) *
-                      (double)direction;
-   double full_push = 0.0;
-
-   if(direction == DIR_UP)
-      full_push = g_profiles[index].current_m1_high - g_profiles[index].current_m1_open;
-   else
-      full_push = g_profiles[index].current_m1_open - g_profiles[index].current_m1_low;
-
-   double body_score = LinearScore(body_move / g_profiles[index].atr_m1, 0.05, 0.85);
-   double push_score = LinearScore(full_push / g_profiles[index].atr_m1, 0.10, 1.10);
-   return Clamp(body_score * 0.55 + push_score * 0.45, 0.0, 100.0);
-}
-
 double ContinuationScore(const int index, const int direction)
 {
    if(g_profiles[index].snapshot_count < 3)
@@ -1849,6 +3254,144 @@ double ContinuationScore(const int index, const int direction)
    double short_push = LinearScore(DirectionalValue(g_profiles[index].speed_5s_pips, direction), 0.0,
                                   MathMax(g_profiles[index].atr_m1 / g_profiles[index].pip_size * 0.12, 0.4));
    return Clamp(retention_score * 0.70 + short_push * 0.30, 0.0, 100.0);
+}
+
+double TickGapSeconds(const int index, const long time_msc)
+{
+   if(time_msc <= 0 || g_profiles[index].snapshot_count <= 0)
+      return 0.0;
+
+   int last_position = g_profiles[index].snapshot_write_index - 1;
+   if(last_position < 0)
+      last_position = SNAPSHOT_CAPACITY - 1;
+   int last_index = SnapshotIndex(index, last_position);
+   if(g_snapshots[last_index].time_msc <= 0)
+      return 0.0;
+
+   return MathMax(0.0, (double)(time_msc - g_snapshots[last_index].time_msc) / 1000.0);
+}
+
+double TickRateFromSnapshots(const int index, const int seconds_back)
+{
+   int count = g_profiles[index].snapshot_count;
+   if(count < 2 || seconds_back <= 0)
+      return 0.0;
+
+   long min_time = g_profiles[index].quote_time_msc - (long)seconds_back * 1000;
+   int observed = 0;
+   long first_time = 0;
+   long last_time = 0;
+
+   for(int logical = 0; logical < count; logical++)
+   {
+      int position = LogicalSnapshotPosition(index, logical);
+      int sample_index = SnapshotIndex(index, position);
+      long sample_time = g_snapshots[sample_index].time_msc;
+      if(sample_time < min_time || sample_time <= 0)
+         continue;
+      if(first_time <= 0)
+         first_time = sample_time;
+      last_time = sample_time;
+      observed++;
+   }
+
+   if(observed < 2 || last_time <= first_time)
+      return 0.0;
+
+   return (double)(observed - 1) / MathMax(1.0, (double)(last_time - first_time) / 1000.0);
+}
+
+double SpreadRobustZ(const int index)
+{
+   int count = g_profiles[index].spread_count;
+   if(count < 5)
+      return 0.0;
+
+   double values[];
+   ArrayResize(values, count);
+   for(int i = 0; i < count; i++)
+   {
+      int position = LogicalSpreadPosition(index, i);
+      values[i] = g_spread_history[SpreadIndex(index, position)];
+   }
+
+   double median = MedianOfArray(values, count);
+   double mad = MedianAbsDeviation(values, count, median);
+   return RobustZ(g_profiles[index].spread_pips, median, mad);
+}
+
+double SpeedRobustZ(const int index, const int direction, const int seconds_back)
+{
+   if(seconds_back <= 0 || g_profiles[index].pip_size <= 0.0)
+      return 0.0;
+
+   double median_rate = 0.0;
+   double mad_rate = 0.0;
+   SnapshotPipRateStats(index, median_rate, mad_rate);
+
+   double directional_rate = DirectionalValue(MovementPips(index, seconds_back), direction) / (double)seconds_back;
+   double atr_pips = MathMax(g_profiles[index].atr_m1 / g_profiles[index].pip_size, 0.1);
+   double fallback_mad = MathMax(atr_pips / 600.0, 0.01);
+   double denominator = MathMax(mad_rate * 1.4826, fallback_mad);
+   return (directional_rate - median_rate) / denominator;
+}
+
+void SnapshotPipRateStats(const int index, double &median_rate, double &mad_rate)
+{
+   median_rate = 0.0;
+   mad_rate = 0.0;
+   int count = g_profiles[index].snapshot_count;
+   if(count < 3 || g_profiles[index].pip_size <= 0.0)
+      return;
+
+   double rates[];
+   ArrayResize(rates, 0);
+   int added = 0;
+   for(int logical = 1; logical < count; logical++)
+   {
+      int prev_position = LogicalSnapshotPosition(index, logical - 1);
+      int curr_position = LogicalSnapshotPosition(index, logical);
+      int prev_index = SnapshotIndex(index, prev_position);
+      int curr_index = SnapshotIndex(index, curr_position);
+      long dt = g_snapshots[curr_index].time_msc - g_snapshots[prev_index].time_msc;
+      if(dt <= 0)
+         continue;
+
+      double pips = MathAbs(g_snapshots[curr_index].mid - g_snapshots[prev_index].mid) /
+                    g_profiles[index].pip_size;
+      ArrayResize(rates, added + 1);
+      rates[added] = pips / MathMax(0.001, (double)dt / 1000.0);
+      added++;
+   }
+
+   if(added <= 0)
+      return;
+
+   median_rate = MedianOfArray(rates, added);
+   mad_rate = MedianAbsDeviation(rates, added, median_rate);
+}
+
+double TickRateZ(const int index)
+{
+   double rate = g_profiles[index].tick_rate_per_sec;
+   if(rate <= 0.0)
+      return -1.0;
+
+   // Snapshot-derived tick rate is deliberately conservative; FX tick feeds differ by broker.
+   return (rate - 0.18) / 0.18;
+}
+
+double TickVolumeRobustZ(const int index)
+{
+   double average_volume = g_profiles[index].average_m1_tick_volume;
+   if(average_volume <= 0.0)
+      return 0.0;
+
+   // FX has no centralized real volume, so tick_volume is the practical default.
+   double active_volume = MathMax(g_profiles[index].current_m1_tick_volume,
+                                  g_profiles[index].last_completed_m1_tick_volume * 0.85);
+   double ratio = SafeDiv(active_volume, average_volume, 1.0);
+   return (ratio - 1.0) / 0.35;
 }
 
 double MovementPips(const int index, const int seconds_back)
@@ -2045,6 +3588,68 @@ double LinearScore(const double value, const double zero_level, const double ful
    if(value >= full_level)
       return 100.0;
    return (value - zero_level) / (full_level - zero_level) * 100.0;
+}
+
+double Clamp01(const double value)
+{
+   return Clamp(value, 0.0, 1.0);
+}
+
+double SmoothStep(const double edge0, const double edge1, const double x)
+{
+   if(edge1 == edge0)
+      return (x >= edge1 ? 1.0 : 0.0);
+
+   double t = Clamp01((x - edge0) / (edge1 - edge0));
+   return t * t * (3.0 - 2.0 * t);
+}
+
+double SafeDiv(const double numerator, const double denominator, const double fallback)
+{
+   if(MathAbs(denominator) <= 0.0000000001)
+      return fallback;
+   return numerator / denominator;
+}
+
+double MedianOfArray(double &values[], const int count)
+{
+   if(count <= 0)
+      return 0.0;
+
+   ArraySort(values);
+   if((count % 2) == 1)
+      return values[count / 2];
+   return (values[count / 2 - 1] + values[count / 2]) * 0.5;
+}
+
+double MedianAbsDeviation(double &values[], const int count, const double median)
+{
+   if(count <= 0)
+      return 0.0;
+
+   double deviations[];
+   ArrayResize(deviations, count);
+   for(int i = 0; i < count; i++)
+      deviations[i] = MathAbs(values[i] - median);
+
+   return MedianOfArray(deviations, count);
+}
+
+double RobustZ(const double value, const double median, const double mad)
+{
+   double denominator = mad * 1.4826;
+   if(denominator <= 0.0000001)
+   {
+      if(MathAbs(value - median) <= 0.0000001)
+         return 0.0;
+      return (value > median ? 4.0 : -4.0);
+   }
+   return (value - median) / denominator;
+}
+
+double ScoreFromZ(const double z, const double low, const double high)
+{
+   return SmoothStep(low, high, z);
 }
 
 double Clamp(const double value, const double min_value, const double max_value)

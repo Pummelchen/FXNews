@@ -4,6 +4,7 @@
 *.out
 *.tmp
 *.bak
+.mt5_experts_dir
 MQL5/Logs/
 MQL5/Profiles/
 MQL5/Tester/

@@ -13,10 +13,10 @@ The EA does not trade. It never opens, closes, modifies, or manages positions.
 
 ## Local MT5 Sync
 
-This checkout is configured to sync the EA source into:
+By default, the sync script copies the EA source into this repo-relative target:
 
 ```text
-/Users/andreborchert/Library/Application Support/net.metaquotes.wine.metatrader5/drive_c/Program Files/MetaTrader 5/MQL5/Experts/FXNews
+../MT5/Experts/FXNews
 ```
 
 Run the sync manually when needed:
@@ -24,6 +24,8 @@ Run the sync manually when needed:
 ```bash
 scripts/sync_to_mt5.sh
 ```
+
+For a local terminal install in another location, set `MT5_EXPERTS_DIR` when running the script, set local git config `fxnews.mt5ExpertsDir`, or put the path in an untracked `.mt5_experts_dir` file. Machine-specific paths are intentionally ignored by git.
 
 This repository also includes local git hooks in `.githooks/`. In this checkout, `core.hooksPath` is set to `.githooks` so post-commit, post-checkout, and post-merge operations refresh the synced MT5 copy.
 

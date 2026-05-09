@@ -2,10 +2,10 @@
 
 ## Local Sync Path
 
-The project sync script copies the production EA to:
+By default, the project sync script copies the production EA to this repo-relative target:
 
 ```text
-/Users/andreborchert/Library/Application Support/net.metaquotes.wine.metatrader5/drive_c/Program Files/MetaTrader 5/MQL5/Experts/FXNews/FXNews.mq5
+../MT5/Experts/FXNews/FXNews.mq5
 ```
 
 Run:
@@ -13,6 +13,8 @@ Run:
 ```bash
 scripts/sync_to_mt5.sh
 ```
+
+For a local terminal install in another location, set `MT5_EXPERTS_DIR` when running the script, set local git config `fxnews.mt5ExpertsDir`, or put the path in an untracked `.mt5_experts_dir` file. Machine-specific paths are intentionally ignored by git.
 
 ## Compile
 

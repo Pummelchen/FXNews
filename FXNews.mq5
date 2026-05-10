@@ -130,6 +130,10 @@ input int AutotuneMinSignals = 100;
 #define DASHBOARD_ROW_HEIGHT 24
 #define DASHBOARD_FONT_SIZE 11
 #define SIGNAL_HISTORY_SIZE 5
+#define SIGNAL_MESSAGE_REFRESH_SECONDS 10
+#define SIGNAL_MESSAGE_MIN_SCORE 70.0
+#define STATUS_ROW_INDEX 1
+#define SIGNAL_FIRST_ROW_INDEX 3
 #define CALENDAR_REFRESH_SECONDS 60
 #define SESSION_COUNT 6
 
@@ -551,7 +555,9 @@ SymbolProfile g_profiles[];
 PriceSnapshot g_snapshots[];
 double g_spread_history[];
 SignalHistoryEntry g_signal_history[SIGNAL_HISTORY_SIZE];
+SignalHistoryEntry g_visible_signal_history[SIGNAL_HISTORY_SIZE];
 int g_signal_history_count = 0;
+int g_visible_signal_history_count = 0;
 ENUM_TIMEFRAMES g_scan_timeframes[];
 string g_scan_timeframe_labels[];
 double g_currency_strength[CURRENCY_COUNT];
@@ -571,6 +577,7 @@ int g_last_active_profiles = 0;
 int g_last_tick_history_ok = 0;
 
 datetime g_last_dashboard_update = 0;
+datetime g_last_signal_message_refresh = 0;
 string g_object_prefix = "COBR_";
 bool g_historical_run_started = false;
 bool g_historical_run_finished = false;
@@ -4554,15 +4561,19 @@ string DirectionText(const int direction)
 
 void UpdateDashboard()
 {
-   int row = 0;
-   SetActivityStatusRow(row);
-   row++;
+   ObjectDelete(0, DashboardName(0));
+   SetActivityStatusRow(STATUS_ROW_INDEX);
+   ObjectDelete(0, DashboardName(2));
 
-   for(int i = 0; i < g_signal_history_count && row <= SIGNAL_HISTORY_SIZE; i++)
+   RefreshVisibleSignalHistoryIfDue();
+
+   int row = SIGNAL_FIRST_ROW_INDEX;
+   int max_row = SIGNAL_FIRST_ROW_INDEX + SIGNAL_HISTORY_SIZE;
+   for(int i = 0; i < g_visible_signal_history_count && row < max_row; i++)
    {
-      if(!g_signal_history[i].used || g_signal_history[i].text == "")
+      if(!g_visible_signal_history[i].used || g_visible_signal_history[i].text == "")
          continue;
-      SetDashboardRow(row, g_signal_history[i].text, g_signal_history[i].text, clrWhite);
+      SetDashboardRow(row, g_visible_signal_history[i].text, g_visible_signal_history[i].text, clrWhite);
       row++;
    }
 
@@ -4573,7 +4584,9 @@ void UpdateDashboard()
 
 void UpdateActivityStatusLine()
 {
-   SetActivityStatusRow(0);
+   ObjectDelete(0, DashboardName(0));
+   SetActivityStatusRow(STATUS_ROW_INDEX);
+   ObjectDelete(0, DashboardName(2));
    ChartRedraw(0);
 }
 
@@ -4756,25 +4769,79 @@ string DashboardTooltip(const CompositeSignalScore &score)
                        score.calendar.state_tag);
 }
 
+void RefreshVisibleSignalHistoryIfDue()
+{
+   datetime now = TimeLocal();
+   if(g_last_signal_message_refresh == 0 ||
+      now - g_last_signal_message_refresh >= SIGNAL_MESSAGE_REFRESH_SECONDS ||
+      (g_visible_signal_history_count == 0 && HasDisplayableSignalHistory()))
+   {
+      RefreshVisibleSignalHistory(now);
+   }
+}
+
+bool HasDisplayableSignalHistory()
+{
+   for(int i = 0; i < g_signal_history_count; i++)
+   {
+      if(g_signal_history[i].used &&
+         g_signal_history[i].text != "" &&
+         IsSignalMessageDisplayable(g_signal_history[i].score))
+      {
+         return true;
+      }
+   }
+   return false;
+}
+
+void RefreshVisibleSignalHistory(const datetime now)
+{
+   for(int i = 0; i < SIGNAL_HISTORY_SIZE; i++)
+      ResetSignalHistoryEntry(g_visible_signal_history[i]);
+
+   g_visible_signal_history_count = 0;
+   for(int i = 0; i < g_signal_history_count && g_visible_signal_history_count < SIGNAL_HISTORY_SIZE; i++)
+   {
+      if(!g_signal_history[i].used ||
+         g_signal_history[i].text == "" ||
+         !IsSignalMessageDisplayable(g_signal_history[i].score))
+      {
+         continue;
+      }
+
+      CopySignalHistoryEntry(g_signal_history[i], g_visible_signal_history[g_visible_signal_history_count]);
+      g_visible_signal_history_count++;
+   }
+   g_last_signal_message_refresh = now;
+}
+
+bool IsSignalMessageDisplayable(const double score)
+{
+   return ((int)MathRound(Clamp(score, 0.0, 100.0)) >= (int)SIGNAL_MESSAGE_MIN_SCORE);
+}
+
 void PushSignalHistory(const int index,
                        const int direction,
                        const double score,
                        const datetime local_time)
 {
+   if(!IsSignalMessageDisplayable(score))
+      return;
+
+   string symbol = g_profiles[index].symbol;
+   string timeframe_label = g_profiles[index].timeframe_label;
+   int existing = FindSignalHistoryEntry(symbol, timeframe_label, direction);
+   if(existing >= 0)
+   {
+      MoveSignalHistoryEntryToTop(existing);
+      SetSignalHistoryEntry(g_signal_history[0], symbol, timeframe_label, direction, score, local_time);
+      return;
+   }
+
    for(int i = SIGNAL_HISTORY_SIZE - 1; i > 0; i--)
       CopySignalHistoryEntry(g_signal_history[i - 1], g_signal_history[i]);
 
-   g_signal_history[0].used = true;
-   g_signal_history[0].symbol = g_profiles[index].symbol;
-   g_signal_history[0].timeframe_label = g_profiles[index].timeframe_label;
-   g_signal_history[0].direction = direction;
-   g_signal_history[0].local_time = local_time;
-   g_signal_history[0].score = score;
-   g_signal_history[0].text = FormatSignalHistoryText(g_signal_history[0].symbol,
-                                                      g_signal_history[0].timeframe_label,
-                                                      direction,
-                                                      score,
-                                                      local_time);
+   SetSignalHistoryEntry(g_signal_history[0], symbol, timeframe_label, direction, score, local_time);
 
    if(g_signal_history_count < SIGNAL_HISTORY_SIZE)
       g_signal_history_count++;
@@ -4786,25 +4853,29 @@ void UpdateSignalHistory(const int index, const int direction, const double scor
    if(local_time <= 0)
       return;
 
-   for(int i = 0; i < g_signal_history_count; i++)
-   {
-      if(!g_signal_history[i].used)
-         continue;
+   string symbol = g_profiles[index].symbol;
+   string timeframe_label = g_profiles[index].timeframe_label;
+   int existing = FindSignalHistoryEntry(symbol, timeframe_label, direction);
 
-      if(g_signal_history[i].symbol == g_profiles[index].symbol &&
-         g_signal_history[i].timeframe_label == g_profiles[index].timeframe_label &&
-         g_signal_history[i].direction == direction &&
-         g_signal_history[i].local_time == local_time)
-      {
-         g_signal_history[i].score = score;
-         g_signal_history[i].text = FormatSignalHistoryText(g_signal_history[i].symbol,
-                                                            g_signal_history[i].timeframe_label,
-                                                            direction,
-                                                            score,
-                                                            local_time);
-         return;
-      }
+   if(!IsSignalMessageDisplayable(score))
+   {
+      if(existing >= 0)
+         RemoveSignalHistoryEntry(existing);
+      return;
    }
+
+   if(existing < 0)
+   {
+      PushSignalHistory(index, direction, score, local_time);
+      return;
+   }
+
+   SetSignalHistoryEntry(g_signal_history[existing],
+                         symbol,
+                         timeframe_label,
+                         direction,
+                         score,
+                         g_signal_history[existing].local_time);
 }
 
 void CopySignalHistoryEntry(const SignalHistoryEntry &source, SignalHistoryEntry &target)
@@ -4816,6 +4887,76 @@ void CopySignalHistoryEntry(const SignalHistoryEntry &source, SignalHistoryEntry
    target.local_time = source.local_time;
    target.score = source.score;
    target.text = source.text;
+}
+
+void SetSignalHistoryEntry(SignalHistoryEntry &entry,
+                           const string symbol,
+                           const string timeframe_label,
+                           const int direction,
+                           const double score,
+                           const datetime local_time)
+{
+   entry.used = true;
+   entry.symbol = symbol;
+   entry.timeframe_label = timeframe_label;
+   entry.direction = direction;
+   entry.local_time = local_time;
+   entry.score = score;
+   entry.text = FormatSignalHistoryText(symbol, timeframe_label, direction, score, local_time);
+}
+
+void ResetSignalHistoryEntry(SignalHistoryEntry &entry)
+{
+   entry.used = false;
+   entry.symbol = "";
+   entry.timeframe_label = "";
+   entry.direction = DIR_NONE;
+   entry.local_time = 0;
+   entry.score = 0.0;
+   entry.text = "";
+}
+
+int FindSignalHistoryEntry(const string symbol,
+                           const string timeframe_label,
+                           const int direction)
+{
+   for(int i = 0; i < g_signal_history_count; i++)
+   {
+      if(g_signal_history[i].used &&
+         g_signal_history[i].symbol == symbol &&
+         g_signal_history[i].timeframe_label == timeframe_label &&
+         g_signal_history[i].direction == direction)
+      {
+         return i;
+      }
+   }
+   return -1;
+}
+
+void MoveSignalHistoryEntryToTop(const int entry_index)
+{
+   if(entry_index <= 0 || entry_index >= g_signal_history_count)
+      return;
+
+   SignalHistoryEntry moved;
+   CopySignalHistoryEntry(g_signal_history[entry_index], moved);
+   for(int i = entry_index; i > 0; i--)
+      CopySignalHistoryEntry(g_signal_history[i - 1], g_signal_history[i]);
+   CopySignalHistoryEntry(moved, g_signal_history[0]);
+}
+
+void RemoveSignalHistoryEntry(const int entry_index)
+{
+   if(entry_index < 0 || entry_index >= g_signal_history_count)
+      return;
+
+   for(int i = entry_index; i < g_signal_history_count - 1; i++)
+      CopySignalHistoryEntry(g_signal_history[i + 1], g_signal_history[i]);
+
+   g_signal_history_count--;
+   if(g_signal_history_count < 0)
+      g_signal_history_count = 0;
+   ResetSignalHistoryEntry(g_signal_history[g_signal_history_count]);
 }
 
 void EnsureDashboardObjects()

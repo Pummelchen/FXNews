@@ -12,9 +12,11 @@ The first line is reserved for activity status, for example:
 FXNews - BREAKOUT RADAR | LIVE scanning 252 profiles | valid=28 invalid=0 active=1 | scan 8.4ms | 2026-05-16 15:35:45
 ```
 
-No empty placeholders are displayed.
+No empty placeholders are displayed. The live view leaves one empty spacer row above the status line and one empty spacer row before the signal messages.
 
 The status line uses the current chart line color, and signal messages are white.
+
+Signal messages are shown only at `70%` or higher. The visible message list refreshes at most every 10 seconds, and repeated `symbol + timeframe + direction` rows are suppressed when only the percentage changes.
 
 The percentage is an alert-ranking score, not a guaranteed win probability and not an automatic entry instruction. Disk-based calibration and CSV logging are intentionally disabled.
 

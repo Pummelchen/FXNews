@@ -1,12 +1,18 @@
 # Signal Logic
 
-FXNews displays a raw event-quality score. The dashboard status column shows `RAW`:
+FXNews displays raw event-quality scores in the latest-five message list:
 
 ```text
-SYMBOL TIMEFRAME UP|DOWN NN% RAW
+YYYY-MM-DD HH:MM:SS - SYMBOL TIMEFRAME UP|DOWN - NN%
 ```
 
-The latest-five message list stays simple: `YYYY-MM-DD HH:MM:SS - SYMBOL TIMEFRAME UP|DOWN - NN%`.
+The first line is reserved for activity status, for example:
+
+```text
+BREAKOUT RADAR | LIVE scanning 252 profiles | valid=28 invalid=0 active=1 | scan 8.4ms | 2026-05-16 15:35:45
+```
+
+No empty placeholders are displayed.
 
 The percentage is an alert-ranking score, not a guaranteed win probability and not an automatic entry instruction. Disk-based calibration and CSV logging are intentionally disabled.
 
@@ -26,7 +32,7 @@ The raw component blend is mapped into a 0-100 score, then capped by hard practi
 
 ## Status
 
-- `RAW`: chart-only raw composite score. This is the normal status.
+- `RAW`: chart-only raw composite score. This is the internal score status; the compact latest-five message text only shows the percentage.
 
 Historical validation and autotune reports can help judge whether higher raw buckets are outperforming lower raw buckets for the current broker/feed. FXNews does not read calibration files and does not write score logs.
 

@@ -25,21 +25,15 @@ If MT5 still shows old `NewsScan`, `ChartOnlyBreakoutRadarEA`, or `FXNews` under
 
 ## Dashboard
 
-The dashboard is a scanner table, not a trade blotter:
+The live chart output is intentionally compact: one activity/status line plus the latest five real signal messages. Empty placeholders are not shown.
 
 ```text
-BREAKOUT RADAR | # SYMBOL TF DIR SCORE ST SESSION AGE SPR/ATR NEWS TAG GROUP REASON
-01 EURUSD     M5   UP    76% RAW    LONDON      14s 0.18 NEWS_NONE          LEAD:USD- BRK+ IMP+ FLOW+ EXEC+ RAW
-02 GBPUSD     M5   UP    71% RAW    LONDON      11s 0.22 NEWS_NONE          MEM:USD-  IMP+ FLOW+ RAW
+BREAKOUT RADAR | LIVE scanning 252 profiles | valid=28 invalid=0 active=1 | scan 8.4ms | 2026-05-16 15:35:45
+2026-05-16 15:35:45 - EURUSD M15 UP - 75%
+2026-05-16 15:32:10 - GBPJPY H1 DOWN - 69%
 ```
 
 `UP` means the base currency is strengthening against the quote currency. `DOWN` means the base currency is weakening against the quote currency.
-
-The latest five simple alert messages are also kept on-chart in this format:
-
-```text
-YYYY-MM-DD HH:MM:SS - SYMBOL TIMEFRAME UP|DOWN - NN%
-```
 
 ## What The Score Means
 

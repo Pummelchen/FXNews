@@ -35,12 +35,12 @@
 - `UseSessionAwareBaselines`: keeps separate spread/tick/ATR/range baselines by session. Default `true`.
 - `BaselineLookbackSamples`: rolling baseline memory. Default `500`.
 - `MinBaselineSamples`: samples before session baseline z-scores are trusted. Default `50`.
-- `ShowSessionOnDashboard`: includes session in dashboard rows. Default `true`.
+- `ShowSessionOnDashboard`: retained for compatibility with older input sets. The live chart now shows compact latest-five messages only.
 - `AsiaStartHourServer` / `AsiaEndHourServer`: Asia session hour range in broker server time. Default `0` to `7`.
 - `LondonStartHourServer` / `LondonEndHourServer`: London session hour range in broker server time. Default `7` to `16`.
 - `NewYorkStartHourServer` / `NewYorkEndHourServer`: New York session hour range in broker server time. Default `13` to `22`.
 - `LondonNYOverlapStartHourServer` / `LondonNYOverlapEndHourServer`: overlap session hour range in broker server time. Default `13` to `16`.
-- `MaxDashboardRows`: scanner rows shown. Default `12`.
+- `MaxDashboardRows`: retained for compatibility with older input sets. The live chart always shows one status line plus at most five signal messages.
 - `ShowOnlyGroupLeaders`: hides correlated group members. Default `false`.
 - `ShowBlockedSignalsDebug`: can display blocked candidates for troubleshooting. Default `false`.
 - `SignalTTLSeconds`: active signal time-to-live. Default `180`.
@@ -49,7 +49,7 @@
 - `UseCopyTicksForImpulse`: uses MT5 tick history quality checks for impulse scoring. Default `true`.
 - `CopyTicksLookbackSeconds`: tick history lookback. Default `60`.
 - `MinCopyTicksForGoodQuality`: minimum valid ticks for good quality. Default `12`.
-- `ShowDiagnosticsPanel`: adds scanner diagnostics to the chart. Default `false`.
+- `ShowDiagnosticsPanel`: retained for compatibility. Live diagnostics are now kept in the first status line/tooltip to avoid chart clutter.
 - `PrintDiagnosticsEveryMinute`: prints diagnostics to the Journal. Default `false`.
 - `HistoricalLookbackDays`: closed M1 history window for Validation and Autotune. Default `90`.
 - `HistoricalStepMinutes`: M1 simulation step size. Default `1`.

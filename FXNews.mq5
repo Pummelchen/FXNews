@@ -2001,15 +2001,13 @@ void AddHistoricalReportLine(const string line)
 
 void UpdateHistoricalReportDashboard()
 {
-   EnsureDashboardObjects();
    int rows = ArraySize(g_historical_report_lines);
-   for(int row = 0; row < DASHBOARD_MAX_OBJECTS; row++)
+   for(int row = 0; row < rows && row < DASHBOARD_MAX_OBJECTS; row++)
    {
-      string text = (row < rows ? g_historical_report_lines[row] : "");
-      ObjectSetString(0, DashboardName(row), OBJPROP_TEXT, text);
-      ObjectSetString(0, DashboardName(row), OBJPROP_TOOLTIP, text);
-      ObjectSetInteger(0, DashboardName(row), OBJPROP_COLOR, clrRed);
+      string text = g_historical_report_lines[row];
+      SetDashboardRow(row, text, text);
    }
+   DeleteDashboardRowsFrom(rows);
    ChartRedraw(0);
 }
 
@@ -2367,6 +2365,8 @@ void ScanAll(const bool force_dashboard)
       UpdateDashboard();
       g_last_dashboard_update = now;
    }
+   else
+      UpdateActivityStatusLine();
 
    if(PrintDiagnosticsEveryMinute && (g_last_diagnostics_print == 0 || now - g_last_diagnostics_print >= 60))
    {
@@ -4552,48 +4552,44 @@ string DirectionText(const int direction)
 
 void UpdateDashboard()
 {
-   EnsureDashboardObjects();
-   DashboardSignal signals[];
-   CollectDashboardSignals(signals);
-   SortDashboardSignals(signals);
+   int row = 0;
+   SetActivityStatusRow(row);
+   row++;
 
-   ObjectSetString(0, DashboardName(0), OBJPROP_TEXT,
-                   "BREAKOUT RADAR | # SYMBOL TF DIR SCORE ST SESSION AGE SPR/ATR NEWS TAG GROUP REASON");
-   ObjectSetInteger(0, DashboardName(0), OBJPROP_COLOR, clrRed);
-   ObjectSetString(0, DashboardName(0), OBJPROP_TOOLTIP, DiagnosticsText());
-
-   int rows = IntMin(MaxDashboardRows, ArraySize(signals));
-   for(int row = 0; row < MaxDashboardRows; row++)
+   for(int i = 0; i < g_signal_history_count && row <= SIGNAL_HISTORY_SIZE; i++)
    {
-      int object_row = row + 1;
-      if(row < rows)
-      {
-         ObjectSetString(0, DashboardName(object_row), OBJPROP_TEXT, signals[row].text);
-         ObjectSetString(0, DashboardName(object_row), OBJPROP_TOOLTIP, signals[row].tooltip);
-         ObjectSetInteger(0, DashboardName(object_row), OBJPROP_COLOR, clrRed);
-      }
-      else
-      {
-         ObjectSetString(0, DashboardName(object_row), OBJPROP_TEXT, "");
-         ObjectSetString(0, DashboardName(object_row), OBJPROP_TOOLTIP, "");
-      }
+      if(!g_signal_history[i].used || g_signal_history[i].text == "")
+         continue;
+      SetDashboardRow(row, g_signal_history[i].text, g_signal_history[i].text);
+      row++;
    }
 
-   int next_row = MaxDashboardRows + 1;
-   if(ShowDiagnosticsPanel && next_row < DASHBOARD_MAX_OBJECTS)
-   {
-      ObjectSetString(0, DashboardName(next_row), OBJPROP_TEXT, DiagnosticsText());
-      ObjectSetString(0, DashboardName(next_row), OBJPROP_TOOLTIP, DiagnosticsText());
-      next_row++;
-   }
-
-   for(int row = next_row; row < DASHBOARD_MAX_OBJECTS; row++)
-   {
-      ObjectSetString(0, DashboardName(row), OBJPROP_TEXT, "");
-      ObjectSetString(0, DashboardName(row), OBJPROP_TOOLTIP, "");
-   }
+   DeleteDashboardRowsFrom(row);
 
    ChartRedraw(0);
+}
+
+void UpdateActivityStatusLine()
+{
+   SetActivityStatusRow(0);
+   ChartRedraw(0);
+}
+
+void SetActivityStatusRow(const int row)
+{
+   SetDashboardRow(row, ActivityStatusText(), DiagnosticsText());
+}
+
+string ActivityStatusText()
+{
+   return StringFormat("BREAKOUT RADAR | %s scanning %d profiles | valid=%d invalid=%d active=%d | scan %.1fms | %s",
+                       OperatingModeText(),
+                       ArraySize(g_profiles),
+                       g_last_valid_symbols,
+                       g_last_invalid_symbols,
+                       g_last_active_profiles,
+                       g_average_scan_ms,
+                       FormatLocalTimestamp(TimeLocal()));
 }
 
 void CollectDashboardSignals(DashboardSignal &signals[])
@@ -4814,29 +4810,56 @@ void CopySignalHistoryEntry(const SignalHistoryEntry &source, SignalHistoryEntry
 void EnsureDashboardObjects()
 {
    for(int i = 0; i < DASHBOARD_MAX_OBJECTS; i++)
-   {
-      string name = DashboardName(i);
-      if(ObjectFind(0, name) < 0)
-      {
-         ResetLastError();
-         if(!ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0))
-         {
-            PrintFormat("FXNews: failed to create dashboard object %s, error %d",
-                        name, GetLastError());
-            continue;
-         }
-      }
+      EnsureDashboardObject(i);
+}
 
-      ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 12);
-      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, 24 + i * 18);
-      ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 10);
-      ObjectSetInteger(0, name, OBJPROP_COLOR, clrRed);
-      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(0, name, OBJPROP_SELECTED, false);
-      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
-      ObjectSetString(0, name, OBJPROP_FONT, "Consolas");
+void EnsureDashboardObject(const int row)
+{
+   if(row < 0 || row >= DASHBOARD_MAX_OBJECTS)
+      return;
+
+   string name = DashboardName(row);
+   if(ObjectFind(0, name) < 0)
+   {
+      ResetLastError();
+      if(!ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0))
+      {
+         PrintFormat("FXNews: failed to create dashboard object %s, error %d",
+                     name, GetLastError());
+         return;
+      }
    }
+
+   ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 12);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, 24 + row * 18);
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 10);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clrRed);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_SELECTED, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+   ObjectSetString(0, name, OBJPROP_FONT, "Consolas");
+}
+
+void SetDashboardRow(const int row, const string text, const string tooltip)
+{
+   EnsureDashboardObject(row);
+   string name = DashboardName(row);
+   if(ObjectFind(0, name) < 0)
+      return;
+
+   ObjectSetString(0, name, OBJPROP_TEXT, text);
+   ObjectSetString(0, name, OBJPROP_TOOLTIP, tooltip);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clrRed);
+}
+
+void DeleteDashboardRowsFrom(const int first_row)
+{
+   int start = first_row;
+   if(start < 0)
+      start = 0;
+   for(int row = start; row < DASHBOARD_MAX_OBJECTS; row++)
+      ObjectDelete(0, DashboardName(row));
 }
 
 void CleanupDashboardObjects()

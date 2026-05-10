@@ -128,6 +128,7 @@ input int AutotuneMinSignals = 100;
 #define CURRENCY_COUNT 8
 #define DASHBOARD_MAX_OBJECTS 40
 #define DASHBOARD_ROW_HEIGHT 24
+#define DASHBOARD_FONT_SIZE 11
 #define SIGNAL_HISTORY_SIZE 5
 #define CALENDAR_REFRESH_SECONDS 60
 #define SESSION_COUNT 6
@@ -4843,7 +4844,7 @@ void EnsureDashboardObject(const int row)
    ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
    ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 12);
    ObjectSetInteger(0, name, OBJPROP_YDISTANCE, 24 + row * DASHBOARD_ROW_HEIGHT);
-   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 10);
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, DASHBOARD_FONT_SIZE);
    ObjectSetInteger(0, name, OBJPROP_COLOR, clrWhite);
    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
    ObjectSetInteger(0, name, OBJPROP_SELECTED, false);

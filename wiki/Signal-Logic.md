@@ -1,12 +1,12 @@
 # Signal Logic
 
-FXNews keeps the chart output simple:
+FXNews now separates the raw event-quality score from calibration status:
 
 ```text
-YYYY-MM-DD HH:MM:SS - SYMBOL TIMEFRAME UP|DOWN - NN%
+SYMBOL TIMEFRAME UP|DOWN NN% RAW|CAL|LOW-N|STALE
 ```
 
-The percentage is an internal event-quality radar score, not a guaranteed win probability and not an automatic entry instruction.
+The percentage is an alert-ranking score, not a guaranteed win probability and not an automatic entry instruction.
 
 ## Composite Score
 
@@ -18,8 +18,19 @@ The EA decomposes each directional candidate into explicit components:
 - Currency flow: base and quote strength, directional edge, weighted basket agreement, and conflict penalty.
 - Regime context: session quality, M5/M15 alignment, and volatility regime.
 - Calendar context: optional built-in MT5 economic-calendar proximity and high-impact context when enabled.
+- Tick quality: CopyTicks sample count, freshness, and coverage when available.
+- Calibration metadata: sample count, score bucket, profit-factor proxy, expectancy, and staleness.
 
 The raw component blend is mapped into a 0-100 score, then capped by hard practical rules. One strong feature cannot create an 80+ score by itself. Scores above 80 need good execution, real breakout or impulse quality, and no major context conflict. Scores above 90 require strong hold, strong flow, good regime context, and no serious uncertainty.
+
+## Score Status
+
+- `RAW`: no trusted calibration is active, so the raw composite score is displayed.
+- `CAL`: matching symbol/timeframe/session/direction/bucket calibration has enough fresh samples.
+- `LOW-N`: the raw score is high, but calibration sample count or expectancy is not strong enough for promotion.
+- `STALE`: matching calibration exists but is older than `CalibrationMaxAgeDays`.
+
+Strong alerts can require positive calibrated expectancy through `RequirePositiveExpectancyForStrongAlert`.
 
 ## Hard Gates
 
@@ -54,10 +65,24 @@ M5 and M15 context are used even when higher timeframes are scanned. Strong shor
 
 Calendar context can cap signals immediately before high-impact releases when configured, slightly support just-released events when price action agrees, or apply uncertainty caps when relevant events are nearby but not yet resolved.
 
+Dashboard calendar tags:
+
+- `NEWS_PRE_BLOCK`
+- `NEWS_JUST_RELEASED`
+- `NEWS_HIGH_IMPACT_NEAR`
+- `NEWS_NONE`
+- `NEWS_UNAVAILABLE`
+
+## Alert Grouping
+
+Correlated alerts are grouped by dominant currency flow, such as `USD-` for broad USD weakness. The dashboard marks a group leader using execution quality, score status, score, freshness, flow confirmation, and spread-to-ATR. `ShowOnlyGroupLeaders=true` suppresses correlated member rows.
+
 ## Self-Auditing Logs
 
 With `EnableSignalLogging=true`, the EA appends `SIGNAL` rows to `FXNews_signals.csv`. Rows include the visible score, raw score, calibrated score, execution metrics, component scores, cap reasons, and entry reference price.
 
-With `EnableOutcomeLabeling=true`, the EA later appends `OUTCOME` rows for 5, 15, and 30 minute horizons. Outcomes include MFE, MAE, MFE/ATR, MAE/ATR, target-before-stop labeling, continuation score, and a final label.
+With `EnableOutcomeLabeling=true`, the EA later appends `OUTCOME` rows for 5, 15, and 30 minute horizons. Outcomes include MFE, MAE, MFE/ATR, MAE/ATR, target-before-stop labeling, `final_outcome_label`, and `continuation_score` fields.
 
 Use the CSV to validate score buckets empirically. Compare 60-69, 70-79, 80-89, and 90+ buckets by continuation score, target-before-stop rate, MFE/ATR, and MAE/ATR. Higher scores should become stronger radar events over enough samples, not guaranteed winners.
+
+Preferred score buckets are now `60-64`, `65-69`, `70-74`, `75-79`, `80-84`, and `85+`.

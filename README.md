@@ -35,7 +35,7 @@ FXNews - BREAKOUT RADAR | LIVE scanning 252 profiles | valid=28 invalid=0 active
 
 `UP` means the base currency is strengthening against the quote currency. `DOWN` means the base currency is weakening against the quote currency.
 
-Signal messages are shown only at `70%` or higher, are refreshed at most every 10 seconds, and are deduplicated by symbol, timeframe, and direction so confidence-only changes do not create repeated rows.
+Signal messages are shown only at `70%` or higher, are refreshed at most every 10 seconds, sorted by displayed percentage descending, and deduplicated by symbol, timeframe, and direction so confidence-only changes do not create repeated rows.
 
 ## What The Score Means
 

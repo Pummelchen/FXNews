@@ -16,7 +16,7 @@ No empty placeholders are displayed. The live view leaves one empty spacer row a
 
 The status line uses the current chart line color, and signal messages are white.
 
-Signal messages are shown only at `70%` or higher. The visible message list refreshes at most every 10 seconds, and repeated `symbol + timeframe + direction` rows are suppressed when only the percentage changes.
+Signal messages are shown only at `70%` or higher. The visible message list refreshes at most every 10 seconds, sorts by displayed percentage descending, and suppresses repeated `symbol + timeframe + direction` rows when only the percentage changes.
 
 The percentage is an alert-ranking score, not a guaranteed win probability and not an automatic entry instruction. Disk-based calibration and CSV logging are intentionally disabled.
 

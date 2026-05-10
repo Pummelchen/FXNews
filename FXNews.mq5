@@ -4812,12 +4812,48 @@ void RefreshVisibleSignalHistory(const datetime now)
       CopySignalHistoryEntry(g_signal_history[i], g_visible_signal_history[g_visible_signal_history_count]);
       g_visible_signal_history_count++;
    }
+
+   SortVisibleSignalHistoryByScore();
    g_last_signal_message_refresh = now;
 }
 
 bool IsSignalMessageDisplayable(const double score)
 {
    return ((int)MathRound(Clamp(score, 0.0, 100.0)) >= (int)SIGNAL_MESSAGE_MIN_SCORE);
+}
+
+void SortVisibleSignalHistoryByScore()
+{
+   for(int i = 0; i < g_visible_signal_history_count - 1; i++)
+   {
+      for(int j = i + 1; j < g_visible_signal_history_count; j++)
+      {
+         if(SignalHistorySortsBefore(g_visible_signal_history[j], g_visible_signal_history[i]))
+         {
+            SignalHistoryEntry tmp;
+            CopySignalHistoryEntry(g_visible_signal_history[i], tmp);
+            CopySignalHistoryEntry(g_visible_signal_history[j], g_visible_signal_history[i]);
+            CopySignalHistoryEntry(tmp, g_visible_signal_history[j]);
+         }
+      }
+   }
+}
+
+bool SignalHistorySortsBefore(const SignalHistoryEntry &left,
+                              const SignalHistoryEntry &right)
+{
+   int left_percent = SignalHistoryScorePercent(left.score);
+   int right_percent = SignalHistoryScorePercent(right.score);
+   if(left_percent != right_percent)
+      return (left_percent > right_percent);
+   if(left.score != right.score)
+      return (left.score > right.score);
+   return (left.local_time > right.local_time);
+}
+
+int SignalHistoryScorePercent(const double score)
+{
+   return (int)MathRound(Clamp(score, 0.0, 100.0));
 }
 
 void PushSignalHistory(const int index,

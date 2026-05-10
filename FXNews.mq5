@@ -1,5 +1,7 @@
 #property strict
-#property description "Chart-only multi-symbol breakout radar. No trade execution."
+#property indicator_chart_window
+#property indicator_plots 0
+#property description "Chart-only multi-symbol breakout radar indicator. No trade execution. No disk I/O."
 
 enum ConfirmationMode
 {
@@ -77,22 +79,11 @@ input bool UseMultiTimeframeContextCaps = true;
 input double M5RejectAtr = -0.35;
 input double M15RejectAtr = -0.25;
 
-input bool EnableSignalLogging = true;
-input bool EnableOutcomeLabeling = true;
-input string SignalLogFile = "FXNews_signals.csv";
 input int OutcomeHorizonMinutes1 = 5;
 input int OutcomeHorizonMinutes2 = 15;
 input int OutcomeHorizonMinutes3 = 30;
 input double OutcomeTargetAtr = 0.50;
 input double OutcomeStopAtr = 0.35;
-
-input bool UseScoreCalibrationFile = false;
-input string ScoreCalibrationFile = "FXNews_calibration.csv";
-input int MinCalibrationSamples = 50;
-input int CalibrationMaxAgeDays = 30;
-input int MinBucketSamplesForPromotion = 100;
-input double MinBucketExpectancyForPromotion = 0.03;
-input bool RequirePositiveExpectancyForStrongAlert = true;
 
 input bool UseSessionAwareBaselines = true;
 input int BaselineLookbackSamples = 500;
@@ -137,10 +128,8 @@ input int AutotuneMinSignals = 100;
 #define CURRENCY_COUNT 8
 #define DASHBOARD_MAX_OBJECTS 40
 #define SIGNAL_HISTORY_SIZE 5
-#define MAX_PENDING_OUTCOMES 500
 #define CALENDAR_REFRESH_SECONDS 60
 #define SESSION_COUNT 6
-#define SCORE_BUCKET_COUNT 6
 
 enum BreakoutEventState
 {
@@ -157,10 +146,7 @@ enum BreakoutEventState
 
 enum ScoreStatus
 {
-   SCORE_RAW = 0,
-   SCORE_CALIBRATED = 1,
-   SCORE_LOW_SAMPLE = 2,
-   SCORE_STALE_CALIBRATION = 3
+   SCORE_RAW = 0
 };
 
 enum SessionBucket
@@ -279,14 +265,9 @@ struct CompositeSignalScore
 {
    bool valid;
    int direction;
-   double raw_score;          // 0..100 before calibration/caps
-   double calibrated_score;   // 0..100 after optional calibration
+   double raw_score;          // 0..100 before final caps
    double displayed_score;    // rounded dashboard score source
    ScoreStatus score_status;
-   int calibration_sample_count;
-   double calibration_expectancy_R;
-   double calibration_profit_factor;
-   datetime calibration_last_updated;
    int score_bucket;
    ExecutionQuality execution;
    BreakoutStructure breakout;
@@ -298,54 +279,6 @@ struct CompositeSignalScore
    string reason_summary;
    string human_reason;
    string compact_tags;
-};
-
-struct PendingOutcome
-{
-   bool active;
-   string signal_id;
-   string symbol;
-   string timeframe_label;
-   int direction;
-   datetime signal_server_time;
-   datetime signal_local_time;
-   double entry_mid;
-   double atr_price;
-   double pip_size;
-   double mfe_pips;
-   double mae_pips;
-   bool horizon1_written;
-   bool horizon2_written;
-   bool horizon3_written;
-};
-
-struct CalibrationEntry
-{
-   string symbol;
-   string timeframe_label;
-   string session_name;
-   int direction;
-   int score_bucket;
-   double calibrated_score;
-   int sample_count;
-   double profit_factor;
-   double expectancy_R;
-   datetime last_updated;
-};
-
-struct ScoreBucketStats
-{
-   int bucket_floor;
-   int sample_count;
-   double hit_rate_target_first;
-   double stop_first_rate;
-   double average_R;
-   double median_R;
-   double mean_MFE_pips;
-   double mean_MAE_pips;
-   double profit_factor_proxy;
-   double expectancy_R;
-   datetime last_updated;
 };
 
 struct SessionBaseline
@@ -372,7 +305,6 @@ struct DashboardSignal
    int direction;
    double score;
    double raw_score;
-   double calibrated_score;
    ScoreStatus score_status;
    datetime start_time;
    int age_seconds;
@@ -624,15 +556,8 @@ double g_currency_strength[CURRENCY_COUNT];
 int g_currency_samples[CURRENCY_COUNT];
 double g_currency_weight[CURRENCY_COUNT];
 string g_currency_codes[CURRENCY_COUNT] = {"EUR","USD","GBP","JPY","CHF","AUD","NZD","CAD"};
-PendingOutcome g_pending_outcomes[];
-CalibrationEntry g_calibration_entries[];
-ScoreBucketStats g_score_bucket_stats[SCORE_BUCKET_COUNT];
 SessionBaseline g_session_baselines[];
 CurrencyCalendarCache g_calendar_cache[CURRENCY_COUNT];
-long g_signal_sequence = 0;
-bool g_calibration_warning_printed = false;
-bool g_signal_log_header_checked = false;
-bool g_signal_log_writable = false;
 bool g_calendar_available = false;
 datetime g_last_diagnostics_print = 0;
 double g_average_scan_ms = 0.0;
@@ -663,15 +588,6 @@ int OnInit()
    }
 
    InitializeCalendarCache();
-   InitializeScoreBucketStats();
-   if(IsHistoricalMode())
-      g_signal_log_writable = false;
-   else
-   {
-      LoadScoreCalibration();
-      g_signal_log_writable = CheckSignalLogWritable();
-   }
-   ArrayResize(g_pending_outcomes, 0);
 
    AllocateHistoryBuffers();
 
@@ -708,6 +624,20 @@ void OnTimer()
    }
 
    ScanAll(false);
+}
+
+int OnCalculate(const int rates_total,
+                const int prev_calculated,
+                const datetime &time[],
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[])
+{
+   return rates_total;
 }
 
 bool ValidateInputs()
@@ -773,11 +703,9 @@ bool ValidateInputs()
 
    if(OutcomeHorizonMinutes1 < 1 || OutcomeHorizonMinutes2 < OutcomeHorizonMinutes1 ||
       OutcomeHorizonMinutes3 < OutcomeHorizonMinutes2 || OutcomeTargetAtr <= 0.0 ||
-      OutcomeStopAtr <= 0.0 || MinCalibrationSamples < 1 ||
-      CalibrationMaxAgeDays < 1 || MinBucketSamplesForPromotion < 1 ||
-      MinBucketExpectancyForPromotion < -10.0)
+      OutcomeStopAtr <= 0.0)
    {
-      Print("FXNews: logging/outcome inputs are inconsistent.");
+      Print("FXNews: outcome inputs are inconsistent.");
       return false;
    }
 
@@ -2053,7 +1981,7 @@ void SetHistoricalReportHeader(const string text)
 {
    ClearHistoricalReport();
    AddHistoricalReportLine(text);
-   AddHistoricalReportLine("The EA is not live-scanning in this mode and does not write validation files.");
+   AddHistoricalReportLine("The indicator is not live-scanning in this mode and does not write validation files.");
    UpdateHistoricalReportDashboard();
 }
 
@@ -2431,7 +2359,6 @@ void ScanAll(const bool force_dashboard)
    }
 
    UpdateAlertGroups(now);
-   UpdatePendingOutcomes(now);
    UpdateScanDiagnostics(scan_start);
 
    if(force_dashboard || g_last_dashboard_update == 0 ||
@@ -3158,13 +3085,8 @@ void ResetCompositeSignalScore(CompositeSignalScore &score, const int direction)
    score.valid = false;
    score.direction = direction;
    score.raw_score = 0.0;
-   score.calibrated_score = 0.0;
    score.displayed_score = 0.0;
    score.score_status = SCORE_RAW;
-   score.calibration_sample_count = 0;
-   score.calibration_expectancy_R = 0.0;
-   score.calibration_profit_factor = 0.0;
-   score.calibration_last_updated = 0;
    score.score_bucket = 0;
    score.block_reason = BLOCK_NONE;
    score.reason_summary = "";
@@ -3310,9 +3232,9 @@ void BuildCompositeSignalScore(const int index,
       raw01 = Clamp01(raw01 + 0.05);
 
    score.raw_score = 100.0 * SmoothStep(0.35, 0.92, raw01);
-   ApplyScoreCalibrationToComposite(index, now, score);
+   ApplyRawScoreStatusToComposite(score);
 
-   double capped = Clamp(score.calibrated_score, 0.0, 100.0);
+   double capped = Clamp(score.raw_score, 0.0, 100.0);
    string caps = "";
 
    if(!UseEconomicCalendarContext || !score.calendar.available)
@@ -3392,13 +3314,12 @@ void BuildCompositeSignalScore(const int index,
 
    if(DebugScoreBreakdown && DebugPrintToJournal && score.displayed_score >= MinDisplayConfidence)
    {
-      PrintFormat("FXNews score %s %s %s %d%% raw=%.1f cal=%.1f %s",
+      PrintFormat("FXNews score %s %s %s %d%% raw=%.1f %s",
                   g_profiles[index].symbol,
                   g_profiles[index].timeframe_label,
                   (direction == DIR_UP ? "UP" : "DOWN"),
                   (int)MathRound(score.displayed_score),
                   score.raw_score,
-                  score.calibrated_score,
                   score.reason_summary);
    }
 }
@@ -3920,9 +3841,6 @@ string BuildCompactTags(const CompositeSignalScore &score)
    AddTag(tags, score.execution.block_reason == BLOCK_BAD_SPREAD || score.execution.cost_to_atr > MaxSpreadToAtrRatio * 0.70, "SPREAD!");
    AddTag(tags, score.execution.block_reason == BLOCK_STALE_QUOTE || score.impulse.tick_state == "TICK_STALE", "STALE!");
    AddTag(tags, score.score_status == SCORE_RAW, "RAW");
-   AddTag(tags, score.score_status == SCORE_LOW_SAMPLE, "LOW-N");
-   AddTag(tags, score.score_status == SCORE_CALIBRATED, "CAL");
-   AddTag(tags, score.score_status == SCORE_STALE_CALIBRATION, "STALE-CAL");
    AddTag(tags, score.impulse.tick_state == "TICK_OK", "TICK_OK");
    AddTag(tags, score.impulse.tick_state == "TICK_THIN", "TICK_THIN");
    if(tags == "")
@@ -3965,12 +3883,7 @@ string BuildHumanReadableReason(const CompositeSignalScore &score, const SymbolP
       details += "no high-impact news nearby, ";
    else
       details += score.calendar.state_tag + ", ";
-   if(score.score_status == SCORE_LOW_SAMPLE)
-      details += StringFormat("low calibration sample N=%d, ", score.calibration_sample_count);
-   else if(score.score_status == SCORE_RAW)
-      details += "raw uncalibrated score, ";
-   else if(score.score_status == SCORE_STALE_CALIBRATION)
-      details += "stale calibration, ";
+   details += "raw chart-only score, ";
 
    if(StringLen(details) > 2)
       details = StringSubstr(details, 0, StringLen(details) - 2);
@@ -3979,12 +3892,8 @@ string BuildHumanReadableReason(const CompositeSignalScore &score, const SymbolP
 
 string ScoreStatusText(const ScoreStatus status)
 {
-   if(status == SCORE_CALIBRATED)
-      return "CAL";
-   if(status == SCORE_LOW_SAMPLE)
-      return "LOW-N";
-   if(status == SCORE_STALE_CALIBRATION)
-      return "STALE";
+   if(status == SCORE_RAW)
+      return "RAW";
    return "RAW";
 }
 
@@ -4175,99 +4084,11 @@ void RefreshCalendarCache(const int currency_index, const datetime now)
    g_calendar_cache[currency_index] = cache;
 }
 
-void ApplyScoreCalibrationToComposite(const int index,
-                                      const datetime now,
-                                      CompositeSignalScore &score)
+void ApplyRawScoreStatusToComposite(CompositeSignalScore &score)
 {
    score.score_bucket = ScoreBucketFloor(score.raw_score);
-   score.calibrated_score = score.raw_score;
    score.displayed_score = score.raw_score;
    score.score_status = SCORE_RAW;
-   score.calibration_sample_count = 0;
-   score.calibration_expectancy_R = 0.0;
-   score.calibration_profit_factor = 0.0;
-   score.calibration_last_updated = 0;
-
-   if(!UseScoreCalibrationFile || ArraySize(g_calibration_entries) <= 0)
-      return;
-
-   int entry_index = FindCalibrationEntryIndex(index, score.direction, score.score_bucket, now);
-   if(entry_index < 0)
-   {
-      score.score_status = SCORE_LOW_SAMPLE;
-      return;
-   }
-
-   CalibrationEntry entry = g_calibration_entries[entry_index];
-   score.calibration_sample_count = entry.sample_count;
-   score.calibration_expectancy_R = entry.expectancy_R;
-   score.calibration_profit_factor = entry.profit_factor;
-   score.calibration_last_updated = entry.last_updated;
-
-   if(entry.sample_count < MinCalibrationSamples)
-   {
-      score.score_status = SCORE_LOW_SAMPLE;
-      return;
-   }
-
-   if(entry.last_updated > 0 && now - entry.last_updated > CalibrationMaxAgeDays * 86400)
-   {
-      score.score_status = SCORE_STALE_CALIBRATION;
-      return;
-   }
-
-   if(score.raw_score >= StrongAlertConfidence &&
-      entry.sample_count < MinBucketSamplesForPromotion)
-   {
-      score.score_status = SCORE_LOW_SAMPLE;
-      return;
-   }
-
-   if(RequirePositiveExpectancyForStrongAlert &&
-      score.raw_score >= StrongAlertConfidence &&
-      entry.expectancy_R < MinBucketExpectancyForPromotion)
-   {
-      score.score_status = SCORE_LOW_SAMPLE;
-      return;
-   }
-
-   score.calibrated_score = Clamp(entry.calibrated_score, 0.0, 100.0);
-   score.displayed_score = score.calibrated_score;
-   score.score_status = SCORE_CALIBRATED;
-}
-
-int FindCalibrationEntryIndex(const int profile_index,
-                              const int direction,
-                              const int score_bucket,
-                              const datetime now)
-{
-   string symbol = UpperAscii(g_profiles[profile_index].symbol);
-   string timeframe_label = g_profiles[profile_index].timeframe_label;
-   string session = SessionName(now);
-
-   int best = -1;
-   int best_samples = -1;
-   for(int i = 0; i < ArraySize(g_calibration_entries); i++)
-   {
-      if(UpperAscii(g_calibration_entries[i].symbol) != symbol)
-         continue;
-      if(g_calibration_entries[i].timeframe_label != timeframe_label)
-         continue;
-      if(g_calibration_entries[i].session_name != session)
-         continue;
-      if(g_calibration_entries[i].direction != direction && g_calibration_entries[i].direction != DIR_NONE)
-         continue;
-      if(g_calibration_entries[i].score_bucket != score_bucket)
-         continue;
-
-      if(g_calibration_entries[i].sample_count > best_samples)
-      {
-         best = i;
-         best_samples = g_calibration_entries[i].sample_count;
-      }
-   }
-
-   return best;
 }
 
 int ScoreBucketFloor(const double score)
@@ -4283,153 +4104,6 @@ int ScoreBucketFloor(const double score)
    if(score >= 65.0)
       return 65;
    return 60;
-}
-
-void LoadScoreCalibration()
-{
-   ArrayResize(g_calibration_entries, 0);
-   InitializeScoreBucketStats();
-   if(!UseScoreCalibrationFile)
-      return;
-
-   ResetLastError();
-   int handle = FileOpen(ScoreCalibrationFile, FILE_READ | FILE_CSV | FILE_ANSI, ',');
-   if(handle == INVALID_HANDLE)
-   {
-      if(!g_calibration_warning_printed)
-      {
-         PrintFormat("FXNews: calibration file '%s' not loaded, error %d. Raw scores will be used.",
-                     ScoreCalibrationFile,
-                     GetLastError());
-         g_calibration_warning_printed = true;
-      }
-      return;
-   }
-
-   bool first_row = true;
-   while(!FileIsEnding(handle))
-   {
-      string symbol = FileReadString(handle);
-      if(FileIsEnding(handle) && symbol == "")
-         break;
-      string timeframe_label = FileReadString(handle);
-      string session_name = FileReadString(handle);
-      string direction_text = FileReadString(handle);
-      string bucket_text = FileReadString(handle);
-      string calibrated_text = FileReadString(handle);
-      string samples_text = FileReadString(handle);
-      string profit_factor_text = FileReadString(handle);
-      string expectancy_text = FileReadString(handle);
-      string last_updated_text = FileReadString(handle);
-
-      if(first_row)
-      {
-         first_row = false;
-         if(UpperAscii(symbol) == "SYMBOL")
-            continue;
-      }
-
-      if(symbol == "" || timeframe_label == "" || session_name == "")
-         continue;
-
-      CalibrationEntry entry;
-      entry.symbol = symbol;
-      entry.timeframe_label = timeframe_label;
-      entry.session_name = NormalizeSessionName(session_name);
-      entry.direction = DirectionFromText(direction_text);
-      entry.score_bucket = (int)StringToInteger(bucket_text);
-      entry.calibrated_score = StringToDouble(calibrated_text);
-      entry.sample_count = (int)StringToInteger(samples_text);
-      entry.profit_factor = StringToDouble(profit_factor_text);
-      entry.expectancy_R = StringToDouble(expectancy_text);
-      entry.last_updated = ParseDateTimeValue(last_updated_text);
-
-      int next = ArraySize(g_calibration_entries);
-      ArrayResize(g_calibration_entries, next + 1);
-      g_calibration_entries[next] = entry;
-      AddCalibrationToBucketStats(entry);
-   }
-
-   FileClose(handle);
-   PrintFormat("FXNews: loaded %d calibration rows from %s.",
-               ArraySize(g_calibration_entries),
-               ScoreCalibrationFile);
-}
-
-void InitializeScoreBucketStats()
-{
-   int floors[SCORE_BUCKET_COUNT] = {60, 65, 70, 75, 80, 85};
-   for(int i = 0; i < SCORE_BUCKET_COUNT; i++)
-   {
-      g_score_bucket_stats[i].bucket_floor = floors[i];
-      g_score_bucket_stats[i].sample_count = 0;
-      g_score_bucket_stats[i].hit_rate_target_first = 0.0;
-      g_score_bucket_stats[i].stop_first_rate = 0.0;
-      g_score_bucket_stats[i].average_R = 0.0;
-      g_score_bucket_stats[i].median_R = 0.0;
-      g_score_bucket_stats[i].mean_MFE_pips = 0.0;
-      g_score_bucket_stats[i].mean_MAE_pips = 0.0;
-      g_score_bucket_stats[i].profit_factor_proxy = 0.0;
-      g_score_bucket_stats[i].expectancy_R = 0.0;
-      g_score_bucket_stats[i].last_updated = 0;
-   }
-}
-
-void AddCalibrationToBucketStats(const CalibrationEntry &entry)
-{
-   int index = ScoreBucketIndex(entry.score_bucket);
-   if(index < 0)
-      return;
-
-   ScoreBucketStats stats = g_score_bucket_stats[index];
-   int old_count = stats.sample_count;
-   int new_count = old_count + MathMax(entry.sample_count, 0);
-   if(new_count <= 0)
-      return;
-
-   stats.expectancy_R = SafeDiv(stats.expectancy_R * old_count +
-                                entry.expectancy_R * entry.sample_count,
-                                new_count,
-                                stats.expectancy_R);
-   stats.average_R = stats.expectancy_R;
-   stats.profit_factor_proxy = SafeDiv(stats.profit_factor_proxy * old_count +
-                                       entry.profit_factor * entry.sample_count,
-                                       new_count,
-                                       stats.profit_factor_proxy);
-   stats.sample_count = new_count;
-   if(entry.last_updated > stats.last_updated)
-      stats.last_updated = entry.last_updated;
-   g_score_bucket_stats[index] = stats;
-}
-
-int ScoreBucketIndex(const int bucket_floor)
-{
-   for(int i = 0; i < SCORE_BUCKET_COUNT; i++)
-   {
-      if(g_score_bucket_stats[i].bucket_floor == bucket_floor)
-         return i;
-   }
-   return -1;
-}
-
-int DirectionFromText(const string value)
-{
-   string text = UpperAscii(value);
-   if(text == "UP" || text == "BUY" || text == "1")
-      return DIR_UP;
-   if(text == "DOWN" || text == "SELL" || text == "-1")
-      return DIR_DOWN;
-   return DIR_NONE;
-}
-
-datetime ParseDateTimeValue(string value)
-{
-   StringTrimLeft(value);
-   StringTrimRight(value);
-   if(value == "")
-      return 0;
-   StringReplace(value, "-", ".");
-   return StringToTime(value);
 }
 
 string SessionName(const datetime now)
@@ -4481,20 +4155,6 @@ string SessionNameFromIndex(const int session_index)
    if(session_index == SESSION_ROLLOVER)
       return "ROLLOVER";
    return "OTHER";
-}
-
-string NormalizeSessionName(const string session_name)
-{
-   string normalized = UpperAscii(session_name);
-   StringReplace(normalized, "-", "_");
-   StringReplace(normalized, " ", "_");
-   if(normalized == "LONDON_NY" || normalized == "NY_LONDON" || normalized == "OVERLAP")
-      return "LONDON_NY_OVERLAP";
-   if(normalized == "NY" || normalized == "NEWYORK")
-      return "NEW_YORK";
-   if(normalized == "POST_NY")
-      return "OTHER";
-   return normalized;
 }
 
 string BlockReasonText(const SignalBlockReason reason)
@@ -4563,15 +4223,7 @@ bool SignalExpiredByContext(const int index, const int direction, const datetime
 
 bool CanPromoteStrongAlert(const int index, const int direction)
 {
-   if(!RequirePositiveExpectancyForStrongAlert)
-      return true;
-
-   CompositeSignalScore score = (direction == DIR_UP ?
-                                 g_profiles[index].composite_up :
-                                 g_profiles[index].composite_down);
-   return (score.score_status == SCORE_CALIBRATED &&
-           score.calibration_sample_count >= MinBucketSamplesForPromotion &&
-           score.calibration_expectancy_R >= MinBucketExpectancyForPromotion);
+   return true;
 }
 
 void UpdateAlertGroups(const datetime now)
@@ -4785,7 +4437,6 @@ void ActivateSignal(const int index,
       g_profiles[index].strong_alert_sent = false;
       g_profiles[index].active_displayed = true;
       PushSignalHistory(index, direction, score, g_profiles[index].event_local_time);
-      RecordDisplayedSignal(index, direction, score, now);
       SendOptionalAlert(index, direction, score, now, false);
    }
    else if(score >= StrongAlertConfidence && !g_profiles[index].strong_alert_sent)
@@ -4852,363 +4503,6 @@ void SendOptionalAlert(const int index,
    g_profiles[index].last_alert_sent_time = now;
 }
 
-void RecordDisplayedSignal(const int index,
-                           const int direction,
-                           const double score,
-                           const datetime now)
-{
-   if(!EnableSignalLogging && !EnableOutcomeLabeling)
-      return;
-
-   CompositeSignalScore composite;
-   if(direction == DIR_UP)
-      composite = g_profiles[index].composite_up;
-   else
-      composite = g_profiles[index].composite_down;
-
-   g_signal_sequence++;
-   string signal_id = StringFormat("%I64d_%s_%s_%d",
-                                   (long)now,
-                                   g_profiles[index].symbol,
-                                   g_profiles[index].timeframe_label,
-                                   (int)g_signal_sequence);
-
-   if(EnableSignalLogging)
-      AppendSignalLogRow(signal_id, index, direction, score, now, composite);
-
-   if(EnableOutcomeLabeling && EnableSignalLogging)
-      AddPendingOutcome(signal_id, index, direction, now);
-}
-
-void AddPendingOutcome(const string signal_id,
-                       const int index,
-                       const int direction,
-                       const datetime now)
-{
-   int slot = -1;
-   for(int i = 0; i < ArraySize(g_pending_outcomes); i++)
-   {
-      if(!g_pending_outcomes[i].active)
-      {
-         slot = i;
-         break;
-      }
-   }
-
-   if(slot < 0)
-   {
-      if(ArraySize(g_pending_outcomes) < MAX_PENDING_OUTCOMES)
-      {
-         slot = ArraySize(g_pending_outcomes);
-         ArrayResize(g_pending_outcomes, slot + 1);
-      }
-      else
-      {
-         slot = 0;
-      }
-   }
-
-   g_pending_outcomes[slot].active = true;
-   g_pending_outcomes[slot].signal_id = signal_id;
-   g_pending_outcomes[slot].symbol = g_profiles[index].symbol;
-   g_pending_outcomes[slot].timeframe_label = g_profiles[index].timeframe_label;
-   g_pending_outcomes[slot].direction = direction;
-   g_pending_outcomes[slot].signal_server_time = now;
-   g_pending_outcomes[slot].signal_local_time = g_profiles[index].event_local_time;
-   g_pending_outcomes[slot].entry_mid = g_profiles[index].mid;
-   g_pending_outcomes[slot].atr_price = g_profiles[index].atr_m1;
-   g_pending_outcomes[slot].pip_size = g_profiles[index].pip_size;
-   g_pending_outcomes[slot].mfe_pips = 0.0;
-   g_pending_outcomes[slot].mae_pips = 0.0;
-   g_pending_outcomes[slot].horizon1_written = false;
-   g_pending_outcomes[slot].horizon2_written = false;
-   g_pending_outcomes[slot].horizon3_written = false;
-}
-
-void UpdatePendingOutcomes(const datetime now)
-{
-   if(!EnableOutcomeLabeling || !EnableSignalLogging)
-      return;
-
-   for(int i = 0; i < ArraySize(g_pending_outcomes); i++)
-   {
-      if(!g_pending_outcomes[i].active)
-         continue;
-
-      double mid = 0.0;
-      if(!FindCurrentMidForSymbol(g_pending_outcomes[i].symbol, mid))
-         continue;
-
-      double directional_move_pips = DirectionalValue(mid - g_pending_outcomes[i].entry_mid,
-                                                      g_pending_outcomes[i].direction) /
-                                     MathMax(g_pending_outcomes[i].pip_size, 0.00000001);
-      double adverse_move_pips = -directional_move_pips;
-      if(directional_move_pips > g_pending_outcomes[i].mfe_pips)
-         g_pending_outcomes[i].mfe_pips = directional_move_pips;
-      if(adverse_move_pips > g_pending_outcomes[i].mae_pips)
-         g_pending_outcomes[i].mae_pips = adverse_move_pips;
-
-      int age_seconds = (int)(now - g_pending_outcomes[i].signal_server_time);
-      if(!g_pending_outcomes[i].horizon1_written && age_seconds >= OutcomeHorizonMinutes1 * 60)
-      {
-         AppendOutcomeLogRow(g_pending_outcomes[i], OutcomeHorizonMinutes1, now);
-         g_pending_outcomes[i].horizon1_written = true;
-      }
-      if(!g_pending_outcomes[i].horizon2_written && age_seconds >= OutcomeHorizonMinutes2 * 60)
-      {
-         AppendOutcomeLogRow(g_pending_outcomes[i], OutcomeHorizonMinutes2, now);
-         g_pending_outcomes[i].horizon2_written = true;
-      }
-      if(!g_pending_outcomes[i].horizon3_written && age_seconds >= OutcomeHorizonMinutes3 * 60)
-      {
-         AppendOutcomeLogRow(g_pending_outcomes[i], OutcomeHorizonMinutes3, now);
-         g_pending_outcomes[i].horizon3_written = true;
-         g_pending_outcomes[i].active = false;
-      }
-   }
-}
-
-bool FindCurrentMidForSymbol(const string symbol, double &mid)
-{
-   string target = UpperAscii(symbol);
-   for(int i = 0; i < ArraySize(g_profiles); i++)
-   {
-      if(UpperAscii(g_profiles[i].symbol) == target &&
-         g_profiles[i].quote_fresh &&
-         g_profiles[i].mid > 0.0)
-      {
-         mid = g_profiles[i].mid;
-         return true;
-      }
-   }
-
-   mid = 0.0;
-   return false;
-}
-
-int HoldSeconds(const int index, const int direction, const datetime now)
-{
-   datetime outside_since = (direction == DIR_UP ?
-                             g_profiles[index].outside_since_up :
-                             g_profiles[index].outside_since_down);
-   if(outside_since <= 0)
-      return 0;
-   return MathMax(0, (int)(now - outside_since));
-}
-
-double ResultR(const double mfe_pips,
-               const double mae_pips,
-               const PendingOutcome &outcome)
-{
-   double atr_pips = MathMax(outcome.atr_price / MathMax(outcome.pip_size, 0.00000001), 0.1);
-   double target_pips = atr_pips * OutcomeTargetAtr;
-   double stop_pips = atr_pips * OutcomeStopAtr;
-   double favorable_R = SafeDiv(mfe_pips, target_pips, 0.0);
-   double adverse_R = SafeDiv(mae_pips, stop_pips, 0.0);
-   return favorable_R - adverse_R;
-}
-
-void AppendSignalLogRow(const string signal_id,
-                        const int index,
-                        const int direction,
-                        const double score,
-                        const datetime now,
-                        const CompositeSignalScore &composite)
-{
-   int handle = OpenSignalLogForAppend();
-   if(handle == INVALID_HANDLE)
-      return;
-
-   FileWrite(handle,
-             "SIGNAL",
-             signal_id,
-             TimeToString(now, TIME_DATE | TIME_SECONDS),
-             FormatLocalTimestamp(TimeLocal()),
-             g_profiles[index].symbol,
-             g_profiles[index].timeframe_label,
-             DirectionText(direction),
-             DoubleToString(composite.raw_score, 2),
-             DoubleToString(composite.calibrated_score, 2),
-             (int)MathRound(score),
-             ScoreStatusText(composite.score_status),
-             composite.score_bucket,
-             g_profiles[index].session_name,
-             DoubleToString(composite.execution.spread_pips, 2),
-             DoubleToString(composite.execution.median_spread_pips, 2),
-             DoubleToString(composite.execution.cost_to_atr, 4),
-             DoubleToString(composite.execution.spread_z, 3),
-             DoubleToString(composite.execution.quote_age_sec, 1),
-             DoubleToString(composite.execution.tick_gap_sec, 1),
-             DoubleToString(g_profiles[index].atr_m1 / MathMax(g_profiles[index].pip_size, 0.00000001), 2),
-             DoubleToString(g_profiles[index].range_width / MathMax(g_profiles[index].pip_size, 0.00000001), 2),
-             DoubleToString(SafeDiv(BreakoutDistance(index, direction), g_profiles[index].atr_m1, 0.0), 3),
-             HoldSeconds(index, direction, now),
-             DoubleToString(composite.impulse.speed_5s_z, 3),
-             DoubleToString(composite.impulse.speed_10s_z, 3),
-             DoubleToString(composite.impulse.speed_30s_z, 3),
-             DoubleToString(composite.impulse.speed_60s_z, 3),
-             DoubleToString(composite.impulse.tick_rate_z, 3),
-             DoubleToString(composite.impulse.tick_volume_z, 3),
-             DoubleToString(composite.flow.base_strength, 3),
-             DoubleToString(composite.flow.quote_strength, 3),
-             DoubleToString(composite.flow.directional_edge, 3),
-             DoubleToString(composite.flow.basket_agreement, 3),
-             DoubleToString(composite.regime.m5_context_score, 3),
-             DoubleToString(composite.regime.m15_context_score, 3),
-             composite.calendar.state_tag,
-             DoubleToString(composite.calendar.proximity_minutes, 2),
-             DoubleToString(g_profiles[index].mid, g_profiles[index].digits),
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             composite.reason_summary,
-             composite.human_reason);
-
-   FileClose(handle);
-}
-
-void AppendOutcomeLogRow(const PendingOutcome &outcome,
-                         const int horizon_minutes,
-                         const datetime now)
-{
-   int handle = OpenSignalLogForAppend();
-   if(handle == INVALID_HANDLE)
-      return;
-
-   double atr_pips = MathMax(outcome.atr_price / MathMax(outcome.pip_size, 0.00000001), 0.1);
-   double mfe_atr = outcome.mfe_pips / atr_pips;
-   double mae_atr = outcome.mae_pips / atr_pips;
-   bool target_hit = (mfe_atr >= OutcomeTargetAtr && mae_atr < OutcomeStopAtr);
-   double continuation_score = Clamp01((mfe_atr - mae_atr + 0.50) / 1.50);
-   string label = "NEUTRAL";
-   if(target_hit)
-      label = "TARGET_BEFORE_STOP";
-   else if(mae_atr >= OutcomeStopAtr && mfe_atr < OutcomeTargetAtr)
-      label = "STOP_BEFORE_TARGET";
-   else if(mfe_atr >= OutcomeTargetAtr)
-      label = "TARGET_AND_STOP_UNKNOWN_ORDER";
-
-   FileWrite(handle,
-             "OUTCOME",
-             outcome.signal_id,
-             TimeToString(now, TIME_DATE | TIME_SECONDS),
-             FormatLocalTimestamp(TimeLocal()),
-             outcome.symbol,
-             outcome.timeframe_label,
-             DirectionText(outcome.direction),
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             "",
-             DoubleToString(outcome.entry_mid, 8),
-             (horizon_minutes == OutcomeHorizonMinutes1 ? DoubleToString(outcome.mfe_pips, 2) : ""),
-             (horizon_minutes == OutcomeHorizonMinutes1 ? DoubleToString(outcome.mae_pips, 2) : ""),
-             (horizon_minutes == OutcomeHorizonMinutes1 ? DoubleToString(ResultR(outcome.mfe_pips, outcome.mae_pips, outcome), 3) : ""),
-             (horizon_minutes == OutcomeHorizonMinutes1 && mfe_atr >= OutcomeTargetAtr ? "1" : ""),
-             (horizon_minutes == OutcomeHorizonMinutes1 && mae_atr >= OutcomeStopAtr ? "1" : ""),
-             (horizon_minutes == OutcomeHorizonMinutes2 ? DoubleToString(outcome.mfe_pips, 2) : ""),
-             (horizon_minutes == OutcomeHorizonMinutes2 ? DoubleToString(outcome.mae_pips, 2) : ""),
-             (horizon_minutes == OutcomeHorizonMinutes2 ? DoubleToString(ResultR(outcome.mfe_pips, outcome.mae_pips, outcome), 3) : ""),
-             (horizon_minutes == OutcomeHorizonMinutes2 && mfe_atr >= OutcomeTargetAtr ? "1" : ""),
-             (horizon_minutes == OutcomeHorizonMinutes2 && mae_atr >= OutcomeStopAtr ? "1" : ""),
-             (horizon_minutes == OutcomeHorizonMinutes3 ? DoubleToString(outcome.mfe_pips, 2) : ""),
-             (horizon_minutes == OutcomeHorizonMinutes3 ? DoubleToString(outcome.mae_pips, 2) : ""),
-             (horizon_minutes == OutcomeHorizonMinutes3 ? DoubleToString(ResultR(outcome.mfe_pips, outcome.mae_pips, outcome), 3) : ""),
-             (horizon_minutes == OutcomeHorizonMinutes3 && mfe_atr >= OutcomeTargetAtr ? "1" : ""),
-             (horizon_minutes == OutcomeHorizonMinutes3 && mae_atr >= OutcomeStopAtr ? "1" : ""),
-             label,
-             DoubleToString(continuation_score, 3),
-             "",
-             "");
-
-   FileClose(handle);
-}
-
-int OpenSignalLogForAppend()
-{
-   if(SignalLogFile == "")
-      return INVALID_HANDLE;
-
-   ResetLastError();
-   int handle = FileOpen(SignalLogFile,
-                         FILE_READ | FILE_WRITE | FILE_CSV | FILE_ANSI | FILE_SHARE_READ,
-                         ',');
-   if(handle == INVALID_HANDLE)
-   {
-      g_signal_log_writable = false;
-      PrintFormat("FXNews: could not open signal log '%s', error %d.",
-                  SignalLogFile,
-                  GetLastError());
-      return INVALID_HANDLE;
-   }
-
-   bool empty_file = (FileSize(handle) == 0);
-   FileSeek(handle, 0, SEEK_END);
-   if(empty_file || !g_signal_log_header_checked)
-   {
-      if(empty_file)
-         WriteSignalLogHeader(handle);
-      g_signal_log_header_checked = true;
-   }
-
-   g_signal_log_writable = true;
-   return handle;
-}
-
-bool CheckSignalLogWritable()
-{
-   if(!EnableSignalLogging || SignalLogFile == "")
-      return false;
-
-   int handle = FileOpen(SignalLogFile,
-                         FILE_READ | FILE_WRITE | FILE_CSV | FILE_ANSI | FILE_SHARE_READ,
-                         ',');
-   if(handle == INVALID_HANDLE)
-      return false;
-   FileClose(handle);
-   return true;
-}
-
 void UpdateScanDiagnostics(const uint scan_start)
 {
    uint elapsed = GetTickCount() - scan_start;
@@ -5230,15 +4524,13 @@ void UpdateScanDiagnostics(const uint scan_start)
 
 string DiagnosticsText()
 {
-   return StringFormat("DIAG valid=%d invalid=%d profiles=%d active=%d tick_ok=%d calendar=%s cal_rows=%d log=%s scan_avg=%.1fms scan_max=%.1fms objects=%d",
+   return StringFormat("DIAG valid=%d invalid=%d profiles=%d active=%d tick_ok=%d calendar=%s disk_io=disabled scan_avg=%.1fms scan_max=%.1fms objects=%d",
                        g_last_valid_symbols,
                        g_last_invalid_symbols,
                        ArraySize(g_profiles),
                        g_last_active_profiles,
                        g_last_tick_history_ok,
                        (g_calendar_available ? "yes" : "no"),
-                       ArraySize(g_calibration_entries),
-                       (g_signal_log_writable ? "yes" : "no"),
                        g_average_scan_ms,
                        g_max_scan_ms,
                        DASHBOARD_MAX_OBJECTS);
@@ -5247,68 +4539,6 @@ string DiagnosticsText()
 void PrintDiagnosticsSummary()
 {
    Print("FXNews ", DiagnosticsText());
-}
-
-void WriteSignalLogHeader(const int handle)
-{
-   FileWrite(handle,
-             "row_type",
-             "signal_id",
-             "server_time",
-             "local_time",
-             "symbol",
-             "timeframe",
-             "direction",
-             "raw_score",
-             "calibrated_score",
-             "displayed_score",
-             "score_status",
-             "score_bucket",
-             "session_name",
-             "spread_pips",
-             "median_spread_pips",
-             "spread_to_atr",
-             "spread_z",
-             "quote_age_sec",
-             "tick_gap_sec",
-             "atr_pips",
-             "range_width_pips",
-             "breakout_distance_atr",
-             "hold_seconds",
-             "impulse_z_5s",
-             "impulse_z_10s",
-             "impulse_z_30s",
-             "impulse_z_60s",
-             "tick_rate_z",
-             "tick_volume_z",
-             "base_strength",
-             "quote_strength",
-             "flow_directional_edge",
-             "basket_agreement",
-             "m5_context",
-             "m15_context",
-             "calendar_state",
-             "news_proximity_min",
-             "entry_mid",
-             "mfe_5m_pips",
-             "mae_5m_pips",
-             "result_5m_R",
-             "hit_target_5m",
-             "hit_stop_5m",
-             "mfe_15m_pips",
-             "mae_15m_pips",
-             "result_15m_R",
-             "hit_target_15m",
-             "hit_stop_15m",
-             "mfe_30m_pips",
-             "mae_30m_pips",
-             "result_30m_R",
-             "hit_target_30m",
-             "hit_stop_30m",
-             "final_outcome_label",
-             "continuation_score",
-             "reason_summary",
-             "human_reason");
 }
 
 string DirectionText(const int direction)
@@ -5395,7 +4625,6 @@ void CollectDashboardSignals(DashboardSignal &signals[])
       signal.direction = direction;
       signal.score = score.displayed_score;
       signal.raw_score = score.raw_score;
-      signal.calibrated_score = score.calibrated_score;
       signal.score_status = score.score_status;
       signal.start_time = g_profiles[i].event_start_time;
       signal.age_seconds = EventAgeSeconds(i, direction, now);
@@ -5424,7 +4653,6 @@ void AddBlockedDebugSignal(const int index, DashboardSignal &signals[], const da
    signal.direction = score.direction;
    signal.score = 0.0;
    signal.raw_score = score.raw_score;
-   signal.calibrated_score = score.calibrated_score;
    signal.score_status = score.score_status;
    signal.start_time = now;
    signal.age_seconds = 0;
@@ -5477,10 +4705,9 @@ double DashboardSortScore(const int index,
                           const CompositeSignalScore &score,
                           const int age_seconds)
 {
-   double status_bonus = (score.score_status == SCORE_CALIBRATED ? 12.0 : 0.0);
    double leader_bonus = (g_profiles[index].group_leader_signal ? 8.0 : -5.0);
    double freshness = 10.0 * (1.0 - SmoothStep(0.0, (double)SignalTTLSeconds, (double)age_seconds));
-   return score.displayed_score + status_bonus + leader_bonus +
+   return score.displayed_score + leader_bonus +
           score.execution.score * 8.0 + freshness -
           score.execution.cost_to_atr * 6.0;
 }
@@ -5513,16 +4740,13 @@ string FormatDashboardSignalText(const int rank,
 
 string DashboardTooltip(const CompositeSignalScore &score)
 {
-   return StringFormat("BRK %.2f | IMP %.2f | FLOW %.2f | EXEC %.2f | REG %.2f | %s | N=%d | PF=%.2f | EXP=%+.2fR",
+   return StringFormat("BRK %.2f | IMP %.2f | FLOW %.2f | EXEC %.2f | REG %.2f | %s | disk_io=off",
                        score.breakout.score,
                        score.impulse.score,
                        score.flow.score,
                        score.execution.score,
                        score.regime.score,
-                       score.calendar.state_tag,
-                       score.calibration_sample_count,
-                       score.calibration_profit_factor,
-                       score.calibration_expectancy_R);
+                       score.calendar.state_tag);
 }
 
 void PushSignalHistory(const int index,

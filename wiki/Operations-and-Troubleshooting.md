@@ -2,7 +2,7 @@
 
 ## Expected Dashboard
 
-The chart shows a red title and up to five newest signal messages:
+The chart shows the scanner dashboard plus the latest five signal messages:
 
 ```text
 BREAKOUT RADAR
@@ -19,7 +19,11 @@ Check that the broker symbols exist, Market Watch can select them, the configure
 
 ## Too Many Signals
 
-Raise `MinDisplayConfidence`, increase cooldowns, or tighten spread limits. During rollover, keep `IgnoreRolloverTime` enabled.
+Raise `MinDisplayConfidence`, increase cooldowns, hide correlated group members with `ShowOnlyGroupLeaders=true`, or tighten spread limits. During rollover, keep `IgnoreRolloverTime` enabled.
+
+## Old EA Still Loads
+
+FXNews is now a custom indicator. If MT5 prints `automated trading is disabled`, an old Expert Advisor copy is still attached or still present in the terminal. Remove old chart/template attachments and use the indicator under `MQL5/Indicators/FXNews`.
 
 ## Sync Problems
 
@@ -32,5 +36,11 @@ scripts/sync_to_mt5.sh
 If MetaTrader is installed somewhere else, run with:
 
 ```bash
-MT5_EXPERTS_DIR="/path/to/MetaTrader 5/MQL5/Experts" scripts/sync_to_mt5.sh
+MT5_INDICATORS_DIR="/path/to/MetaTrader 5/MQL5/Indicators" scripts/sync_to_mt5.sh
 ```
+
+The script removes stale `NewsScan`, `ChartOnlyBreakoutRadarEA`, old Expert Advisor copies of `FXNews`, and old CSV artifacts from earlier versions.
+
+## Disk Writes
+
+FXNews is not allowed to write files. It does not create CSV logs, calibration files, validation reports, or settings files. Validation and Autotune reports render directly on the chart.

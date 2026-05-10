@@ -29,13 +29,9 @@
 - `UseEconomicCalendarContext`: enables optional built-in MT5 economic calendar context. Default `false`.
 - `BlockImmediatelyBeforeHighImpactNews`: blocks the final minutes before high-impact calendar releases when calendar context is enabled. Default `false`.
 - `UseMultiTimeframeContextCaps`: caps scores when M5/M15 context rejects the direction. Default `true`.
-- `EnableSignalLogging`: appends score-audit rows to `FXNews_signals.csv`. Default `true`.
-- `EnableOutcomeLabeling`: appends 5/15/30 minute outcome rows for displayed signals. Default `true`.
-- `UseScoreCalibrationFile`: applies optional empirical score-bucket calibration from `FXNews_calibration.csv`. Default `false`.
-- `CalibrationMaxAgeDays`: marks old calibration rows as stale. Default `30`.
-- `MinBucketSamplesForPromotion`: minimum samples before high-score buckets can be promoted. Default `100`.
-- `MinBucketExpectancyForPromotion`: minimum bucket expectancy for promotion. Default `0.03`.
-- `RequirePositiveExpectancyForStrongAlert`: prevents strong calibrated promotion without enough positive expectancy. Default `true`.
+- `OutcomeHorizonMinutes1` / `OutcomeHorizonMinutes2` / `OutcomeHorizonMinutes3`: chart-only validation horizons. Defaults `5`, `15`, and `30`.
+- `OutcomeTargetAtr`: validation/autotune target distance in ATR. Default `0.50`.
+- `OutcomeStopAtr`: validation/autotune stop distance in ATR. Default `0.35`.
 - `UseSessionAwareBaselines`: keeps separate spread/tick/ATR/range baselines by session. Default `true`.
 - `BaselineLookbackSamples`: rolling baseline memory. Default `500`.
 - `MinBaselineSamples`: samples before session baseline z-scores are trusted. Default `50`.
@@ -65,10 +61,10 @@
 
 Lower `MinDisplayConfidence` if the radar is too quiet. Raise it if the chart shows too many weak signals. Keep `DisplayUpdateSeconds` at five seconds or higher for calmer chart behavior.
 
-Scanning many pairs across many timeframes increases the number of profiles. With 55 symbols and nine timeframes, the EA evaluates 495 symbol/timeframe profiles. Tick-quality samples are reused across profiles that share the same symbol and quote timestamp, but rate and ATR calculations still scale with profile count, so reduce `TimeframesToScan` if the terminal becomes sluggish.
+Scanning many pairs across many timeframes increases the number of profiles. With 55 symbols and nine timeframes, FXNews evaluates 495 symbol/timeframe profiles. Tick-quality samples are reused across profiles that share the same symbol and quote timestamp, but rate and ATR calculations still scale with profile count, so reduce `TimeframesToScan` if the terminal becomes sluggish.
 
 For brokers with wider spreads, raise `MaxSpreadPips` carefully and watch whether false signals increase during rollovers or thin liquidity.
 
-Use `FXNews_signals.csv` to validate score buckets before tightening thresholds. A practical workflow is to collect enough samples, group by displayed score bucket and timeframe, then compare continuation score, MFE/ATR, MAE/ATR, and target-before-stop rate.
-
 Use `FXNEWS_MODE_VALIDATION` when you want a chart-only backtest report from MT5's M1 history database. Use `FXNEWS_MODE_AUTOTUNE` to compare a small parameter set against the current inputs. These historical modes do not write files; they render their report directly on the chart.
+
+FXNews intentionally has no CSV logging or calibration-file inputs. The score remains a raw alert-quality score and must be validated through the chart-only historical reports and manual forward observation.

@@ -1,16 +1,18 @@
 # Signal Logic
 
-FXNews now separates the raw event-quality score from calibration status:
+FXNews displays a raw event-quality score. The dashboard status column shows `RAW`:
 
 ```text
-SYMBOL TIMEFRAME UP|DOWN NN% RAW|CAL|LOW-N|STALE
+SYMBOL TIMEFRAME UP|DOWN NN% RAW
 ```
 
-The percentage is an alert-ranking score, not a guaranteed win probability and not an automatic entry instruction.
+The latest-five message list stays simple: `YYYY-MM-DD HH:MM:SS - SYMBOL TIMEFRAME UP|DOWN - NN%`.
+
+The percentage is an alert-ranking score, not a guaranteed win probability and not an automatic entry instruction. Disk-based calibration and CSV logging are intentionally disabled.
 
 ## Composite Score
 
-The EA decomposes each directional candidate into explicit components:
+FXNews decomposes each directional candidate into explicit components:
 
 - Execution quality: spread, median spread, spread z-score, quote age, tick gap, and spread cost versus ATR.
 - Breakout structure: range compression, distance past the boundary, candle close location, hold time outside the range, body quality, wick rejection, and snapback risk.
@@ -19,18 +21,14 @@ The EA decomposes each directional candidate into explicit components:
 - Regime context: session quality, M5/M15 alignment, and volatility regime.
 - Calendar context: optional built-in MT5 economic-calendar proximity and high-impact context when enabled.
 - Tick quality: CopyTicks sample count, freshness, and coverage when available.
-- Calibration metadata: sample count, score bucket, profit-factor proxy, expectancy, and staleness.
 
 The raw component blend is mapped into a 0-100 score, then capped by hard practical rules. One strong feature cannot create an 80+ score by itself. Scores above 80 need good execution, real breakout or impulse quality, and no major context conflict. Scores above 90 require strong hold, strong flow, good regime context, and no serious uncertainty.
 
-## Score Status
+## Status
 
-- `RAW`: no trusted calibration is active, so the raw composite score is displayed.
-- `CAL`: matching symbol/timeframe/session/direction/bucket calibration has enough fresh samples.
-- `LOW-N`: the raw score is high, but calibration sample count or expectancy is not strong enough for promotion.
-- `STALE`: matching calibration exists but is older than `CalibrationMaxAgeDays`.
+- `RAW`: chart-only raw composite score. This is the normal status.
 
-Strong alerts can require positive calibrated expectancy through `RequirePositiveExpectancyForStrongAlert`.
+Historical validation and autotune reports can help judge whether higher raw buckets are outperforming lower raw buckets for the current broker/feed. FXNews does not read calibration files and does not write score logs.
 
 ## Hard Gates
 
@@ -75,23 +73,15 @@ Dashboard calendar tags:
 
 ## Alert Grouping
 
-Correlated alerts are grouped by dominant currency flow, such as `USD-` for broad USD weakness. The dashboard marks a group leader using execution quality, score status, score, freshness, flow confirmation, and spread-to-ATR. `ShowOnlyGroupLeaders=true` suppresses correlated member rows.
-
-## Self-Auditing Logs
-
-With `EnableSignalLogging=true`, the EA appends `SIGNAL` rows to `FXNews_signals.csv`. Rows include the visible score, raw score, calibrated score, execution metrics, component scores, cap reasons, and entry reference price.
-
-With `EnableOutcomeLabeling=true`, the EA later appends `OUTCOME` rows for 5, 15, and 30 minute horizons. Outcomes include MFE, MAE, MFE/ATR, MAE/ATR, target-before-stop labeling, `final_outcome_label`, and `continuation_score` fields.
-
-Use the CSV to validate score buckets empirically. Compare 60-69, 70-79, 80-89, and 90+ buckets by continuation score, target-before-stop rate, MFE/ATR, and MAE/ATR. Higher scores should become stronger radar events over enough samples, not guaranteed winners.
-
-Preferred score buckets are now `60-64`, `65-69`, `70-74`, `75-79`, `80-84`, and `85+`.
+Correlated alerts are grouped by dominant currency flow, such as `USD-` for broad USD weakness. The dashboard marks a group leader using execution quality, score, freshness, flow confirmation, and spread-to-ATR. `ShowOnlyGroupLeaders=true` suppresses correlated member rows.
 
 ## Historical Validation Mode
 
 `FXNEWS_MODE_VALIDATION` is an on-chart historical simulation. It pulls closed M1 bars from MT5's local history database for every configured symbol, walks backward-to-forward over the last `HistoricalLookbackDays`, simulates symbol/timeframe alert candidates, evaluates 5/15/30 minute forward MFE/MAE outcomes, and renders the summary on the chart.
 
 This mode does not write CSV logs or report files. The report includes signal count, average score, profit-factor proxy, average R, target-first and stop-first rates, score edge, and bucket quality.
+
+Preferred score buckets are `60-64`, `65-69`, `70-74`, `75-79`, `80-84`, and `85+`.
 
 ## Autotune Mode
 

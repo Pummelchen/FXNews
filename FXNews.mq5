@@ -8,6 +8,14 @@ enum ConfirmationMode
    CONFIRM_HYBRID = 2
 };
 
+enum FXNewsOperatingMode
+{
+   FXNEWS_MODE_LIVE = 0,
+   FXNEWS_MODE_VALIDATION = 1,
+   FXNEWS_MODE_AUTOTUNE = 2
+};
+
+input FXNewsOperatingMode OperatingMode = FXNEWS_MODE_LIVE;
 input string SymbolsToScan =
 "EURUSD,GBPUSD,USDJPY,USDCHF,AUDUSD,NZDUSD,USDCAD,EURJPY,GBPJPY,EURGBP,EURAUD,EURNZD,EURCAD,EURCHF,GBPAUD,GBPNZD,GBPCAD,GBPCHF,AUDJPY,NZDJPY,CADJPY,CHFJPY,AUDNZD,AUDCAD,AUDCHF,NZDCAD,NZDCHF,CADCHF";
 input string TimeframesToScan = "M1,M5,M15,M30,H1,H4,H8,H12,D1";
@@ -114,6 +122,12 @@ input bool DebugScoreBreakdown = false;
 input bool DebugPrintToJournal = false;
 input bool ShowDiagnosticsPanel = false;
 input bool PrintDiagnosticsEveryMinute = false;
+
+input int HistoricalLookbackDays = 90;
+input int HistoricalStepMinutes = 1;
+input int HistoricalWarmupBars = 500;
+input int HistoricalMaxSignalsPerProfile = 250;
+input int AutotuneMinSignals = 100;
 
 #define DIR_NONE 0
 #define DIR_UP 1
@@ -369,6 +383,95 @@ struct DashboardSignal
    double sort_score;
 };
 
+struct HistoricalParams
+{
+   string name;
+   int range_lookback;
+   double breakout_buffer_atr;
+   double min_confidence;
+   double max_spread_to_atr;
+   double max_overextension_atr;
+   double min_impulse_z;
+};
+
+struct HistoricalSignalScore
+{
+   bool valid;
+   int direction;
+   double displayed_score;
+   double raw_score;
+   double execution_score;
+   double breakout_score;
+   double impulse_score;
+   double flow_score;
+   double regime_score;
+   double atr_price;
+   double spread_pips;
+   double spread_to_atr;
+   double range_width_pips;
+   double breakout_distance_atr;
+   string reason;
+};
+
+struct HistoricalOutcome
+{
+   double mfe_5m_pips;
+   double mae_5m_pips;
+   double result_5m_R;
+   bool target_5m;
+   bool stop_5m;
+   double mfe_15m_pips;
+   double mae_15m_pips;
+   double result_15m_R;
+   bool target_15m;
+   bool stop_15m;
+   double mfe_30m_pips;
+   double mae_30m_pips;
+   double result_30m_R;
+   bool target_30m;
+   bool stop_30m;
+};
+
+struct HistoricalBacktestStats
+{
+   string params_name;
+   datetime from_time;
+   datetime to_time;
+   int symbols_requested;
+   int symbols_loaded;
+   int profiles_tested;
+   int bars_scanned;
+   int signals;
+   int target_5m;
+   int stop_5m;
+   int target_15m;
+   int stop_15m;
+   int target_30m;
+   int stop_30m;
+   double sum_score;
+   double sum_result_5m_R;
+   double sum_result_15m_R;
+   double sum_result_30m_R;
+   double gross_win_R;
+   double gross_loss_R;
+   double target_score_sum;
+   int target_score_count;
+   double stop_score_sum;
+   int stop_score_count;
+   int bucket60_count;
+   int bucket65_count;
+   int bucket70_count;
+   int bucket75_count;
+   int bucket80_count;
+   int bucket85_count;
+   double bucket60_R;
+   double bucket65_R;
+   double bucket70_R;
+   double bucket75_R;
+   double bucket80_R;
+   double bucket85_R;
+};
+
 struct CurrencyCalendarCache
 {
    string currency;
@@ -542,6 +645,9 @@ int g_last_tick_history_ok = 0;
 
 datetime g_last_dashboard_update = 0;
 string g_object_prefix = "COBR_";
+bool g_historical_run_started = false;
+bool g_historical_run_finished = false;
+string g_historical_report_lines[];
 
 int OnInit()
 {
@@ -558,14 +664,22 @@ int OnInit()
 
    InitializeCalendarCache();
    InitializeScoreBucketStats();
-   LoadScoreCalibration();
-   g_signal_log_writable = CheckSignalLogWritable();
+   if(IsHistoricalMode())
+      g_signal_log_writable = false;
+   else
+   {
+      LoadScoreCalibration();
+      g_signal_log_writable = CheckSignalLogWritable();
+   }
    ArrayResize(g_pending_outcomes, 0);
 
    AllocateHistoryBuffers();
 
    for(int i = 0; i < ArraySize(g_profiles); i++)
       EnsureSymbolReady(i);
+
+   if(IsHistoricalMode())
+      SetHistoricalReportHeader("FXNEWS " + OperatingModeText() + " | waiting to start historical run");
 
    ResetLastError();
    if(!EventSetTimer(IntMax(1, ScanIntervalSeconds)))
@@ -574,7 +688,8 @@ int OnInit()
       return INIT_FAILED;
    }
 
-   ScanAll(true);
+   if(!IsHistoricalMode())
+      ScanAll(true);
    return INIT_SUCCEEDED;
 }
 
@@ -586,6 +701,12 @@ void OnDeinit(const int reason)
 
 void OnTimer()
 {
+   if(IsHistoricalMode())
+   {
+      RunHistoricalOperatingMode();
+      return;
+   }
+
    ScanAll(false);
 }
 
@@ -675,7 +796,1293 @@ bool ValidateInputs()
       return false;
    }
 
+   if(HistoricalLookbackDays < 1 || HistoricalStepMinutes < 1 ||
+      HistoricalWarmupBars < 100 || HistoricalMaxSignalsPerProfile < 10 ||
+      AutotuneMinSignals < 10)
+   {
+      Print("FXNews: historical validation/autotune inputs are inconsistent.");
+      return false;
+   }
+
    return true;
+}
+
+bool IsHistoricalMode()
+{
+   return (OperatingMode == FXNEWS_MODE_VALIDATION ||
+           OperatingMode == FXNEWS_MODE_AUTOTUNE);
+}
+
+string OperatingModeText()
+{
+   if(OperatingMode == FXNEWS_MODE_VALIDATION)
+      return "VALIDATION";
+   if(OperatingMode == FXNEWS_MODE_AUTOTUNE)
+      return "AUTOTUNE";
+   return "LIVE";
+}
+
+void RunHistoricalOperatingMode()
+{
+   if(g_historical_run_finished)
+      return;
+
+   if(g_historical_run_started)
+      return;
+
+   g_historical_run_started = true;
+   SetHistoricalReportHeader("FXNEWS " + OperatingModeText() + " | running M1 history simulation...");
+
+   HistoricalParams base_params;
+   BuildBaseHistoricalParams(base_params);
+
+   if(OperatingMode == FXNEWS_MODE_VALIDATION)
+   {
+      HistoricalBacktestStats stats;
+      RunHistoricalBacktest(base_params, stats);
+      BuildValidationReport(stats, base_params);
+   }
+   else
+   {
+      RunAutotuneBacktest(base_params);
+   }
+
+   g_historical_run_finished = true;
+   UpdateHistoricalReportDashboard();
+}
+
+void BuildBaseHistoricalParams(HistoricalParams &params)
+{
+   params.name = "CURRENT";
+   params.range_lookback = RangeLookbackM1;
+   params.breakout_buffer_atr = BreakoutBufferATR;
+   params.min_confidence = MinDisplayConfidence;
+   params.max_spread_to_atr = MaxSpreadToAtrRatio;
+   params.max_overextension_atr = MaxOverextensionAtr;
+   params.min_impulse_z = MinImpulseZForSignal;
+}
+
+void BuildAutotuneCandidate(const int candidate, const HistoricalParams &base_params, HistoricalParams &params)
+{
+   params = base_params;
+   params.name = "C" + IntegerToString(candidate);
+
+   if(candidate == 0)
+   {
+      params.name = "CURRENT";
+      return;
+   }
+
+   if(candidate == 1)
+   {
+      params.name = "FAST";
+      params.range_lookback = 20;
+      params.breakout_buffer_atr = 0.08;
+      params.min_confidence = 58.0;
+      params.max_spread_to_atr = 0.50;
+      params.max_overextension_atr = 2.20;
+      params.min_impulse_z = 1.05;
+   }
+   else if(candidate == 2)
+   {
+      params.name = "BALANCED";
+      params.range_lookback = 30;
+      params.breakout_buffer_atr = 0.12;
+      params.min_confidence = 60.0;
+      params.max_spread_to_atr = 0.45;
+      params.max_overextension_atr = 2.00;
+      params.min_impulse_z = 1.20;
+   }
+   else if(candidate == 3)
+   {
+      params.name = "STRICT_EXEC";
+      params.range_lookback = 30;
+      params.breakout_buffer_atr = 0.12;
+      params.min_confidence = 62.0;
+      params.max_spread_to_atr = 0.35;
+      params.max_overextension_atr = 1.80;
+      params.min_impulse_z = 1.25;
+   }
+   else if(candidate == 4)
+   {
+      params.name = "STRUCTURE";
+      params.range_lookback = 45;
+      params.breakout_buffer_atr = 0.15;
+      params.min_confidence = 62.0;
+      params.max_spread_to_atr = 0.45;
+      params.max_overextension_atr = 1.80;
+      params.min_impulse_z = 1.30;
+   }
+   else if(candidate == 5)
+   {
+      params.name = "ANTI_FAKEOUT";
+      params.range_lookback = 45;
+      params.breakout_buffer_atr = 0.18;
+      params.min_confidence = 64.0;
+      params.max_spread_to_atr = 0.40;
+      params.max_overextension_atr = 1.60;
+      params.min_impulse_z = 1.35;
+   }
+   else if(candidate == 6)
+   {
+      params.name = "MOMENTUM";
+      params.range_lookback = 25;
+      params.breakout_buffer_atr = 0.08;
+      params.min_confidence = 64.0;
+      params.max_spread_to_atr = 0.45;
+      params.max_overextension_atr = 2.20;
+      params.min_impulse_z = 1.10;
+   }
+   else if(candidate == 7)
+   {
+      params.name = "QUALITY";
+      params.range_lookback = 45;
+      params.breakout_buffer_atr = 0.12;
+      params.min_confidence = 66.0;
+      params.max_spread_to_atr = 0.35;
+      params.max_overextension_atr = 1.80;
+      params.min_impulse_z = 1.40;
+   }
+   else
+   {
+      params.name = "WIDE_FLOW";
+      params.range_lookback = 35;
+      params.breakout_buffer_atr = 0.10;
+      params.min_confidence = 60.0;
+      params.max_spread_to_atr = 0.55;
+      params.max_overextension_atr = 2.10;
+      params.min_impulse_z = 1.15;
+   }
+}
+
+void RunAutotuneBacktest(const HistoricalParams &base_params)
+{
+   HistoricalBacktestStats default_stats;
+   RunHistoricalBacktest(base_params, default_stats);
+
+   HistoricalBacktestStats best_stats = default_stats;
+   HistoricalParams best_params = base_params;
+   double best_objective = AutotuneObjective(default_stats);
+
+   for(int candidate = 1; candidate <= 8; candidate++)
+   {
+      if(IsStopped())
+         break;
+
+      HistoricalParams candidate_params;
+      BuildAutotuneCandidate(candidate, base_params, candidate_params);
+
+      HistoricalBacktestStats candidate_stats;
+      RunHistoricalBacktest(candidate_params, candidate_stats);
+      double objective = AutotuneObjective(candidate_stats);
+      if(objective > best_objective)
+      {
+         best_objective = objective;
+         best_stats = candidate_stats;
+         best_params = candidate_params;
+      }
+   }
+
+   BuildAutotuneReport(default_stats, best_stats, base_params, best_params);
+}
+
+double AutotuneObjective(const HistoricalBacktestStats &stats)
+{
+   if(stats.signals < AutotuneMinSignals)
+      return -100000.0 + (double)stats.signals;
+
+   return AverageR30(stats) * 100.0 +
+          HitRate30(stats) * 25.0 -
+          StopRate30(stats) * 15.0 +
+          ProfitFactorProxy(stats) * 4.0 +
+          ScoreEdge(stats) * 0.35;
+}
+
+void RunHistoricalBacktest(const HistoricalParams &params, HistoricalBacktestStats &stats)
+{
+   ResetHistoricalStats(stats);
+   stats.params_name = params.name;
+
+   string symbols[];
+   int first_profile_indices[];
+   int symbol_count = CollectHistoricalSymbols(symbols, first_profile_indices);
+   stats.symbols_requested = symbol_count;
+
+   for(int s = 0; s < symbol_count; s++)
+   {
+      if(IsStopped())
+         return;
+
+      MqlRates rates[];
+      int copied = LoadHistoricalM1Rates(symbols[s], rates);
+      if(copied <= 0)
+         continue;
+
+      stats.symbols_loaded++;
+      if(stats.from_time == 0 || rates[0].time < stats.from_time)
+         stats.from_time = rates[0].time;
+      if(rates[copied - 1].time > stats.to_time)
+         stats.to_time = rates[copied - 1].time;
+
+      for(int profile_index = 0; profile_index < ArraySize(g_profiles); profile_index++)
+      {
+         if(!g_profiles[profile_index].valid ||
+            UpperAscii(g_profiles[profile_index].symbol) != UpperAscii(symbols[s]))
+         {
+            continue;
+         }
+
+         ProcessHistoricalProfile(profile_index, rates, copied, params, stats);
+      }
+   }
+}
+
+int CollectHistoricalSymbols(string &symbols[], int &first_profile_indices[])
+{
+   ArrayResize(symbols, 0);
+   ArrayResize(first_profile_indices, 0);
+
+   for(int i = 0; i < ArraySize(g_profiles); i++)
+   {
+      if(!g_profiles[i].valid || !g_profiles[i].selected)
+         continue;
+
+      string candidate = UpperAscii(g_profiles[i].symbol);
+      bool exists = false;
+      for(int j = 0; j < ArraySize(symbols); j++)
+      {
+         if(UpperAscii(symbols[j]) == candidate)
+         {
+            exists = true;
+            break;
+         }
+      }
+
+      if(exists)
+         continue;
+
+      int next = ArraySize(symbols);
+      ArrayResize(symbols, next + 1);
+      ArrayResize(first_profile_indices, next + 1);
+      symbols[next] = g_profiles[i].symbol;
+      first_profile_indices[next] = i;
+   }
+
+   return ArraySize(symbols);
+}
+
+int LoadHistoricalM1Rates(const string symbol, MqlRates &rates[])
+{
+   ArrayResize(rates, 0);
+
+   datetime last_closed = iTime(symbol, PERIOD_M1, 1);
+   if(last_closed <= 0)
+      last_closed = TimeCurrent() - 60;
+
+   datetime from_time = last_closed - (datetime)HistoricalLookbackDays * 86400;
+   ResetLastError();
+   int copied = CopyRates(symbol, PERIOD_M1, from_time, last_closed, rates);
+   if(copied <= 0)
+      return 0;
+
+   ArraySetAsSeries(rates, false);
+   if(copied > 1 && rates[0].time > rates[copied - 1].time)
+      ReverseRates(rates);
+
+   return ArraySize(rates);
+}
+
+void ReverseRates(MqlRates &rates[])
+{
+   int total = ArraySize(rates);
+   for(int i = 0; i < total / 2; i++)
+   {
+      MqlRates tmp = rates[i];
+      rates[i] = rates[total - 1 - i];
+      rates[total - 1 - i] = tmp;
+   }
+}
+
+void ProcessHistoricalProfile(const int profile_index,
+                              MqlRates &rates[],
+                              const int copied,
+                              const HistoricalParams &params,
+                              HistoricalBacktestStats &stats)
+{
+   int tf_minutes = TimeframeMinutes(g_profiles[profile_index].scan_timeframe);
+   if(tf_minutes <= 0)
+      return;
+
+   int required = (params.range_lookback + ATRPeriod + 4) * tf_minutes + 70;
+   required = IntMax(required, HistoricalWarmupBars);
+   int last_index = copied - OutcomeHorizonMinutes3 - 2;
+   if(last_index <= required)
+      return;
+
+   stats.profiles_tested++;
+   int step = IntMax(1, HistoricalStepMinutes);
+   int cooldown_bars = IntMax(1, ValidSignalCooldownSeconds / 60);
+   int next_up_allowed = -1000000;
+   int next_down_allowed = -1000000;
+   int profile_signals = 0;
+
+   for(int i = required; i < last_index; i += step)
+   {
+      if(IsStopped())
+         return;
+      if(!IsHistoricalEvaluationBoundary(rates[i].time + 60, tf_minutes))
+         continue;
+
+      stats.bars_scanned++;
+
+      HistoricalSignalScore up_score;
+      HistoricalSignalScore down_score;
+      BuildHistoricalSignalScore(profile_index, rates, copied, i, DIR_UP, params, up_score);
+      BuildHistoricalSignalScore(profile_index, rates, copied, i, DIR_DOWN, params, down_score);
+
+      HistoricalSignalScore best_score = up_score;
+      if(down_score.valid && (!up_score.valid || down_score.displayed_score > up_score.displayed_score))
+         best_score = down_score;
+
+      if(!best_score.valid || best_score.displayed_score < params.min_confidence)
+         continue;
+
+      if(best_score.direction == DIR_UP && i < next_up_allowed)
+         continue;
+      if(best_score.direction == DIR_DOWN && i < next_down_allowed)
+         continue;
+
+      HistoricalOutcome outcome;
+      EvaluateHistoricalOutcome(rates, copied, i, best_score.direction,
+                                rates[i].close, best_score.atr_price,
+                                g_profiles[profile_index].pip_size,
+                                outcome);
+      AddHistoricalStats(stats, best_score, outcome);
+
+      if(best_score.direction == DIR_UP)
+         next_up_allowed = i + cooldown_bars;
+      else
+         next_down_allowed = i + cooldown_bars;
+
+      profile_signals++;
+      if(profile_signals >= HistoricalMaxSignalsPerProfile)
+         break;
+   }
+}
+
+void BuildHistoricalSignalScore(const int profile_index,
+                                MqlRates &rates[],
+                                const int copied,
+                                const int index,
+                                const int direction,
+                                const HistoricalParams &params,
+                                HistoricalSignalScore &score)
+{
+   ResetHistoricalSignalScore(score, direction);
+
+   int tf_minutes = TimeframeMinutes(g_profiles[profile_index].scan_timeframe);
+   if(tf_minutes <= 0 || index <= 0 || index >= copied)
+      return;
+
+   double current_open = 0.0;
+   double current_high = 0.0;
+   double current_low = 0.0;
+   double current_close = 0.0;
+   double current_volume = 0.0;
+   if(!AggregateHistoricalTfBar(rates, index, tf_minutes,
+                                current_open, current_high, current_low,
+                                current_close, current_volume))
+   {
+      return;
+   }
+
+   double atr = HistoricalATR(rates, index, tf_minutes, ATRPeriod);
+   if(atr <= 0.0)
+      return;
+
+   double range_high = 0.0;
+   double range_low = 0.0;
+   if(!HistoricalRangeBox(rates, index, tf_minutes, params.range_lookback, range_high, range_low))
+      return;
+
+   double range_width = range_high - range_low;
+   if(range_width <= 0.0)
+      return;
+
+   double pip_size = g_profiles[profile_index].pip_size;
+   double point = g_profiles[profile_index].point;
+   if(pip_size <= 0.0 || point <= 0.0)
+      return;
+
+   double spread_pips = HistoricalSpreadPips(rates[index], point, pip_size);
+   double median_spread_pips = HistoricalMedianSpreadPips(rates, index, point, pip_size, 120);
+   double spread_price = spread_pips * pip_size;
+   double spread_ratio = SafeDiv(spread_pips, MathMax(median_spread_pips, 0.1), 1.0);
+   double spread_to_atr = SafeDiv(spread_price, atr, 999.0);
+
+   if(IgnoreRolloverTime && IsRolloverTime(rates[index].time + 60))
+      return;
+   if(spread_pips <= 0.0 || spread_pips > MaxSpreadPips ||
+      spread_ratio > MaxSpreadMedianMultiplier ||
+      spread_to_atr > params.max_spread_to_atr)
+   {
+      return;
+   }
+
+   double buffer = Max3(spread_price * 1.20,
+                        atr * params.breakout_buffer_atr,
+                        MinBreakoutBufferPips * pip_size);
+   double boundary = (direction == DIR_UP ? range_high + buffer : range_low - buffer);
+   double breakout_distance = (direction == DIR_UP ? current_close - boundary : boundary - current_close);
+   bool breakout_candidate = (breakout_distance > 0.0);
+
+   double speed5 = HistoricalSpeedZ(rates, index, 5, 120, direction, pip_size);
+   double speed10 = HistoricalSpeedZ(rates, index, 10, 120, direction, pip_size);
+   double speed30 = HistoricalSpeedZ(rates, index, 30, 160, direction, pip_size);
+   double speed60 = HistoricalSpeedZ(rates, index, 60, 200, direction, pip_size);
+   double impulse_z = Max3(speed5, speed10, speed30);
+   bool impulse_candidate = (impulse_z >= params.min_impulse_z);
+   if(!breakout_candidate && !impulse_candidate)
+      return;
+
+   double execution_score = Clamp01(1.0 -
+                                    SmoothStep(params.max_spread_to_atr * 0.45,
+                                               params.max_spread_to_atr,
+                                               spread_to_atr));
+   execution_score = Clamp01(execution_score * 0.55 +
+                             (1.0 - SmoothStep(1.0, MaxSpreadMedianMultiplier, spread_ratio)) * 0.45);
+
+   double range_atr = range_width / atr;
+   double compression = Clamp01(0.10 + 0.90 *
+                                SmoothStep(0.65, 1.80, range_atr) *
+                                (1.0 - SmoothStep(7.0, 16.0, range_atr)));
+   double distance_units = SafeDiv(MathMax(breakout_distance, 0.0), buffer, 0.0);
+   double distance_atr = SafeDiv(MathMax(breakout_distance, 0.0), atr, 0.0);
+   double extension_penalty = SmoothStep(params.max_overextension_atr,
+                                         params.max_overextension_atr * 1.80,
+                                         distance_atr);
+   double distance_score = Clamp01(SmoothStep(0.20, 1.60, distance_units) *
+                                   (1.0 - extension_penalty * 0.45));
+   double candle_range = current_high - current_low;
+   double close_location = 0.50;
+   double body_quality = 0.50;
+   double wick_penalty = 0.0;
+   if(candle_range > 0.0)
+   {
+      close_location = (direction == DIR_UP ?
+                        Clamp01((current_close - current_low) / candle_range) :
+                        Clamp01((current_high - current_close) / candle_range));
+      double body = MathAbs(current_close - current_open);
+      double body_ratio = body / candle_range;
+      double directional_body = DirectionalValue(current_close - current_open, direction) / candle_range;
+      body_quality = Clamp01(SmoothStep(0.18, 0.62, body_ratio) * 0.65 +
+                             SmoothStep(0.03, 0.38, directional_body) * 0.35);
+      double rejection_wick = (direction == DIR_UP ?
+                               current_high - MathMax(current_open, current_close) :
+                               MathMin(current_open, current_close) - current_low);
+      wick_penalty = Clamp01(rejection_wick / candle_range);
+   }
+
+   double hold_score = HistoricalHoldScore(rates, index, direction, boundary);
+   double breakout_score = Clamp01(compression * 0.17 +
+                                   distance_score * 0.24 +
+                                   close_location * 0.17 +
+                                   hold_score * 0.20 +
+                                   body_quality * 0.17 -
+                                   wick_penalty * 0.15);
+
+   double speed_score = ScoreFromZ(impulse_z, params.min_impulse_z, params.min_impulse_z + 2.75);
+   double acceleration = SmoothStep(0.0, 0.10,
+                                    SafeDiv(DirectionalValue(rates[index].close - rates[index - 5].close, direction) / pip_size, 5.0, 0.0) -
+                                    SafeDiv(DirectionalValue(rates[index].close - rates[index - 30].close, direction) / pip_size, 30.0, 0.0));
+   double atr_expansion = SmoothStep(0.20, 1.25,
+                                     SafeDiv(DirectionalValue((direction == DIR_UP ?
+                                                              current_high - current_open :
+                                                              current_open - current_low),
+                                                             DIR_UP),
+                                             atr,
+                                             0.0));
+   double volume_score = ScoreFromZ(HistoricalTickVolumeZ(rates, index, 160), 0.50, 2.80);
+   double continuation = SmoothStep(0.0, 0.80,
+                                    SafeDiv(DirectionalValue(rates[index].close - rates[index - 5].close, direction),
+                                            atr,
+                                            0.0));
+   double extended_atr = SafeDiv(DirectionalValue(rates[index].close - rates[index - 30].close, direction),
+                                 atr,
+                                 0.0);
+   double exhaustion = SmoothStep(MaxExhaustionAtr, MaxExhaustionAtr * 1.70, extended_atr);
+   double impulse_score = Clamp01(speed_score * 0.30 +
+                                  atr_expansion * 0.20 +
+                                  volume_score * 0.15 +
+                                  acceleration * 0.15 +
+                                  continuation * 0.20 -
+                                  exhaustion * 0.22);
+
+   double flow_score = HistoricalLocalFlowScore(rates, index, direction, atr);
+   double m5_context = SmoothStep(-0.10, 0.55,
+                                  SafeDiv(DirectionalValue(rates[index].close - rates[index - 5].close, direction),
+                                          atr,
+                                          0.0));
+   double m15_context = SmoothStep(-0.10, 0.45,
+                                   SafeDiv(DirectionalValue(rates[index].close - rates[index - 15].close, direction),
+                                           atr,
+                                           0.0));
+   double regime_score = Clamp01(SessionQualityScore(rates[index].time) * 0.35 +
+                                 m5_context * 0.30 +
+                                 m15_context * 0.25 +
+                                 (1.0 - SmoothStep(0.0, 4.5, MathAbs(range_atr - 3.0))) * 0.10);
+
+   double raw01 = breakout_score * 0.26 +
+                  impulse_score * 0.26 +
+                  execution_score * 0.18 +
+                  flow_score * 0.16 +
+                  regime_score * 0.14;
+   double final_score = 100.0 * SmoothStep(0.35, 0.92, raw01);
+
+   string caps = "";
+   if(hold_score < 0.35 && breakout_candidate)
+      final_score = ApplyHistoricalCap(final_score, 74.0, caps, "weak_hold");
+   if(body_quality < 0.35)
+      final_score = ApplyHistoricalCap(final_score, 79.0, caps, "weak_body");
+   if(flow_score < 0.35)
+      final_score = ApplyHistoricalCap(final_score, 69.0, caps, "flow_conflict");
+   if(UseMultiTimeframeContextCaps && (m5_context < 0.20 || m15_context < 0.20))
+      final_score = ApplyHistoricalCap(final_score, 69.0, caps, "mtf_reject");
+   if(exhaustion >= 0.45)
+      final_score = ApplyHistoricalCap(final_score, 75.0, caps, "overextended");
+   if(final_score > 95.0)
+      final_score = 95.0;
+
+   score.valid = (final_score >= params.min_confidence);
+   score.displayed_score = Clamp(final_score, 0.0, 100.0);
+   score.raw_score = score.displayed_score;
+   score.execution_score = execution_score;
+   score.breakout_score = breakout_score;
+   score.impulse_score = impulse_score;
+   score.flow_score = flow_score;
+   score.regime_score = regime_score;
+   score.atr_price = atr;
+   score.spread_pips = spread_pips;
+   score.spread_to_atr = spread_to_atr;
+   score.range_width_pips = range_width / pip_size;
+   score.breakout_distance_atr = SafeDiv(MathMax(breakout_distance, 0.0), atr, 0.0);
+   score.reason = StringFormat("BRK %.2f IMP %.2f FLOW %.2f EXEC %.2f %s",
+                               breakout_score,
+                               impulse_score,
+                               flow_score,
+                               execution_score,
+                               caps);
+}
+
+void ResetHistoricalSignalScore(HistoricalSignalScore &score, const int direction)
+{
+   score.valid = false;
+   score.direction = direction;
+   score.displayed_score = 0.0;
+   score.raw_score = 0.0;
+   score.execution_score = 0.0;
+   score.breakout_score = 0.0;
+   score.impulse_score = 0.0;
+   score.flow_score = 0.0;
+   score.regime_score = 0.0;
+   score.atr_price = 0.0;
+   score.spread_pips = 0.0;
+   score.spread_to_atr = 0.0;
+   score.range_width_pips = 0.0;
+   score.breakout_distance_atr = 0.0;
+   score.reason = "";
+}
+
+bool AggregateHistoricalTfBar(MqlRates &rates[],
+                              const int end_index,
+                              const int tf_minutes,
+                              double &open,
+                              double &high,
+                              double &low,
+                              double &close,
+                              double &tick_volume)
+{
+   int start_index = end_index - tf_minutes + 1;
+   if(start_index < 0 || end_index >= ArraySize(rates))
+      return false;
+
+   open = rates[start_index].open;
+   high = rates[start_index].high;
+   low = rates[start_index].low;
+   close = rates[end_index].close;
+   tick_volume = 0.0;
+
+   for(int i = start_index; i <= end_index; i++)
+   {
+      high = MathMax(high, rates[i].high);
+      low = MathMin(low, rates[i].low);
+      tick_volume += (double)rates[i].tick_volume;
+   }
+
+   return true;
+}
+
+double HistoricalATR(MqlRates &rates[], const int current_index, const int tf_minutes, const int period)
+{
+   double total = 0.0;
+   int counted = 0;
+   for(int bar = 1; bar <= period; bar++)
+   {
+      int end_index = current_index - bar * tf_minutes;
+      int previous_end = current_index - (bar + 1) * tf_minutes;
+      if(end_index < 0 || previous_end < 0)
+         break;
+
+      double open = 0.0;
+      double high = 0.0;
+      double low = 0.0;
+      double close = 0.0;
+      double volume = 0.0;
+      if(!AggregateHistoricalTfBar(rates, end_index, tf_minutes, open, high, low, close, volume))
+         break;
+
+      double previous_close = rates[previous_end].close;
+      total += Max3(high - low, MathAbs(high - previous_close), MathAbs(low - previous_close));
+      counted++;
+   }
+
+   if(counted <= 0)
+      return 0.0;
+   return total / (double)counted;
+}
+
+bool HistoricalRangeBox(MqlRates &rates[],
+                        const int current_index,
+                        const int tf_minutes,
+                        const int lookback,
+                        double &range_high,
+                        double &range_low)
+{
+   bool initialized = false;
+   for(int bar = 1; bar <= lookback; bar++)
+   {
+      int end_index = current_index - bar * tf_minutes;
+      if(end_index < 0)
+         return false;
+
+      double open = 0.0;
+      double high = 0.0;
+      double low = 0.0;
+      double close = 0.0;
+      double volume = 0.0;
+      if(!AggregateHistoricalTfBar(rates, end_index, tf_minutes, open, high, low, close, volume))
+         return false;
+
+      if(!initialized)
+      {
+         range_high = high;
+         range_low = low;
+         initialized = true;
+      }
+      else
+      {
+         range_high = MathMax(range_high, high);
+         range_low = MathMin(range_low, low);
+      }
+   }
+
+   return initialized;
+}
+
+double HistoricalSpreadPips(const MqlRates &rate, const double point, const double pip_size)
+{
+   if(rate.spread > 0)
+      return (double)rate.spread * point / pip_size;
+   return MathMin(MaxSpreadPips * 0.50, 1.0);
+}
+
+double HistoricalMedianSpreadPips(MqlRates &rates[],
+                                  const int index,
+                                  const double point,
+                                  const double pip_size,
+                                  const int lookback)
+{
+   int count = IntMin(lookback, index);
+   if(count <= 0)
+      return HistoricalSpreadPips(rates[index], point, pip_size);
+
+   double values[];
+   ArrayResize(values, count);
+   for(int i = 0; i < count; i++)
+      values[i] = HistoricalSpreadPips(rates[index - 1 - i], point, pip_size);
+
+   return MedianOfArray(values, count);
+}
+
+double HistoricalTickVolumeZ(MqlRates &rates[], const int index, const int lookback)
+{
+   int count = IntMin(lookback, index);
+   if(count <= 10)
+      return 0.0;
+
+   double values[];
+   ArrayResize(values, count);
+   for(int i = 0; i < count; i++)
+      values[i] = (double)rates[index - 1 - i].tick_volume;
+
+   double median = MedianOfArray(values, count);
+   double mad = MedianAbsDeviation(values, count, median);
+   return RobustZ((double)rates[index].tick_volume, median, mad);
+}
+
+double HistoricalSpeedZ(MqlRates &rates[],
+                        const int index,
+                        const int window_minutes,
+                        const int lookback,
+                        const int direction,
+                        const double pip_size)
+{
+   if(index <= window_minutes || pip_size <= 0.0)
+      return 0.0;
+
+   int count = IntMin(lookback, index - window_minutes - 1);
+   if(count <= 10)
+      return 0.0;
+
+   double values[];
+   ArrayResize(values, count);
+   for(int i = 0; i < count; i++)
+   {
+      int end_index = index - 1 - i;
+      values[i] = MathAbs(rates[end_index].close - rates[end_index - window_minutes].close) / pip_size;
+   }
+
+   double current = DirectionalValue(rates[index].close - rates[index - window_minutes].close, direction) / pip_size;
+   double median = MedianOfArray(values, count);
+   double mad = MedianAbsDeviation(values, count, median);
+   return RobustZ(current, median, mad);
+}
+
+double HistoricalHoldScore(MqlRates &rates[],
+                           const int index,
+                           const int direction,
+                           const double boundary)
+{
+   int outside = 0;
+   for(int i = index; i >= 0 && i > index - 4; i--)
+   {
+      bool is_outside = (direction == DIR_UP ? rates[i].close > boundary : rates[i].close < boundary);
+      if(!is_outside)
+         break;
+      outside++;
+   }
+
+   if(outside <= 0)
+      return 0.0;
+   if(outside == 1)
+      return 0.50;
+   if(outside == 2)
+      return 0.75;
+   return 1.0;
+}
+
+double HistoricalLocalFlowScore(MqlRates &rates[], const int index, const int direction, const double atr)
+{
+   if(index < 60 || atr <= 0.0)
+      return 0.50;
+
+   double move30 = SafeDiv(DirectionalValue(rates[index].close - rates[index - 30].close, direction), atr, 0.0);
+   double move60 = SafeDiv(DirectionalValue(rates[index].close - rates[index - 60].close, direction), atr, 0.0);
+   double edge = move30 * 0.60 + move60 * 0.40;
+   return SmoothStep(-0.10, 0.70, edge);
+}
+
+void EvaluateHistoricalOutcome(MqlRates &rates[],
+                               const int copied,
+                               const int signal_index,
+                               const int direction,
+                               const double entry,
+                               const double atr_price,
+                               const double pip_size,
+                               HistoricalOutcome &outcome)
+{
+   ResetHistoricalOutcome(outcome);
+   EvaluateHistoricalOutcomeAtHorizon(rates, copied, signal_index, direction, entry,
+                                      atr_price, pip_size, OutcomeHorizonMinutes1,
+                                      outcome.mfe_5m_pips, outcome.mae_5m_pips,
+                                      outcome.result_5m_R, outcome.target_5m, outcome.stop_5m);
+   EvaluateHistoricalOutcomeAtHorizon(rates, copied, signal_index, direction, entry,
+                                      atr_price, pip_size, OutcomeHorizonMinutes2,
+                                      outcome.mfe_15m_pips, outcome.mae_15m_pips,
+                                      outcome.result_15m_R, outcome.target_15m, outcome.stop_15m);
+   EvaluateHistoricalOutcomeAtHorizon(rates, copied, signal_index, direction, entry,
+                                      atr_price, pip_size, OutcomeHorizonMinutes3,
+                                      outcome.mfe_30m_pips, outcome.mae_30m_pips,
+                                      outcome.result_30m_R, outcome.target_30m, outcome.stop_30m);
+}
+
+void ResetHistoricalOutcome(HistoricalOutcome &outcome)
+{
+   outcome.mfe_5m_pips = 0.0;
+   outcome.mae_5m_pips = 0.0;
+   outcome.result_5m_R = 0.0;
+   outcome.target_5m = false;
+   outcome.stop_5m = false;
+   outcome.mfe_15m_pips = 0.0;
+   outcome.mae_15m_pips = 0.0;
+   outcome.result_15m_R = 0.0;
+   outcome.target_15m = false;
+   outcome.stop_15m = false;
+   outcome.mfe_30m_pips = 0.0;
+   outcome.mae_30m_pips = 0.0;
+   outcome.result_30m_R = 0.0;
+   outcome.target_30m = false;
+   outcome.stop_30m = false;
+}
+
+void EvaluateHistoricalOutcomeAtHorizon(MqlRates &rates[],
+                                        const int copied,
+                                        const int signal_index,
+                                        const int direction,
+                                        const double entry,
+                                        const double atr_price,
+                                        const double pip_size,
+                                        const int horizon_minutes,
+                                        double &mfe_pips,
+                                        double &mae_pips,
+                                        double &result_R,
+                                        bool &target_hit,
+                                        bool &stop_hit)
+{
+   mfe_pips = 0.0;
+   mae_pips = 0.0;
+   result_R = 0.0;
+   target_hit = false;
+   stop_hit = false;
+
+   double target_price = atr_price * OutcomeTargetAtr;
+   double stop_price = atr_price * OutcomeStopAtr;
+   if(target_price <= 0.0 || stop_price <= 0.0 || pip_size <= 0.0)
+      return;
+
+   int last_index = IntMin(copied - 1, signal_index + horizon_minutes);
+   for(int i = signal_index + 1; i <= last_index; i++)
+   {
+      double favorable = 0.0;
+      double adverse = 0.0;
+      if(direction == DIR_UP)
+      {
+         favorable = rates[i].high - entry;
+         adverse = entry - rates[i].low;
+      }
+      else
+      {
+         favorable = entry - rates[i].low;
+         adverse = rates[i].high - entry;
+      }
+
+      mfe_pips = MathMax(mfe_pips, favorable / pip_size);
+      mae_pips = MathMax(mae_pips, adverse / pip_size);
+
+      bool target_now = (favorable >= target_price);
+      bool stop_now = (adverse >= stop_price);
+      if(!target_hit && !stop_hit)
+      {
+         if(target_now && stop_now)
+            stop_hit = true; // pessimistic for same-M1 ambiguity.
+         else if(target_now)
+            target_hit = true;
+         else if(stop_now)
+            stop_hit = true;
+      }
+   }
+
+   if(target_hit && !stop_hit)
+      result_R = 1.0;
+   else if(stop_hit && !target_hit)
+      result_R = -1.0;
+   else
+   {
+      double close_move = DirectionalValue(rates[last_index].close - entry, direction);
+      result_R = Clamp(SafeDiv(close_move, target_price, 0.0), -1.0, 1.0);
+   }
+}
+
+void AddHistoricalStats(HistoricalBacktestStats &stats,
+                        const HistoricalSignalScore &score,
+                        const HistoricalOutcome &outcome)
+{
+   stats.signals++;
+   stats.sum_score += score.displayed_score;
+   stats.sum_result_5m_R += outcome.result_5m_R;
+   stats.sum_result_15m_R += outcome.result_15m_R;
+   stats.sum_result_30m_R += outcome.result_30m_R;
+
+   if(outcome.target_5m)
+      stats.target_5m++;
+   if(outcome.stop_5m)
+      stats.stop_5m++;
+   if(outcome.target_15m)
+      stats.target_15m++;
+   if(outcome.stop_15m)
+      stats.stop_15m++;
+   if(outcome.target_30m)
+   {
+      stats.target_30m++;
+      stats.target_score_sum += score.displayed_score;
+      stats.target_score_count++;
+   }
+   if(outcome.stop_30m)
+   {
+      stats.stop_30m++;
+      stats.stop_score_sum += score.displayed_score;
+      stats.stop_score_count++;
+   }
+
+   if(outcome.result_30m_R > 0.0)
+      stats.gross_win_R += outcome.result_30m_R;
+   else if(outcome.result_30m_R < 0.0)
+      stats.gross_loss_R += MathAbs(outcome.result_30m_R);
+
+   AddHistoricalBucketStats(stats, ScoreBucketFloor(score.displayed_score), outcome.result_30m_R);
+}
+
+void AddHistoricalBucketStats(HistoricalBacktestStats &stats, const int bucket, const double result_R)
+{
+   if(bucket >= 85)
+   {
+      stats.bucket85_count++;
+      stats.bucket85_R += result_R;
+   }
+   else if(bucket >= 80)
+   {
+      stats.bucket80_count++;
+      stats.bucket80_R += result_R;
+   }
+   else if(bucket >= 75)
+   {
+      stats.bucket75_count++;
+      stats.bucket75_R += result_R;
+   }
+   else if(bucket >= 70)
+   {
+      stats.bucket70_count++;
+      stats.bucket70_R += result_R;
+   }
+   else if(bucket >= 65)
+   {
+      stats.bucket65_count++;
+      stats.bucket65_R += result_R;
+   }
+   else
+   {
+      stats.bucket60_count++;
+      stats.bucket60_R += result_R;
+   }
+}
+
+void ResetHistoricalStats(HistoricalBacktestStats &stats)
+{
+   stats.params_name = "";
+   stats.from_time = 0;
+   stats.to_time = 0;
+   stats.symbols_requested = 0;
+   stats.symbols_loaded = 0;
+   stats.profiles_tested = 0;
+   stats.bars_scanned = 0;
+   stats.signals = 0;
+   stats.target_5m = 0;
+   stats.stop_5m = 0;
+   stats.target_15m = 0;
+   stats.stop_15m = 0;
+   stats.target_30m = 0;
+   stats.stop_30m = 0;
+   stats.sum_score = 0.0;
+   stats.sum_result_5m_R = 0.0;
+   stats.sum_result_15m_R = 0.0;
+   stats.sum_result_30m_R = 0.0;
+   stats.gross_win_R = 0.0;
+   stats.gross_loss_R = 0.0;
+   stats.target_score_sum = 0.0;
+   stats.target_score_count = 0;
+   stats.stop_score_sum = 0.0;
+   stats.stop_score_count = 0;
+   stats.bucket60_count = 0;
+   stats.bucket65_count = 0;
+   stats.bucket70_count = 0;
+   stats.bucket75_count = 0;
+   stats.bucket80_count = 0;
+   stats.bucket85_count = 0;
+   stats.bucket60_R = 0.0;
+   stats.bucket65_R = 0.0;
+   stats.bucket70_R = 0.0;
+   stats.bucket75_R = 0.0;
+   stats.bucket80_R = 0.0;
+   stats.bucket85_R = 0.0;
+}
+
+void BuildValidationReport(const HistoricalBacktestStats &stats, const HistoricalParams &params)
+{
+   ClearHistoricalReport();
+   AddHistoricalReportLine("FXNEWS VALIDATION REPORT | M1 HISTORY BACKTEST | NO FILE OUTPUT");
+   AddHistoricalReportLine(StringFormat("Window: %s -> %s | Lookback=%d days | Symbols %d/%d | Profiles=%d",
+                                        TimeToString(stats.from_time, TIME_DATE | TIME_MINUTES),
+                                        TimeToString(stats.to_time, TIME_DATE | TIME_MINUTES),
+                                        HistoricalLookbackDays,
+                                        stats.symbols_loaded,
+                                        stats.symbols_requested,
+                                        stats.profiles_tested));
+   AddHistoricalReportLine(StringFormat("Params: range=%d bufferATR=%.2f minScore=%.1f spreadATR=%.2f overext=%.2f impulseZ=%.2f",
+                                        params.range_lookback,
+                                        params.breakout_buffer_atr,
+                                        params.min_confidence,
+                                        params.max_spread_to_atr,
+                                        params.max_overextension_atr,
+                                        params.min_impulse_z));
+   AddHistoricalReportLine(StringFormat("Signals=%d | Bars scanned=%d | Avg score=%.1f | PF=%.2f | AvgR 5/15/30m = %.3f / %.3f / %.3f",
+                                        stats.signals,
+                                        stats.bars_scanned,
+                                        AverageScore(stats),
+                                        ProfitFactorProxy(stats),
+                                        AverageR5(stats),
+                                        AverageR15(stats),
+                                        AverageR30(stats)));
+   AddHistoricalReportLine(StringFormat("Target-first 5/15/30m = %.1f%% / %.1f%% / %.1f%% | Stop-first 5/15/30m = %.1f%% / %.1f%% / %.1f%%",
+                                        HitRate5(stats) * 100.0,
+                                        HitRate15(stats) * 100.0,
+                                        HitRate30(stats) * 100.0,
+                                        StopRate5(stats) * 100.0,
+                                        StopRate15(stats) * 100.0,
+                                        StopRate30(stats) * 100.0));
+   AddHistoricalReportLine(StringFormat("Score edge: target-first avg %.1f%% vs stop-first avg %.1f%% = %+0.1f pts",
+                                        AverageTargetScore(stats),
+                                        AverageStopScore(stats),
+                                        ScoreEdge(stats)));
+   AddHistoricalReportLine("Buckets by displayed score: count | avg 30m R");
+   AddHistoricalReportLine(FormatHistoricalBucketLine("60-64", stats.bucket60_count, stats.bucket60_R));
+   AddHistoricalReportLine(FormatHistoricalBucketLine("65-69", stats.bucket65_count, stats.bucket65_R));
+   AddHistoricalReportLine(FormatHistoricalBucketLine("70-74", stats.bucket70_count, stats.bucket70_R));
+   AddHistoricalReportLine(FormatHistoricalBucketLine("75-79", stats.bucket75_count, stats.bucket75_R));
+   AddHistoricalReportLine(FormatHistoricalBucketLine("80-84", stats.bucket80_count, stats.bucket80_R));
+   AddHistoricalReportLine(FormatHistoricalBucketLine("85+", stats.bucket85_count, stats.bucket85_R));
+   AddHistoricalReportLine("Interpretation: score is a ranking metric. A useful score should show better R/PF in higher buckets.");
+}
+
+void BuildAutotuneReport(const HistoricalBacktestStats &default_stats,
+                         const HistoricalBacktestStats &best_stats,
+                         const HistoricalParams &default_params,
+                         const HistoricalParams &best_params)
+{
+   ClearHistoricalReport();
+   AddHistoricalReportLine("FXNEWS AUTOTUNE REPORT | M1 HISTORY BACKTEST | NO FILE OUTPUT");
+   AddHistoricalReportLine(StringFormat("Window: %s -> %s | Lookback=%d days | Symbols %d/%d | Profiles=%d",
+                                        TimeToString(default_stats.from_time, TIME_DATE | TIME_MINUTES),
+                                        TimeToString(default_stats.to_time, TIME_DATE | TIME_MINUTES),
+                                        HistoricalLookbackDays,
+                                        default_stats.symbols_loaded,
+                                        default_stats.symbols_requested,
+                                        default_stats.profiles_tested));
+   AddHistoricalReportLine(StringFormat("Current: signals=%d avgScore=%.1f PF=%.2f AvgR30=%.3f Hit30=%.1f%% Edge=%+.1f pts",
+                                        default_stats.signals,
+                                        AverageScore(default_stats),
+                                        ProfitFactorProxy(default_stats),
+                                        AverageR30(default_stats),
+                                        HitRate30(default_stats) * 100.0,
+                                        ScoreEdge(default_stats)));
+   AddHistoricalReportLine(StringFormat("Best %s: signals=%d avgScore=%.1f PF=%.2f AvgR30=%.3f Hit30=%.1f%% Edge=%+.1f pts",
+                                        best_params.name,
+                                        best_stats.signals,
+                                        AverageScore(best_stats),
+                                        ProfitFactorProxy(best_stats),
+                                        AverageR30(best_stats),
+                                        HitRate30(best_stats) * 100.0,
+                                        ScoreEdge(best_stats)));
+   AddHistoricalReportLine(StringFormat("Improvement: AvgR30 %+0.3f | Hit30 %+0.1f pts | PF %+0.2f | score edge %+0.1f pts",
+                                        AverageR30(best_stats) - AverageR30(default_stats),
+                                        (HitRate30(best_stats) - HitRate30(default_stats)) * 100.0,
+                                        ProfitFactorProxy(best_stats) - ProfitFactorProxy(default_stats),
+                                        ScoreEdge(best_stats) - ScoreEdge(default_stats)));
+   AddHistoricalReportLine(StringFormat("Recommended effective settings: RangeLookbackM1=%d BreakoutBufferATR=%.2f MinDisplayConfidence=%.1f",
+                                        best_params.range_lookback,
+                                        best_params.breakout_buffer_atr,
+                                        best_params.min_confidence));
+   AddHistoricalReportLine(StringFormat("Recommended effective settings: MaxSpreadToAtrRatio=%.2f MaxOverextensionAtr=%.2f MinImpulseZForSignal=%.2f",
+                                        best_params.max_spread_to_atr,
+                                        best_params.max_overextension_atr,
+                                        best_params.min_impulse_z));
+   AddHistoricalReportLine(StringFormat("Current settings baseline: Range=%d BufferATR=%.2f MinScore=%.1f SpreadATR=%.2f Overext=%.2f ImpulseZ=%.2f",
+                                        default_params.range_lookback,
+                                        default_params.breakout_buffer_atr,
+                                        default_params.min_confidence,
+                                        default_params.max_spread_to_atr,
+                                        default_params.max_overextension_atr,
+                                        default_params.min_impulse_z));
+   AddHistoricalReportLine("Best score buckets: count | avg 30m R");
+   AddHistoricalReportLine(FormatHistoricalBucketLine("60-64", best_stats.bucket60_count, best_stats.bucket60_R));
+   AddHistoricalReportLine(FormatHistoricalBucketLine("65-69", best_stats.bucket65_count, best_stats.bucket65_R));
+   AddHistoricalReportLine(FormatHistoricalBucketLine("70-74", best_stats.bucket70_count, best_stats.bucket70_R));
+   AddHistoricalReportLine(FormatHistoricalBucketLine("75-79", best_stats.bucket75_count, best_stats.bucket75_R));
+   AddHistoricalReportLine(FormatHistoricalBucketLine("80-84", best_stats.bucket80_count, best_stats.bucket80_R));
+   AddHistoricalReportLine(FormatHistoricalBucketLine("85+", best_stats.bucket85_count, best_stats.bucket85_R));
+   if(best_stats.signals < AutotuneMinSignals)
+      AddHistoricalReportLine("WARNING: best candidate has low sample count; treat settings as exploratory.");
+   else
+      AddHistoricalReportLine("Use recommended settings only after confirming results on a later out-of-sample period.");
+}
+
+string FormatHistoricalBucketLine(const string label, const int count, const double sum_R)
+{
+   return StringFormat("  %s : %5d | %+0.3f R", label, count, SafeDiv(sum_R, (double)count, 0.0));
+}
+
+double AverageScore(const HistoricalBacktestStats &stats)
+{
+   return SafeDiv(stats.sum_score, (double)stats.signals, 0.0);
+}
+
+double AverageR5(const HistoricalBacktestStats &stats)
+{
+   return SafeDiv(stats.sum_result_5m_R, (double)stats.signals, 0.0);
+}
+
+double AverageR15(const HistoricalBacktestStats &stats)
+{
+   return SafeDiv(stats.sum_result_15m_R, (double)stats.signals, 0.0);
+}
+
+double AverageR30(const HistoricalBacktestStats &stats)
+{
+   return SafeDiv(stats.sum_result_30m_R, (double)stats.signals, 0.0);
+}
+
+double HitRate5(const HistoricalBacktestStats &stats)
+{
+   return SafeDiv((double)stats.target_5m, (double)stats.signals, 0.0);
+}
+
+double HitRate15(const HistoricalBacktestStats &stats)
+{
+   return SafeDiv((double)stats.target_15m, (double)stats.signals, 0.0);
+}
+
+double HitRate30(const HistoricalBacktestStats &stats)
+{
+   return SafeDiv((double)stats.target_30m, (double)stats.signals, 0.0);
+}
+
+double StopRate5(const HistoricalBacktestStats &stats)
+{
+   return SafeDiv((double)stats.stop_5m, (double)stats.signals, 0.0);
+}
+
+double StopRate15(const HistoricalBacktestStats &stats)
+{
+   return SafeDiv((double)stats.stop_15m, (double)stats.signals, 0.0);
+}
+
+double StopRate30(const HistoricalBacktestStats &stats)
+{
+   return SafeDiv((double)stats.stop_30m, (double)stats.signals, 0.0);
+}
+
+double ProfitFactorProxy(const HistoricalBacktestStats &stats)
+{
+   return SafeDiv(stats.gross_win_R, stats.gross_loss_R, stats.gross_win_R > 0.0 ? 99.0 : 0.0);
+}
+
+double AverageTargetScore(const HistoricalBacktestStats &stats)
+{
+   return SafeDiv(stats.target_score_sum, (double)stats.target_score_count, 0.0);
+}
+
+double AverageStopScore(const HistoricalBacktestStats &stats)
+{
+   return SafeDiv(stats.stop_score_sum, (double)stats.stop_score_count, 0.0);
+}
+
+double ScoreEdge(const HistoricalBacktestStats &stats)
+{
+   if(stats.target_score_count <= 0 || stats.stop_score_count <= 0)
+      return 0.0;
+   return AverageTargetScore(stats) - AverageStopScore(stats);
+}
+
+double ApplyHistoricalCap(const double score, const double cap, string &caps, const string reason)
+{
+   if(score <= cap)
+      return score;
+   if(caps != "")
+      caps += "|";
+   caps += reason;
+   return cap;
+}
+
+bool IsHistoricalEvaluationBoundary(const datetime close_time, const int tf_minutes)
+{
+   if(tf_minutes <= 1)
+      return true;
+
+   MqlDateTime parts;
+   TimeToStruct(close_time, parts);
+   int minute_of_day = parts.hour * 60 + parts.min;
+   if(tf_minutes >= 1440)
+      return (parts.hour == 0 && parts.min == 0);
+
+   return ((minute_of_day % tf_minutes) == 0);
+}
+
+int TimeframeMinutes(const ENUM_TIMEFRAMES timeframe)
+{
+   if(timeframe == PERIOD_M1)
+      return 1;
+   if(timeframe == PERIOD_M5)
+      return 5;
+   if(timeframe == PERIOD_M15)
+      return 15;
+   if(timeframe == PERIOD_M30)
+      return 30;
+   if(timeframe == PERIOD_H1)
+      return 60;
+   if(timeframe == PERIOD_H4)
+      return 240;
+   if(timeframe == PERIOD_H8)
+      return 480;
+   if(timeframe == PERIOD_H12)
+      return 720;
+   if(timeframe == PERIOD_D1)
+      return 1440;
+   return 0;
+}
+
+void SetHistoricalReportHeader(const string text)
+{
+   ClearHistoricalReport();
+   AddHistoricalReportLine(text);
+   AddHistoricalReportLine("The EA is not live-scanning in this mode and does not write validation files.");
+   UpdateHistoricalReportDashboard();
+}
+
+void ClearHistoricalReport()
+{
+   ArrayResize(g_historical_report_lines, 0);
+}
+
+void AddHistoricalReportLine(const string line)
+{
+   int next = ArraySize(g_historical_report_lines);
+   if(next >= DASHBOARD_MAX_OBJECTS)
+      return;
+   ArrayResize(g_historical_report_lines, next + 1);
+   g_historical_report_lines[next] = line;
+}
+
+void UpdateHistoricalReportDashboard()
+{
+   EnsureDashboardObjects();
+   int rows = ArraySize(g_historical_report_lines);
+   for(int row = 0; row < DASHBOARD_MAX_OBJECTS; row++)
+   {
+      string text = (row < rows ? g_historical_report_lines[row] : "");
+      ObjectSetString(0, DashboardName(row), OBJPROP_TEXT, text);
+      ObjectSetString(0, DashboardName(row), OBJPROP_TOOLTIP, text);
+      ObjectSetInteger(0, DashboardName(row), OBJPROP_COLOR, clrRed);
+   }
+   ChartRedraw(0);
 }
 
 int ParseSymbols()

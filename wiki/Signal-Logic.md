@@ -86,3 +86,15 @@ With `EnableOutcomeLabeling=true`, the EA later appends `OUTCOME` rows for 5, 15
 Use the CSV to validate score buckets empirically. Compare 60-69, 70-79, 80-89, and 90+ buckets by continuation score, target-before-stop rate, MFE/ATR, and MAE/ATR. Higher scores should become stronger radar events over enough samples, not guaranteed winners.
 
 Preferred score buckets are now `60-64`, `65-69`, `70-74`, `75-79`, `80-84`, and `85+`.
+
+## Historical Validation Mode
+
+`FXNEWS_MODE_VALIDATION` is an on-chart historical simulation. It pulls closed M1 bars from MT5's local history database for every configured symbol, walks backward-to-forward over the last `HistoricalLookbackDays`, simulates symbol/timeframe alert candidates, evaluates 5/15/30 minute forward MFE/MAE outcomes, and renders the summary on the chart.
+
+This mode does not write CSV logs or report files. The report includes signal count, average score, profit-factor proxy, average R, target-first and stop-first rates, score edge, and bucket quality.
+
+## Autotune Mode
+
+`FXNEWS_MODE_AUTOTUNE` runs the same M1-history simulation over the current inputs and a small practical candidate set. The report shows the best candidate, the current baseline, and improvement in 30 minute R, hit rate, profit-factor proxy, and score edge.
+
+Autotune reports recommended effective settings. It does not permanently rewrite MT5 inputs, because MQL5 input variables are read-only at runtime and the project intentionally avoids writing settings files.

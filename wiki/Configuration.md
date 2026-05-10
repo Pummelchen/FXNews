@@ -2,6 +2,7 @@
 
 ## Important Inputs
 
+- `OperatingMode`: `FXNEWS_MODE_LIVE`, `FXNEWS_MODE_VALIDATION`, or `FXNEWS_MODE_AUTOTUNE`. Default `FXNEWS_MODE_LIVE`.
 - `SymbolsToScan`: comma-separated FX list.
 - `TimeframesToScan`: comma-separated timeframe list. Default `M1,M5,M15,M30,H1,H4,H8,H12,D1`.
 - `ScanIntervalSeconds`: score recalculation interval. Default `1`.
@@ -54,6 +55,11 @@
 - `MinCopyTicksForGoodQuality`: minimum valid ticks for good quality. Default `12`.
 - `ShowDiagnosticsPanel`: adds scanner diagnostics to the chart. Default `false`.
 - `PrintDiagnosticsEveryMinute`: prints diagnostics to the Journal. Default `false`.
+- `HistoricalLookbackDays`: closed M1 history window for Validation and Autotune. Default `90`.
+- `HistoricalStepMinutes`: M1 simulation step size. Default `1`.
+- `HistoricalWarmupBars`: minimum M1 warmup bars before historical scoring starts. Default `500`.
+- `HistoricalMaxSignalsPerProfile`: cap per symbol/timeframe profile during historical simulation. Default `250`.
+- `AutotuneMinSignals`: minimum samples before an autotune candidate is trusted. Default `100`.
 
 ## Practical Tuning
 
@@ -64,3 +70,5 @@ Scanning many pairs across many timeframes increases the number of profiles. Wit
 For brokers with wider spreads, raise `MaxSpreadPips` carefully and watch whether false signals increase during rollovers or thin liquidity.
 
 Use `FXNews_signals.csv` to validate score buckets before tightening thresholds. A practical workflow is to collect enough samples, group by displayed score bucket and timeframe, then compare continuation score, MFE/ATR, MAE/ATR, and target-before-stop rate.
+
+Use `FXNEWS_MODE_VALIDATION` when you want a chart-only backtest report from MT5's M1 history database. Use `FXNEWS_MODE_AUTOTUNE` to compare a small parameter set against the current inputs. These historical modes do not write files; they render their report directly on the chart.

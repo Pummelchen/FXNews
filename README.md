@@ -17,6 +17,7 @@ The EA does not trade. It never opens, closes, modifies, or manages positions.
 3. Compile `MQL5/Experts/FXNews/FXNews.mq5`.
 4. Attach `FXNews` to one chart, for example `EURUSD`.
 5. Configure `SymbolsToScan` and `TimeframesToScan`.
+6. Leave `OperatingMode=FXNEWS_MODE_LIVE` for normal scanning.
 
 Machine-specific MT5 paths are kept out of git. Use `MT5_EXPERTS_DIR`, local git config `fxnews.mt5ExpertsDir`, or an untracked `.mt5_experts_dir` file for local sync.
 
@@ -86,13 +87,25 @@ EURUSD,M5,LONDON,UP,70,74,184,1.31,0.07,2026-05-10 00:00:00
 
 Calibration is separated by symbol, timeframe, session, direction, and score bucket. Tiny or stale buckets do not override raw scores.
 
+## Validation And Autotune Modes
+
+`OperatingMode` controls whether FXNews runs normally or uses closed M1 history for an on-chart historical simulation:
+
+- `FXNEWS_MODE_LIVE`: normal chart scanner and optional CSV logging.
+- `FXNEWS_MODE_VALIDATION`: pulls closed M1 bars from MT5 history for the configured symbols, simulates alerts over the last `HistoricalLookbackDays`, evaluates 5/15/30 minute forward outcomes, and prints the report on the chart.
+- `FXNEWS_MODE_AUTOTUNE`: runs the same M1-history simulation across a small parameter set, compares the best candidate against the current inputs, and prints recommended effective settings plus improvement statistics on the chart.
+
+Validation and Autotune do not write CSV logs, calibration files, or other report files. They are chart-only modes. They use MT5's local history database, not external feeds.
+
+Autotune cannot permanently rewrite MT5 input parameters because MQL5 inputs are read-only at runtime. It reports the best effective settings so they can be applied deliberately and then rechecked on a later out-of-sample period.
+
 ## How To Prove The Score Is Useful
 
-1. Run in logging mode for at least 2-4 weeks.
-2. Collect at least 300-1,000 signals across the sessions you actually trade.
-3. Compare expectancy by score bucket: 60-64, 65-69, 70-74, 75-79, 80-84, 85+.
-4. Confirm that 75+ buckets outperform 60-69 buckets after spread/slippage assumptions.
-5. Only then enable calibrated-score display.
+1. Run `FXNEWS_MODE_VALIDATION` over at least 90 days of M1 history.
+2. Check whether higher score buckets show better 30 minute R, target-first rate, and profit-factor proxy than lower buckets.
+3. Run `FXNEWS_MODE_AUTOTUNE` and compare the best candidate against current settings.
+4. Apply any recommended settings manually, then validate again on a later out-of-sample period.
+5. For live empirical calibration, keep CSV logging enabled in `FXNEWS_MODE_LIVE` and collect 300-1,000 forward signals before trusting calibrated display.
 
 ## Common False Positives
 

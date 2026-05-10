@@ -35,7 +35,7 @@ input bool EnablePushNotification = false;
 input int MaxQuoteAgeSeconds = 15;
 
 input bool UseStrictExecutionGate = true;
-input double MaxSpreadToAtrRatio = 0.18;
+input double MaxSpreadToAtrRatio = 0.45;
 input double MaxTickGapSeconds = 8.0;
 input double MaxSpreadZScore = 3.0;
 

@@ -15,7 +15,7 @@
 - `UseImpulseBreakoutEngine`: enables impulse scoring.
 - `UseCurrencyStrength`: enables basket confirmation.
 - `UseStrictExecutionGate`: blocks severe quote, spread, tick-gap, and spread-to-ATR problems before scoring. Default `true`.
-- `MaxSpreadToAtrRatio`: maximum spread cost versus ATR under strict gating. Default `0.18`.
+- `MaxSpreadToAtrRatio`: maximum spread cost versus ATR under strict gating. Default `0.45`.
 - `MaxTickGapSeconds`: maximum tick gap under strict gating. Default `8`.
 - `MaxSpreadZScore`: maximum robust spread z-score under strict gating. Default `3`.
 - `MinHoldSecondsForHighScore`: outside-range hold time before higher breakout scores are allowed. Default `3`.

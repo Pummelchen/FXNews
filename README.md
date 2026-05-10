@@ -21,6 +21,10 @@ The EA does not trade. It never opens, closes, modifies, or manages positions.
 
 Machine-specific MT5 paths are kept out of git. Use `MT5_EXPERTS_DIR`, local git config `fxnews.mt5ExpertsDir`, or an untracked `.mt5_experts_dir` file for local sync.
 
+The sync script also removes legacy `NewsScan` and `ChartOnlyBreakoutRadarEA` source/compiled files from local MT5 `Experts` and `Indicators` folders. If the Journal still shows `NewsScan`, remove that old indicator from the open chart/template and attach `FXNews` from `MQL5/Experts/FXNews`.
+
+MT5 can still print a platform-level `automated trading is disabled` line when an Expert Advisor is loaded or the Algo Trading button is toggled. FXNews remains chart-only and contains no order execution code.
+
 ## Dashboard
 
 The dashboard is a scanner table, not a trade blotter:

@@ -4592,7 +4592,7 @@ color StatusLineColor()
 
 string ActivityStatusText()
 {
-   return StringFormat("BREAKOUT RADAR | %s scanning %d profiles | valid=%d invalid=%d active=%d | scan %.1fms | %s",
+   return StringFormat("FXNews - BREAKOUT RADAR | %s scanning %d profiles | valid=%d invalid=%d active=%d | scan %.1fms | %s",
                        OperatingModeText(),
                        ArraySize(g_profiles),
                        g_last_valid_symbols,

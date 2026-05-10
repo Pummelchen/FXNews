@@ -9,7 +9,7 @@ YYYY-MM-DD HH:MM:SS - SYMBOL TIMEFRAME UP|DOWN - NN%
 The first line is reserved for activity status, for example:
 
 ```text
-BREAKOUT RADAR | LIVE scanning 252 profiles | valid=28 invalid=0 active=1 | scan 8.4ms | 2026-05-16 15:35:45
+FXNews - BREAKOUT RADAR | LIVE scanning 252 profiles | valid=28 invalid=0 active=1 | scan 8.4ms | 2026-05-16 15:35:45
 ```
 
 No empty placeholders are displayed.

@@ -14,6 +14,7 @@ FXNews is a chart-only MetaTrader 5 custom indicator that scans a basket of FX s
 
 ## Main Pages
 
+- [QuickStart: Autolearning Before Live Use](QuickStart-Autolearning)
 - [Installation](Installation)
 - [Configuration](Configuration)
 - [Signal Logic](Signal-Logic)

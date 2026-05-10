@@ -2,7 +2,7 @@
 
 ## Expected Dashboard
 
-The chart shows one activity/status line plus the latest five real signal messages. Empty placeholders are not shown.
+The chart shows one activity/status line plus the latest five real signal messages. Empty placeholders are not shown. The status line uses the chart's line color, while signal messages are white and spaced for readability.
 
 ```text
 BREAKOUT RADAR | LIVE scanning 252 profiles | valid=28 invalid=0 active=1 | scan 8.4ms | 2026-05-16 15:35:45

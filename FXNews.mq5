@@ -127,6 +127,7 @@ input int AutotuneMinSignals = 100;
 #define SPREAD_HISTORY_CAPACITY 80
 #define CURRENCY_COUNT 8
 #define DASHBOARD_MAX_OBJECTS 40
+#define DASHBOARD_ROW_HEIGHT 24
 #define SIGNAL_HISTORY_SIZE 5
 #define CALENDAR_REFRESH_SECONDS 60
 #define SESSION_COUNT 6
@@ -2005,7 +2006,7 @@ void UpdateHistoricalReportDashboard()
    for(int row = 0; row < rows && row < DASHBOARD_MAX_OBJECTS; row++)
    {
       string text = g_historical_report_lines[row];
-      SetDashboardRow(row, text, text);
+      SetDashboardRow(row, text, text, (row == 0 ? StatusLineColor() : clrWhite));
    }
    DeleteDashboardRowsFrom(rows);
    ChartRedraw(0);
@@ -4560,7 +4561,7 @@ void UpdateDashboard()
    {
       if(!g_signal_history[i].used || g_signal_history[i].text == "")
          continue;
-      SetDashboardRow(row, g_signal_history[i].text, g_signal_history[i].text);
+      SetDashboardRow(row, g_signal_history[i].text, g_signal_history[i].text, clrWhite);
       row++;
    }
 
@@ -4577,7 +4578,16 @@ void UpdateActivityStatusLine()
 
 void SetActivityStatusRow(const int row)
 {
-   SetDashboardRow(row, ActivityStatusText(), DiagnosticsText());
+   SetDashboardRow(row, ActivityStatusText(), DiagnosticsText(), StatusLineColor());
+}
+
+color StatusLineColor()
+{
+   long chart_line_color = 0;
+   ResetLastError();
+   if(ChartGetInteger(0, CHART_COLOR_CHART_LINE, 0, chart_line_color))
+      return (color)chart_line_color;
+   return clrLime;
 }
 
 string ActivityStatusText()
@@ -4832,16 +4842,19 @@ void EnsureDashboardObject(const int row)
 
    ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
    ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 12);
-   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, 24 + row * 18);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, 24 + row * DASHBOARD_ROW_HEIGHT);
    ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 10);
-   ObjectSetInteger(0, name, OBJPROP_COLOR, clrRed);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clrWhite);
    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
    ObjectSetInteger(0, name, OBJPROP_SELECTED, false);
    ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
    ObjectSetString(0, name, OBJPROP_FONT, "Consolas");
 }
 
-void SetDashboardRow(const int row, const string text, const string tooltip)
+void SetDashboardRow(const int row,
+                     const string text,
+                     const string tooltip,
+                     const color text_color)
 {
    EnsureDashboardObject(row);
    string name = DashboardName(row);
@@ -4850,7 +4863,7 @@ void SetDashboardRow(const int row, const string text, const string tooltip)
 
    ObjectSetString(0, name, OBJPROP_TEXT, text);
    ObjectSetString(0, name, OBJPROP_TOOLTIP, tooltip);
-   ObjectSetInteger(0, name, OBJPROP_COLOR, clrRed);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, text_color);
 }
 
 void DeleteDashboardRowsFrom(const int first_row)

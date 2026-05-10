@@ -14,6 +14,8 @@ BREAKOUT RADAR | LIVE scanning 252 profiles | valid=28 invalid=0 active=1 | scan
 
 No empty placeholders are displayed.
 
+The status line uses the current chart line color, and signal messages are white.
+
 The percentage is an alert-ranking score, not a guaranteed win probability and not an automatic entry instruction. Disk-based calibration and CSV logging are intentionally disabled.
 
 ## Composite Score

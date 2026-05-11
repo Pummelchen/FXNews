@@ -7,21 +7,16 @@ FXNews does not trade. It never opens, closes, modifies, or manages positions, a
 ## Files
 
 - `FXNews.mq5`: production MT5 custom indicator.
-- `scripts/sync_to_mt5.sh`: mirrors the indicator into the local MT5 `Indicators/FXNews` folder and removes stale legacy EA/indicator copies.
 - `wiki/`: GitHub wiki source pages mirrored into the repository.
 
 ## Install
 
-1. Run `scripts/sync_to_mt5.sh`.
+1. Copy `FXNews.mq5` into `MQL5/Indicators/FXNews/FXNews.mq5`.
 2. Open MetaEditor.
 3. Compile `MQL5/Indicators/FXNews/FXNews.mq5`.
 4. Attach `FXNews` from Indicators to one chart, for example `EURUSD`.
 5. Configure `SymbolsToScan` and `TimeframesToScan`.
 6. Leave `OperatingMode=FXNEWS_MODE_LIVE` for normal scanning.
-
-Machine-specific MT5 paths are kept out of git. Use `MT5_INDICATORS_DIR`, local git config `fxnews.mt5IndicatorsDir`, or an untracked `.mt5_indicators_dir` file for local sync. Existing `MT5_EXPERTS_DIR`, `fxnews.mt5ExpertsDir`, or `.mt5_experts_dir` settings are accepted only to derive the sibling `Indicators` folder.
-
-If MT5 still shows old `NewsScan`, `ChartOnlyBreakoutRadarEA`, or `FXNews` under Experts, remove that old item from the open chart/template and attach the indicator from `MQL5/Indicators/FXNews`.
 
 ## Dashboard
 
@@ -56,8 +51,6 @@ Scores are shown as `RAW` because disk-based logging and calibration files are i
 ## No Disk I/O
 
 FXNews contains no file logging path and does not use `FileOpen`, `FileWrite`, `FileRead`, or CSV calibration. It also does not use `WebRequest`, DLLs, web scraping, or external feeds.
-
-The sync script removes old `FXNews_signals.csv` and `FXNews_calibration.csv` artifacts from the local MT5 files folder if they exist from earlier versions.
 
 ## Validation And Autotune Modes
 

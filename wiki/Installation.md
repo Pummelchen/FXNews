@@ -1,24 +1,12 @@
 # Installation
 
-## Local Sync Path
+## Manual Install
 
-By default, the project sync script copies the production indicator to this repo-relative target:
+Copy the production indicator source to:
 
 ```text
-../MT5/Indicators/FXNews/FXNews.mq5
+MQL5/Indicators/FXNews/FXNews.mq5
 ```
-
-Run:
-
-```bash
-scripts/sync_to_mt5.sh
-```
-
-For a local terminal install in another location, set `MT5_INDICATORS_DIR`, set local git config `fxnews.mt5IndicatorsDir`, or put the path in an untracked `.mt5_indicators_dir` file. Machine-specific paths are intentionally ignored by git.
-
-Old `MT5_EXPERTS_DIR`, `fxnews.mt5ExpertsDir`, and `.mt5_experts_dir` settings are still accepted only to derive the sibling `Indicators` folder.
-
-## Compile
 
 Open MetaEditor and compile:
 
@@ -27,8 +15,6 @@ MQL5/Indicators/FXNews/FXNews.mq5
 ```
 
 Attach `FXNews` from Indicators to one chart. The attached chart symbol does not need to be the only symbol scanned.
-
-If an old `FXNews` Expert Advisor is still attached to a chart/template, remove it and attach the custom indicator version. The sync script removes stale local Expert Advisor source/compiled copies where it can.
 
 ## Broker Symbols
 

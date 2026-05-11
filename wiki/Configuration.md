@@ -29,7 +29,7 @@
 - `UseEconomicCalendarContext`: enables optional built-in MT5 economic calendar context. Default `false`.
 - `BlockImmediatelyBeforeHighImpactNews`: blocks the final minutes before high-impact calendar releases when calendar context is enabled. Default `false`.
 - `UseMultiTimeframeContextCaps`: caps scores when M5/M15 context rejects the direction. Default `true`.
-- `OutcomeHorizonMinutes1` / `OutcomeHorizonMinutes2` / `OutcomeHorizonMinutes3`: chart-only validation horizons. Defaults `5`, `15`, and `30`.
+- `OutcomeHorizonMinutes1` / `OutcomeHorizonMinutes2` / `OutcomeHorizonMinutes3`: historical validation horizons. Defaults `5`, `15`, and `30`.
 - `OutcomeTargetAtr`: validation/autotune target distance in ATR. Default `0.50`.
 - `OutcomeStopAtr`: validation/autotune stop distance in ATR. Default `0.35`.
 - `UseSessionAwareBaselines`: keeps separate spread/tick/ATR/range baselines by session. Default `true`.
@@ -65,6 +65,6 @@ Scanning many pairs across many timeframes increases the number of profiles. Wit
 
 For brokers with wider spreads, raise `MaxSpreadPips` carefully and watch whether false signals increase during rollovers or thin liquidity.
 
-Use `FXNEWS_MODE_VALIDATION` when you want a chart-only backtest report from MT5's M1 history database. Use `FXNEWS_MODE_AUTOTUNE` to compare a small parameter set against the current inputs. These historical modes do not write files; they render their report directly on the chart.
+Use `FXNEWS_MODE_VALIDATION` when you want a backtest report from MT5's M1 history database. Use `FXNEWS_MODE_AUTOTUNE` to compare a small parameter set against the current inputs. These historical modes do not write files; they write detailed reports to the MT5 Journal and show only a completion message on the chart.
 
-FXNews intentionally has no CSV logging or calibration-file inputs. The score remains a raw alert-quality score and must be validated through the chart-only historical reports and manual forward observation.
+FXNews intentionally has no CSV logging or calibration-file inputs. The score remains a raw alert-quality score and must be validated through MT5 Journal historical reports and manual forward observation.

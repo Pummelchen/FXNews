@@ -1798,6 +1798,8 @@ void BuildValidationReport(const HistoricalBacktestStats &stats, const Historica
    AddHistoricalReportLine(FormatHistoricalBucketLine("80-84", stats.bucket80_count, stats.bucket80_R));
    AddHistoricalReportLine(FormatHistoricalBucketLine("85+", stats.bucket85_count, stats.bucket85_R));
    AddHistoricalReportLine("Interpretation: score is a ranking metric. A useful score should show better R/PF in higher buckets.");
+   PrintHistoricalReportToJournal();
+   SetHistoricalReadyMessage("VALIDATION");
 }
 
 void BuildAutotuneReport(const HistoricalBacktestStats &default_stats,
@@ -1860,6 +1862,9 @@ void BuildAutotuneReport(const HistoricalBacktestStats &default_stats,
       AddHistoricalReportLine("WARNING: best candidate has low sample count; treat settings as exploratory.");
    else
       AddHistoricalReportLine("Use recommended settings only after confirming results on a later out-of-sample period.");
+
+   PrintHistoricalReportToJournal();
+   SetHistoricalReadyMessage("AUTOTUNE");
 }
 
 string FormatHistoricalBucketLine(const string label, const int count, const double sum_R)
@@ -2006,6 +2011,20 @@ void AddHistoricalReportLine(const string line)
       return;
    ArrayResize(g_historical_report_lines, next + 1);
    g_historical_report_lines[next] = line;
+}
+
+void PrintHistoricalReportToJournal()
+{
+   int rows = ArraySize(g_historical_report_lines);
+   for(int row = 0; row < rows; row++)
+      PrintFormat("FXNews: %s", g_historical_report_lines[row]);
+}
+
+void SetHistoricalReadyMessage(const string mode)
+{
+   ClearHistoricalReport();
+   AddHistoricalReportLine("FXNews - " + mode + " ready. Results written to MT5 Journal.");
+   UpdateHistoricalReportDashboard();
 }
 
 void UpdateHistoricalReportDashboard()

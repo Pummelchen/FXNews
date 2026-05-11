@@ -87,7 +87,7 @@ Correlated alerts are grouped by dominant currency flow, such as `USD-` for broa
 
 ## Historical Validation Mode
 
-`FXNEWS_MODE_VALIDATION` is an on-chart historical simulation. It pulls closed M1 bars from MT5's local history database for every configured symbol, walks backward-to-forward over the last `HistoricalLookbackDays`, simulates symbol/timeframe alert candidates, evaluates 5/15/30 minute forward MFE/MAE outcomes, and renders the summary on the chart.
+`FXNEWS_MODE_VALIDATION` is a built-in historical simulation. It pulls closed M1 bars from MT5's local history database for every configured symbol, walks backward-to-forward over the last `HistoricalLookbackDays`, simulates symbol/timeframe alert candidates, evaluates 5/15/30 minute forward MFE/MAE outcomes, writes the detailed summary to the MT5 Journal, and shows only a completion message on the chart.
 
 This mode does not write CSV logs or report files. The report includes signal count, average score, profit-factor proxy, average R, target-first and stop-first rates, score edge, and bucket quality.
 

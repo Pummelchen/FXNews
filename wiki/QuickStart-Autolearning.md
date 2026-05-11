@@ -1,8 +1,8 @@
 # QuickStart: Autolearning Before Live Use
 
-Use this workflow before relying on FXNews as a day-trader radar. The goal is to let the indicator learn from your broker's own M1 history through chart-only Validation and Autotune, then use the live scanner with parameters that were checked on your feed.
+Use this workflow before relying on FXNews as a day-trader radar. The goal is to let the indicator learn from your broker's own M1 history through non-trading Validation and Autotune, then use the live scanner with parameters that were checked on your feed.
 
-FXNews does not write logs or settings files. Validation and Autotune reports are rendered on the chart only.
+FXNews does not write logs or settings files. Validation and Autotune write detailed reports to the MT5 Journal and show only a completion message on the chart.
 
 ## 1. Prepare MT5 History
 
@@ -35,7 +35,7 @@ OutcomeTargetAtr = 0.50
 OutcomeStopAtr = 0.35
 ```
 
-Read the chart report before changing anything. Focus on:
+Read the MT5 Journal report before changing anything. Focus on:
 
 - signal count: avoid judging a setting from a tiny sample;
 - score edge: higher score buckets should outperform lower buckets;

@@ -46,7 +46,7 @@ The score combines:
 - optional MT5 economic-calendar context: pre-news danger, just-released high-impact events, unavailable calendar handling;
 - alert grouping: correlated alerts are grouped by dominant currency flow and a group leader is selected.
 
-Scores are shown as `RAW` because disk-based logging and calibration files are intentionally disabled. Historical validation and autotune reports are generated on the chart only.
+Scores are shown as `RAW` because disk-based logging and calibration files are intentionally disabled. Historical validation and autotune write detailed reports to the MT5 Journal and leave only a completion message on the chart.
 
 ## No Disk I/O
 
@@ -54,13 +54,13 @@ FXNews contains no file logging path and does not use `FileOpen`, `FileWrite`, `
 
 ## Validation And Autotune Modes
 
-`OperatingMode` controls whether FXNews runs normally or uses closed M1 history for an on-chart historical simulation:
+`OperatingMode` controls whether FXNews runs normally or uses closed M1 history for a built-in historical simulation:
 
 - `FXNEWS_MODE_LIVE`: normal chart scanner.
-- `FXNEWS_MODE_VALIDATION`: pulls closed M1 bars from MT5 history for the configured symbols, simulates alerts over the last `HistoricalLookbackDays`, evaluates 5/15/30 minute forward outcomes, and prints the report on the chart.
-- `FXNEWS_MODE_AUTOTUNE`: runs the same M1-history simulation across a small parameter set, compares the best candidate against the current inputs, and prints recommended effective settings plus improvement statistics on the chart.
+- `FXNEWS_MODE_VALIDATION`: pulls closed M1 bars from MT5 history for the configured symbols, simulates alerts over the last `HistoricalLookbackDays`, evaluates 5/15/30 minute forward outcomes, writes the detailed report to the MT5 Journal, and shows a completion message on the chart.
+- `FXNEWS_MODE_AUTOTUNE`: runs the same M1-history simulation across a small parameter set, compares the best candidate against the current inputs, writes recommended effective settings plus improvement statistics to the MT5 Journal, and shows a completion message on the chart.
 
-Validation and Autotune do not write report files. They use MT5's local history database, not external feeds.
+Validation and Autotune do not write report files. They write detailed results to the MT5 Journal, show only a completion message on the chart, and use MT5's local history database rather than external feeds.
 
 Autotune cannot permanently rewrite MT5 input parameters because MQL5 inputs are read-only at runtime. It reports the best effective settings so they can be applied deliberately and rechecked on a later out-of-sample period.
 

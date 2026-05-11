@@ -22,4 +22,4 @@ Raise `MinDisplayConfidence`, increase cooldowns, hide correlated group members 
 
 ## Disk Writes
 
-FXNews is not allowed to write files. It does not create CSV logs, calibration files, validation reports, or settings files. Validation and Autotune reports render directly on the chart.
+FXNews is not allowed to write files. It does not create CSV logs, calibration files, validation reports, or settings files. Validation and Autotune write detailed results to the MT5 Journal and show only a completion message on the chart.

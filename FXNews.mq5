@@ -141,6 +141,11 @@ double g_outcome_stop_atr = 0.0;
 #define DASHBOARD_MAX_OBJECTS 40
 #define DASHBOARD_ROW_HEIGHT 24
 #define DASHBOARD_FONT_SIZE 11
+#define DASHBOARD_X_OFFSET 12
+#define DASHBOARD_RIGHT_MARGIN 16
+#define DASHBOARD_MIN_TEXT_CHARS 12
+#define DASHBOARD_MAX_TEXT_CHARS 82
+#define DASHBOARD_FALLBACK_TEXT_CHARS 64
 #define SIGNAL_HISTORY_SIZE 5
 #define SIGNAL_MESSAGE_REFRESH_SECONDS 10
 #define SIGNAL_MESSAGE_MIN_SCORE 75.0
@@ -636,7 +641,7 @@ int OnInit()
       EnsureSymbolReady(i);
 
    if(IsHistoricalMode())
-      SetHistoricalReportHeader("FXNEWS " + OperatingModeText() + " | waiting to start historical run");
+      SetHistoricalReportHeader("FXNews - " + OperatingModeText() + " | waiting");
 
    ResetLastError();
    if(!EventSetTimer(IntMax(1, ScanIntervalSeconds)))
@@ -800,7 +805,7 @@ void RunHistoricalOperatingMode()
       return;
 
    g_historical_run_started = true;
-   SetHistoricalReportHeader("FXNEWS " + OperatingModeText() + " | running M1 history simulation...");
+   SetHistoricalReportHeader("FXNews - " + OperatingModeText() + " | running M1 backtest");
 
    HistoricalParams base_params;
    BuildBaseHistoricalParams(base_params);
@@ -2104,7 +2109,7 @@ void SetHistoricalReportHeader(const string text)
 {
    ClearHistoricalReport();
    AddHistoricalReportLine(text);
-   AddHistoricalReportLine("The indicator is not live-scanning in this mode and does not write validation files.");
+   AddHistoricalReportLine("No live scan | Journal report when done");
    UpdateHistoricalReportDashboard();
 }
 
@@ -2132,7 +2137,7 @@ void PrintHistoricalReportToJournal()
 void SetHistoricalReadyMessage(const string mode)
 {
    ClearHistoricalReport();
-   AddHistoricalReportLine("FXNews - " + mode + " ready. Results written to MT5 Journal.");
+   AddHistoricalReportLine("FXNews - " + mode + " ready | see MT5 Journal");
    UpdateHistoricalReportDashboard();
 }
 
@@ -4734,14 +4739,14 @@ color StatusLineColor()
 
 string ActivityStatusText()
 {
-   return StringFormat("FXNews - BREAKOUT RADAR | %s scanning %d profiles | valid=%d invalid=%d active=%d | scan %.1fms | %s",
+   return StringFormat("FXNews - %s | scan=%d ok=%d bad=%d act=%d %.1fms %s",
                        OperatingModeText(),
                        ArraySize(g_profiles),
                        g_last_valid_symbols,
                        g_last_invalid_symbols,
                        g_last_active_profiles,
                        g_average_scan_ms,
-                       FormatLocalTimestamp(TimeLocal()));
+                       TimeToString(TimeLocal(), TIME_SECONDS));
 }
 
 void CollectDashboardSignals(DashboardSignal &signals[])
@@ -5147,7 +5152,7 @@ void EnsureDashboardObject(const int row)
    }
 
    ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 12);
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, DASHBOARD_X_OFFSET);
    ObjectSetInteger(0, name, OBJPROP_YDISTANCE, 24 + row * DASHBOARD_ROW_HEIGHT);
    ObjectSetInteger(0, name, OBJPROP_FONTSIZE, DASHBOARD_FONT_SIZE);
    ObjectSetInteger(0, name, OBJPROP_COLOR, clrWhite);
@@ -5167,9 +5172,38 @@ void SetDashboardRow(const int row,
    if(ObjectFind(0, name) < 0)
       return;
 
-   ObjectSetString(0, name, OBJPROP_TEXT, text);
+   ObjectSetString(0, name, OBJPROP_TEXT, FitDashboardText(text));
    ObjectSetString(0, name, OBJPROP_TOOLTIP, tooltip);
    ObjectSetInteger(0, name, OBJPROP_COLOR, text_color);
+}
+
+int DashboardTextLimit()
+{
+   long chart_width = 0;
+   ResetLastError();
+   if(!ChartGetInteger(0, CHART_WIDTH_IN_PIXELS, 0, chart_width) || chart_width <= 0)
+      return DASHBOARD_FALLBACK_TEXT_CHARS;
+
+   int available_pixels = (int)chart_width - DASHBOARD_X_OFFSET - DASHBOARD_RIGHT_MARGIN;
+   if(available_pixels <= 0)
+      return DASHBOARD_MIN_TEXT_CHARS;
+
+   double approx_char_pixels = (double)DASHBOARD_FONT_SIZE * 0.68;
+   int limit = (int)MathFloor((double)available_pixels / approx_char_pixels);
+   return (int)Clamp((double)limit,
+                     (double)DASHBOARD_MIN_TEXT_CHARS,
+                     (double)DASHBOARD_MAX_TEXT_CHARS);
+}
+
+string FitDashboardText(const string text)
+{
+   int limit = DashboardTextLimit();
+   int length = StringLen(text);
+   if(length <= limit)
+      return text;
+   if(limit <= 3)
+      return StringSubstr(text, 0, limit);
+   return StringSubstr(text, 0, limit - 3) + "...";
 }
 
 void DeleteDashboardRowsFrom(const int first_row)

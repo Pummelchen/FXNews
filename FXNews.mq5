@@ -141,6 +141,7 @@ double g_outcome_stop_atr = 0.0;
 #define DASHBOARD_MAX_OBJECTS 40
 #define DASHBOARD_ROW_HEIGHT 24
 #define DASHBOARD_FONT_SIZE 11
+#define DASHBOARD_FONT_NAME "Consolas"
 #define DASHBOARD_X_OFFSET 12
 #define DASHBOARD_RIGHT_MARGIN 16
 #define DASHBOARD_MIN_TEXT_CHARS 12
@@ -5159,7 +5160,7 @@ void EnsureDashboardObject(const int row)
    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
    ObjectSetInteger(0, name, OBJPROP_SELECTED, false);
    ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
-   ObjectSetString(0, name, OBJPROP_FONT, "Consolas");
+   ObjectSetString(0, name, OBJPROP_FONT, DASHBOARD_FONT_NAME);
 }
 
 void SetDashboardRow(const int row,
@@ -5248,12 +5249,20 @@ string FormatSignalHistoryText(const string symbol,
                                const datetime local_time)
 {
    int confidence = (int)MathRound(Clamp(score, 0.0, 100.0));
-   return StringFormat("%s - %s %s %s - %d%%",
+   return StringFormat("%s - %s %s %s %3d%%",
                        FormatLocalTimestamp(local_time),
-                       symbol,
-                       timeframe_label,
-                       DirectionText(direction),
+                       PadRight(symbol, 7),
+                       PadRight(timeframe_label, 3),
+                       PadRight(DirectionText(direction), 4),
                        confidence);
+}
+
+string PadRight(const string value, const int width)
+{
+   string result = value;
+   while(StringLen(result) < width)
+      result += " ";
+   return result;
 }
 
 string FormatLocalTimestamp(const datetime local_time)

@@ -30,12 +30,12 @@ The live chart output is intentionally compact: an empty spacer row, one activit
 ```text
 FXNews - BREAKOUT RADAR | LIVE scanning 252 profiles | valid=28 invalid=0 active=1 | scan 8.4ms | 2026-05-16 15:35:45
 2026-05-16 15:35:45 - EURUSD M15 UP - 75%
-2026-05-16 15:32:10 - GBPJPY H1 DOWN - 72%
+2026-05-16 15:32:10 - GBPJPY H1 DOWN - 78%
 ```
 
 `UP` means the base currency is strengthening against the quote currency. `DOWN` means the base currency is weakening against the quote currency.
 
-Signal messages are shown only at `70%` or higher, are refreshed at most every 10 seconds, sorted by displayed percentage descending, and deduplicated by symbol, timeframe, and direction so confidence-only changes do not create repeated rows.
+Signal messages are shown only at `75%` or higher, are refreshed at most every 10 seconds, sorted by displayed percentage descending, and deduplicated by symbol, timeframe, and direction so confidence-only changes do not create repeated rows.
 
 ## What The Score Means
 

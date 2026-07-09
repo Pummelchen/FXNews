@@ -84,7 +84,7 @@ For scoring-related changes:
 Check:
 
 - status line text from `ActivityStatusText`;
-- recent signal history formatting;
+- current active signal rows and recent signal history fallback formatting;
 - chart width truncation through `FitDashboardText`;
 - cleanup after indicator removal through `CleanupDashboardObjects`.
 

@@ -168,11 +168,6 @@ enum BreakoutEventState
    STATE_COOLDOWN = 8
 };
 
-enum ScoreStatus
-{
-   SCORE_RAW = 0
-};
-
 enum SessionBucket
 {
    SESSION_ASIA = 0,
@@ -194,13 +189,6 @@ enum SignalBlockReason
    BLOCK_NO_MOVEMENT_DATA = 6,
    BLOCK_FAKEOUT = 7,
    BLOCK_CONTEXT_CONFLICT = 8
-};
-
-struct FeatureScore
-{
-   double value;      // normalized 0..1
-   double weight;     // composite contribution weight
-   string name;
 };
 
 struct ExecutionQuality
@@ -291,8 +279,6 @@ struct CompositeSignalScore
    int direction;
    double raw_score;          // 0..100 before final caps
    double displayed_score;    // rounded dashboard score source
-   ScoreStatus score_status;
-   int score_bucket;
    ExecutionQuality execution;
    BreakoutStructure breakout;
    ImpulseQuality impulse;
@@ -327,15 +313,10 @@ struct DashboardSignal
 {
    int profile_index;
    int direction;
-   double score;
-   double raw_score;
-   ScoreStatus score_status;
-   datetime start_time;
    int age_seconds;
    string text;
    string tooltip;
    string group_id;
-   bool group_leader;
    double sort_score;
 };
 
@@ -495,7 +476,7 @@ struct SymbolProfile
    double session_speed_z;
    double session_range_z;
    bool session_baseline_ready;
-   int session_index;
+   SessionBucket session_index;
    string session_name;
    double tick_sample_quality_score;
    int valid_ticks_used;
@@ -539,15 +520,12 @@ struct SymbolProfile
 
    int active_direction;
    BreakoutEventState event_state;
-   BreakoutEventState previous_event_state;
    datetime event_start_time;
    datetime event_local_time;
-   datetime last_display_update_time;
    datetime cooldown_end_up;
    datetime cooldown_end_down;
    datetime last_alert_sent_time;
    bool strong_alert_sent;
-   bool active_displayed;
    datetime confidence_below_since;
    int candidate_direction;
    datetime candidate_start_time;
@@ -562,7 +540,6 @@ struct SymbolProfile
    string correlated_alert_group_id;
    bool group_leader_signal;
    int group_member_count;
-   bool blocked_debug_visible;
 
    int snapshot_write_index;
    int snapshot_count;
@@ -763,7 +740,7 @@ bool ValidateInputs()
       return false;
    }
 
-   if(MaxDashboardRows < 1 || MaxDashboardRows > DASHBOARD_MAX_OBJECTS - 2 ||
+   if(MaxDashboardRows < 1 || MaxDashboardRows > DASHBOARD_MAX_OBJECTS - SIGNAL_FIRST_ROW_INDEX ||
       SignalTTLSeconds < 30 || CopyTicksLookbackSeconds < 5 ||
       MinCopyTicksForGoodQuality < 1)
    {
@@ -2417,15 +2394,12 @@ void ResetProfile(SymbolProfile &profile,
 
    profile.active_direction = DIR_NONE;
    profile.event_state = STATE_IDLE;
-   profile.previous_event_state = STATE_IDLE;
    profile.event_start_time = 0;
    profile.event_local_time = 0;
-   profile.last_display_update_time = 0;
    profile.cooldown_end_up = 0;
    profile.cooldown_end_down = 0;
    profile.last_alert_sent_time = 0;
    profile.strong_alert_sent = false;
-   profile.active_displayed = false;
    profile.confidence_below_since = 0;
    profile.candidate_direction = DIR_NONE;
    profile.candidate_start_time = 0;
@@ -2440,7 +2414,6 @@ void ResetProfile(SymbolProfile &profile,
    profile.correlated_alert_group_id = "";
    profile.group_leader_signal = false;
    profile.group_member_count = 0;
-   profile.blocked_debug_visible = false;
 
    profile.snapshot_write_index = 0;
    profile.snapshot_count = 0;
@@ -3229,8 +3202,6 @@ void ResetCompositeSignalScore(CompositeSignalScore &score, const int direction)
    score.direction = direction;
    score.raw_score = 0.0;
    score.displayed_score = 0.0;
-   score.score_status = SCORE_RAW;
-   score.score_bucket = 0;
    score.block_reason = BLOCK_NONE;
    score.reason_summary = "";
    score.human_reason = "";
@@ -3375,7 +3346,7 @@ void BuildCompositeSignalScore(const int index,
       raw01 = Clamp01(raw01 + 0.05);
 
    score.raw_score = 100.0 * SmoothStep(0.35, 0.92, raw01);
-   ApplyRawScoreStatusToComposite(score);
+   score.displayed_score = score.raw_score;
 
    double capped = Clamp(score.raw_score, 0.0, 100.0);
    string caps = "";
@@ -3983,7 +3954,7 @@ string BuildCompactTags(const CompositeSignalScore &score)
    AddTag(tags, score.calendar.high_impact_nearby || score.calendar.just_released, "NEWS!");
    AddTag(tags, score.execution.block_reason == BLOCK_BAD_SPREAD || score.execution.cost_to_atr > g_max_spread_to_atr * 0.70, "SPREAD!");
    AddTag(tags, score.execution.block_reason == BLOCK_STALE_QUOTE || score.impulse.tick_state == "TICK_STALE", "STALE!");
-   AddTag(tags, score.score_status == SCORE_RAW, "RAW");
+   AddTag(tags, true, "RAW");
    AddTag(tags, score.impulse.tick_state == "TICK_OK", "TICK_OK");
    AddTag(tags, score.impulse.tick_state == "TICK_THIN", "TICK_THIN");
    if(tags == "")
@@ -4031,13 +4002,6 @@ string BuildHumanReadableReason(const CompositeSignalScore &score, const SymbolP
    if(StringLen(details) > 2)
       details = StringSubstr(details, 0, StringLen(details) - 2);
    return lead + details;
-}
-
-string ScoreStatusText(const ScoreStatus status)
-{
-   if(status == SCORE_RAW)
-      return "RAW";
-   return "RAW";
 }
 
 double CalculateBasketAgreement(const int index, const int direction)
@@ -4116,7 +4080,7 @@ bool SpreadOnlyBreakout(const int index, const int direction)
 
 double SessionQualityScore(const datetime now)
 {
-   int session_index = SessionIndex(now);
+   SessionBucket session_index = SessionIndex(now);
    if(session_index == SESSION_LONDON_NY_OVERLAP)
       return 1.00;
    if(session_index == SESSION_LONDON)
@@ -4227,13 +4191,6 @@ void RefreshCalendarCache(const int currency_index, const datetime now)
    g_calendar_cache[currency_index] = cache;
 }
 
-void ApplyRawScoreStatusToComposite(CompositeSignalScore &score)
-{
-   score.score_bucket = ScoreBucketFloor(score.raw_score);
-   score.displayed_score = score.raw_score;
-   score.score_status = SCORE_RAW;
-}
-
 int ScoreBucketFloor(const double score)
 {
    if(score >= 85.0)
@@ -4249,12 +4206,7 @@ int ScoreBucketFloor(const double score)
    return 60;
 }
 
-string SessionName(const datetime now)
-{
-   return SessionNameFromIndex(SessionIndex(now));
-}
-
-int SessionIndex(const datetime now)
+SessionBucket SessionIndex(const datetime now)
 {
    MqlDateTime parts;
    TimeToStruct(now, parts);
@@ -4468,7 +4420,6 @@ void UpdateSignalState(const int index, const datetime now)
 
       if(ExpireOldSignals && current_age > SignalTTLSeconds)
       {
-         g_profiles[index].previous_event_state = STATE_EXPIRED;
          EndActiveSignal(index, current_direction, now);
          return;
       }
@@ -4524,7 +4475,6 @@ void UpdateSignalState(const int index, const datetime now)
       StartCooldown(index, g_profiles[index].candidate_direction, now, FailedSignalCooldownSeconds);
       g_profiles[index].candidate_direction = DIR_NONE;
       g_profiles[index].candidate_start_time = 0;
-      g_profiles[index].previous_event_state = STATE_FAILED_FAST;
       g_profiles[index].event_state = STATE_COOLDOWN;
       return;
    }
@@ -4578,7 +4528,6 @@ void ActivateSignal(const int index,
       g_profiles[index].event_start_time = now;
       g_profiles[index].event_local_time = TimeLocal();
       g_profiles[index].strong_alert_sent = false;
-      g_profiles[index].active_displayed = true;
       PushSignalHistory(index, direction, score, g_profiles[index].event_local_time);
       SendOptionalAlert(index, direction, score, now, false);
    }
@@ -4614,7 +4563,6 @@ void EndActiveSignal(const int index, const int direction, const datetime now)
    g_profiles[index].event_local_time = 0;
    g_profiles[index].confidence_below_since = 0;
    g_profiles[index].strong_alert_sent = false;
-   g_profiles[index].active_displayed = false;
 }
 
 void StartCooldown(const int index,
@@ -4697,18 +4645,33 @@ void UpdateDashboard()
 {
    ObjectDelete(0, DashboardName(0));
    SetActivityStatusRow(STATUS_ROW_INDEX);
-   ObjectDelete(0, DashboardName(2));
+   SetDiagnosticsRowIfEnabled();
 
-   RefreshVisibleSignalHistoryIfDue();
+   DashboardSignal signals[];
+   CollectDashboardSignals(signals);
+   SortDashboardSignals(signals);
 
    int row = SIGNAL_FIRST_ROW_INDEX;
-   int max_row = SIGNAL_FIRST_ROW_INDEX + SIGNAL_HISTORY_SIZE;
-   for(int i = 0; i < g_visible_signal_history_count && row < max_row; i++)
+   int max_row = DashboardSignalRowLimit();
+   int signal_count = ArraySize(signals);
+   for(int i = 0; i < signal_count && row < max_row; i++)
    {
-      if(!g_visible_signal_history[i].used || g_visible_signal_history[i].text == "")
+      if(signals[i].text == "")
          continue;
-      SetDashboardRow(row, g_visible_signal_history[i].text, g_visible_signal_history[i].text, clrWhite);
+      SetDashboardRow(row, signals[i].text, signals[i].tooltip, clrWhite);
       row++;
+   }
+
+   if(row == SIGNAL_FIRST_ROW_INDEX)
+   {
+      RefreshVisibleSignalHistoryIfDue();
+      for(int i = 0; i < g_visible_signal_history_count && row < max_row; i++)
+      {
+         if(!g_visible_signal_history[i].used || g_visible_signal_history[i].text == "")
+            continue;
+         SetDashboardRow(row, g_visible_signal_history[i].text, g_visible_signal_history[i].text, clrWhite);
+         row++;
+      }
    }
 
    DeleteDashboardRowsFrom(row);
@@ -4720,13 +4683,27 @@ void UpdateActivityStatusLine()
 {
    ObjectDelete(0, DashboardName(0));
    SetActivityStatusRow(STATUS_ROW_INDEX);
-   ObjectDelete(0, DashboardName(2));
+   SetDiagnosticsRowIfEnabled();
    ChartRedraw(0);
 }
 
 void SetActivityStatusRow(const int row)
 {
    SetDashboardRow(row, ActivityStatusText(), DiagnosticsText(), StatusLineColor());
+}
+
+void SetDiagnosticsRowIfEnabled()
+{
+   if(ShowDiagnosticsPanel)
+      SetDashboardRow(2, DiagnosticsText(), DiagnosticsText(), clrSilver);
+   else
+      ObjectDelete(0, DashboardName(2));
+}
+
+int DashboardSignalRowLimit()
+{
+   int requested_rows = IntMax(1, MaxDashboardRows);
+   return IntMin(DASHBOARD_MAX_OBJECTS, SIGNAL_FIRST_ROW_INDEX + requested_rows);
 }
 
 color StatusLineColor()
@@ -4777,13 +4754,8 @@ void CollectDashboardSignals(DashboardSignal &signals[])
       DashboardSignal signal;
       signal.profile_index = i;
       signal.direction = direction;
-      signal.score = score.displayed_score;
-      signal.raw_score = score.raw_score;
-      signal.score_status = score.score_status;
-      signal.start_time = g_profiles[i].event_start_time;
       signal.age_seconds = EventAgeSeconds(i, direction, now);
       signal.group_id = g_profiles[i].correlated_alert_group_id;
-      signal.group_leader = g_profiles[i].group_leader_signal;
       signal.sort_score = DashboardSortScore(i, direction, score, signal.age_seconds);
       signal.text = FormatDashboardSignalText(ArraySize(signals) + 1, i, direction, score, signal.age_seconds);
       signal.tooltip = score.human_reason + "\n" + DashboardTooltip(score);
@@ -4805,21 +4777,10 @@ void AddBlockedDebugSignal(const int index, DashboardSignal &signals[], const da
    DashboardSignal signal;
    signal.profile_index = index;
    signal.direction = score.direction;
-   signal.score = 0.0;
-   signal.raw_score = score.raw_score;
-   signal.score_status = score.score_status;
-   signal.start_time = now;
    signal.age_seconds = 0;
    signal.group_id = "BLOCKED";
-   signal.group_leader = false;
    signal.sort_score = -1000.0;
-   signal.text = StringFormat("-- %-10s %-4s %-4s BLOCKED %-7s %-10s %s",
-                              g_profiles[index].symbol,
-                              g_profiles[index].timeframe_label,
-                              DirectionText(score.direction),
-                              ScoreStatusText(score.score_status),
-                              g_profiles[index].session_name,
-                              BlockReasonText(score.block_reason));
+   signal.text = FormatBlockedDashboardSignalText(index, score);
    signal.tooltip = score.reason_summary;
 
    int next = ArraySize(signals);
@@ -4850,7 +4811,10 @@ void SortDashboardSignals(DashboardSignal &signals[])
       CompositeSignalScore score = (direction == DIR_UP ?
                                     g_profiles[index].composite_up :
                                     g_profiles[index].composite_down);
-      signals[i].text = FormatDashboardSignalText(i + 1, index, direction, score, signals[i].age_seconds);
+      if(signals[i].group_id == "BLOCKED")
+         signals[i].text = FormatBlockedDashboardSignalText(index, score);
+      else
+         signals[i].text = FormatDashboardSignalText(i + 1, index, direction, score, signals[i].age_seconds);
    }
 }
 
@@ -4883,13 +4847,25 @@ string FormatDashboardSignalText(const int rank,
                        g_profiles[index].timeframe_label,
                        DirectionText(direction),
                        (int)MathRound(score.displayed_score),
-                       ScoreStatusText(score.score_status),
+                       "RAW",
                        session_text,
                        age_seconds,
                        score.execution.cost_to_atr,
                        score.calendar.state_tag,
                        group_tag,
                        score.compact_tags);
+}
+
+string FormatBlockedDashboardSignalText(const int index, const CompositeSignalScore &score)
+{
+   string session_text = (ShowSessionOnDashboard ? g_profiles[index].session_name : "-");
+   return StringFormat("-- %-10s %-4s %-4s BLOCKED %-6s %-10s %s",
+                       g_profiles[index].symbol,
+                       g_profiles[index].timeframe_label,
+                       DirectionText(score.direction),
+                       "RAW",
+                       session_text,
+                       BlockReasonText(score.block_reason));
 }
 
 string DashboardTooltip(const CompositeSignalScore &score)
@@ -5129,12 +5105,6 @@ void RemoveSignalHistoryEntry(const int entry_index)
    ResetSignalHistoryEntry(g_signal_history[g_signal_history_count]);
 }
 
-void EnsureDashboardObjects()
-{
-   for(int i = 0; i < DASHBOARD_MAX_OBJECTS; i++)
-      EnsureDashboardObject(i);
-}
-
 void EnsureDashboardObject(const int row)
 {
    if(row < 0 || row >= DASHBOARD_MAX_OBJECTS)
@@ -5239,7 +5209,7 @@ string FormatSignalText(const int index, const int direction, const double score
                        g_profiles[index].timeframe_label,
                        direction_text,
                        confidence,
-                       ScoreStatusText(composite.score_status));
+                       "RAW");
 }
 
 string FormatSignalHistoryText(const string symbol,

@@ -68,7 +68,7 @@ Human edits are allowed. Future refreshes should preserve valid human edits.
 
 | Field | Value |
 |---|---|
-| Responsibility | Render status, latest high-quality messages, diagnostics, and tooltips as chart labels. |
+| Responsibility | Render status, current high-quality signal rows, recent message fallback, diagnostics, and tooltips as chart labels. |
 | Key files/functions | dashboard constants, `UpdateDashboard`, `UpdateActivityStatusLine`, `DiagnosticsText`, `FormatDashboardSignalText`, `SetDashboardRow`, `FitDashboardText`, `CleanupDashboardObjects` |
 | External dependencies | MT5 chart object APIs. |
 | Invariants | Object names use `g_object_prefix`; deinit should remove dashboard objects. |

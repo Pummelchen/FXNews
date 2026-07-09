@@ -41,7 +41,7 @@ Evidence:
 
 ## Architecture summary
 
-FXNews is implemented as a single MQL5 indicator file. The runtime lifecycle starts in `OnInit()`, validates inputs, parses symbols/timeframes, initializes calendar and history buffers, selects symbols, then schedules `OnTimer()` scanning. Live mode repeatedly updates market data, calculates currency strength, builds composite scores, updates signal state, groups correlated alerts, and redraws dashboard status/history. Validation and Autotune modes run a one-shot M1-history backtest from the timer path, print journal reports, then update chart status.
+FXNews is implemented as a single MQL5 indicator file. The runtime lifecycle starts in `OnInit()`, validates inputs, parses symbols/timeframes, initializes calendar and history buffers, selects symbols, then schedules `OnTimer()` scanning. Live mode repeatedly updates market data, calculates currency strength, builds composite scores, updates signal state, groups correlated alerts, and redraws dashboard status, active signal rows, diagnostics, or recent signal history fallback. Validation and Autotune modes run a one-shot M1-history backtest from the timer path, print journal reports, then update chart status.
 
 Evidence:
 - `FXNews.mq5` (`#property indicator_chart_window`, `OnInit`, `OnTimer`, `ScanAll`, `RunHistoricalOperatingMode`)

@@ -13,7 +13,7 @@ FXNews is a chart-only MetaTrader 5 custom indicator for discretionary FX day tr
 ## Benefits
 
 - One indicator watches a full FX basket instead of forcing you to monitor many charts.
-- Signals stay simple: status line plus the latest five high-quality messages on the chart.
+- Signals stay simple: status line plus current high-quality dashboard rows, with recent high-quality messages shown when no current signal is active.
 - Each message includes symbol, timeframe, direction, and a raw event-quality percentage.
 - The score considers breakout structure, impulse strength, spread/quote quality, currency-flow confirmation, session context, and fakeout risk.
 - Validation and Autotune modes use MT5 M1 history, can apply runtime-tuned settings, and write detailed reports to the MT5 Journal without creating files.

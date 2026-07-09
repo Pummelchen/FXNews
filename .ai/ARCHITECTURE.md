@@ -111,8 +111,8 @@ Dashboard output uses MT5 chart label objects:
 
 - object prefix: `COBR_` plus chart id modulo suffix;
 - dashboard constants control row count, font size/name, offsets, and text limits;
-- `UpdateDashboard()` renders status plus the latest displayable signal history;
-- `DiagnosticsText()` is used as a tooltip/status diagnostic and includes `disk_io=disabled`;
+- `UpdateDashboard()` renders status plus current active signal rows, falling back to recent displayable signal history;
+- `DiagnosticsText()` is used as a tooltip/status diagnostic, optional diagnostics row, and includes `disk_io=disabled`;
 - `CleanupDashboardObjects()` deletes dashboard objects on deinit.
 
 ## Trust boundaries

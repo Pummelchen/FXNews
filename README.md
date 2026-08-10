@@ -1,13 +1,5 @@
 # FXNews
 
-> **AI agents: start here**
->
-> Before making changes, read [`AI_INDEX.md`](./AI_INDEX.md), then [`AGENTS.md`](./AGENTS.md).
-> The generic first-session prompt is in [`.ai/START_HERE.md`](./.ai/START_HERE.md).
->
-> These files summarize the repository architecture, commands, conventions, risks, and recommended reading order for a fresh AI session.
-> They are vendor-neutral and intended for any high-end AI coding agent.
-
 FXNews is a chart-only MetaTrader 5 custom indicator for discretionary FX day traders. It scans many FX pairs and timeframes from one chart and highlights fresh breakout or impulse events for manual triage.
 
 ## Benefits
@@ -32,3 +24,8 @@ Use the GitHub Wiki for setup and operation:
 - [Configuration](https://github.com/Pummelchen/FXNews/wiki/Configuration)
 - [Signal Logic](https://github.com/Pummelchen/FXNews/wiki/Signal-Logic)
 - [Operations And Troubleshooting](https://github.com/Pummelchen/FXNews/wiki/Operations-and-Troubleshooting)
+- [Architecture](https://github.com/Pummelchen/FXNews/wiki/Architecture)
+- [Development Guide](https://github.com/Pummelchen/FXNews/wiki/Development-Guide)
+- [Testing And Validation](https://github.com/Pummelchen/FXNews/wiki/Testing-and-Validation)
+- [Safety And Security](https://github.com/Pummelchen/FXNews/wiki/Safety-and-Security)
+- [Known Limitations](https://github.com/Pummelchen/FXNews/wiki/Known-Limitations)

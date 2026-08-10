@@ -1,31 +1,36 @@
 # FXNews
 
-FXNews is a chart-only MetaTrader 5 custom indicator for discretionary FX day traders. It scans many FX pairs and timeframes from one chart and highlights fresh breakout or impulse events for manual triage.
+FXNews is a chart-only MetaTrader 5 custom indicator for discretionary FX market monitoring. From one chart, it scans a configurable basket of currency pairs and timeframes for fresh breakout and impulse events.
 
-## Benefits
+## What It Provides
 
-- One indicator watches a full FX basket instead of forcing you to monitor many charts.
-- Signals stay simple: status line plus current high-quality dashboard rows, with recent high-quality messages shown when no current signal is active.
-- Each message includes symbol, timeframe, direction, and a raw event-quality percentage.
-- The score considers breakout structure, impulse strength, spread/quote quality, currency-flow confirmation, session context, and fakeout risk.
-- Validation and Autotune modes use MT5 M1 history, can apply runtime-tuned settings, and write detailed reports to the MT5 Journal without creating files.
-- FXNews never opens, closes, modifies, or manages trades.
-- No WebRequest, DLLs, external feeds, CSV logging, or disk output.
+- Multi-symbol, multi-timeframe scanning from a single attached chart.
+- Ranked active-signal rows with symbol, timeframe, direction, score, execution cost, session, calendar context, correlation grouping, and reason tags.
+- A recent-signal fallback when no active candidate qualifies for display.
+- Composite scoring based on breakout structure, impulse quality, execution conditions, currency flow, market regime, and optional MT5 economic-calendar context.
+- Historical Validation reports and fixed-candidate Autotune using locally available MT5 M1 history.
+- Optional sound and terminal push notifications, both disabled by default.
 
-The percentage is a scanner ranking score, not a guaranteed win probability and not an automatic trade instruction.
+FXNews does not place, modify, or manage trades. It uses no `WebRequest`, DLL, external data feed, CSV logging, or file persistence. The displayed percentage is an event-quality ranking, not a win probability or trade instruction.
+
+## Requirements
+
+- MetaTrader 5 with MetaEditor.
+- Broker symbols and sufficient M1, M5, M15, and scan-timeframe history for the configured basket.
+- A demo or other non-production environment for initial validation.
 
 ## Documentation
 
-Use the GitHub Wiki for setup and operation:
+The [GitHub Wiki](https://github.com/Pummelchen/FXNews/wiki) is the complete project manual:
 
-- [Wiki Home](https://github.com/Pummelchen/FXNews/wiki)
 - [Installation](https://github.com/Pummelchen/FXNews/wiki/Installation)
-- [QuickStart: Autolearning Before Live Use](https://github.com/Pummelchen/FXNews/wiki/QuickStart-Autolearning)
+- [Validation and Autotune](https://github.com/Pummelchen/FXNews/wiki/Validation-and-Autotune)
 - [Configuration](https://github.com/Pummelchen/FXNews/wiki/Configuration)
 - [Signal Logic](https://github.com/Pummelchen/FXNews/wiki/Signal-Logic)
-- [Operations And Troubleshooting](https://github.com/Pummelchen/FXNews/wiki/Operations-and-Troubleshooting)
+- [Operations and Troubleshooting](https://github.com/Pummelchen/FXNews/wiki/Operations-and-Troubleshooting)
 - [Architecture](https://github.com/Pummelchen/FXNews/wiki/Architecture)
 - [Development Guide](https://github.com/Pummelchen/FXNews/wiki/Development-Guide)
-- [Testing And Validation](https://github.com/Pummelchen/FXNews/wiki/Testing-and-Validation)
-- [Safety And Security](https://github.com/Pummelchen/FXNews/wiki/Safety-and-Security)
+- [Testing and Validation](https://github.com/Pummelchen/FXNews/wiki/Testing-and-Validation)
+- [Safety and Security](https://github.com/Pummelchen/FXNews/wiki/Safety-and-Security)
+- [Release Checklist](https://github.com/Pummelchen/FXNews/wiki/Release-Checklist)
 - [Known Limitations](https://github.com/Pummelchen/FXNews/wiki/Known-Limitations)

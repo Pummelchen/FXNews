@@ -179,11 +179,9 @@ double g_outcome_stop_atr = 0.0;
 #define MAX_HISTORICAL_SIGNALS_PER_PROFILE 1000
 #define MAX_OUTCOME_HORIZON_MINUTES 240
 #define MAX_BASELINE_SAMPLES 5000
-// Neutral placeholders used when the currency basket produced no reading. These
-// still feed the weighted blend, so they must never be read as confirmation:
-// every consumer gates on CurrencyFlowQuality.available, not on the value.
-#define FLOW_NEUTRAL_SCORE 0.62
-#define FLOW_UNKNOWN_PAIR_SCORE 0.52
+// An unmeasured basket now carries no score at all: the component is dropped
+// from the blend and every consumer gates on CurrencyFlowQuality.available.
+// There is deliberately no neutral placeholder to mistake for a measurement.
 #define FLOW_CONFIRM_THRESHOLD 0.62
 #define REGIME_CONFIRM_THRESHOLD 0.62
 // Upper edges of the multi-timeframe and basket ramps. Declared here so the
@@ -3989,7 +3987,7 @@ void EvaluateCurrencyFlowQuality(const int index,
 {
    flow.pass = false;
    flow.available = false;
-   flow.score = FLOW_NEUTRAL_SCORE;
+   flow.score = 0.0;
    flow.base_strength = 0.0;
    flow.quote_strength = 0.0;
    flow.directional_edge = 0.0;
@@ -4003,15 +4001,13 @@ void EvaluateCurrencyFlowQuality(const int index,
    int quote = g_profiles[index].quote_index;
    if(base < 0 || quote < 0)
    {
-      flow.score = FLOW_UNKNOWN_PAIR_SCORE;
-      return;
+      return;   // unknown pair: no basket reading exists
    }
 
    if(g_currency_samples[base] <= 0 || g_currency_samples[quote] <= 0)
    {
-      flow.score = FLOW_NEUTRAL_SCORE;
       flow.basket_agreement = 0.50;
-      return;
+      return;   // no samples for these currencies this scan
    }
 
    flow.available = true;
@@ -4202,9 +4198,12 @@ string BuildReasonSummary(const CompositeSignalScore &score, const string caps)
    names[count] = "impulse";
    values[count] = score.impulse.score;
    count++;
-   names[count] = "flow";
-   values[count] = score.flow.score;
-   count++;
+   if(score.flow.available)
+   {
+      names[count] = "flow";
+      values[count] = score.flow.score;
+      count++;
+   }
    names[count] = "regime";
    values[count] = score.regime.score;
    count++;
@@ -5429,10 +5428,11 @@ string FormatBlockedDashboardSignalText(const int index, const int direction)
 
 string DashboardTooltip(const CompositeSignalScore &score)
 {
-   return StringFormat("BRK %.2f | IMP %.2f | FLOW %.2f | EXEC %.2f | REG %.2f | %s | disk_io=off",
+   string flow_text = (score.flow.available ? StringFormat("%.2f", score.flow.score) : "n/a");
+   return StringFormat("BRK %.2f | IMP %.2f | FLOW %s | EXEC %.2f | REG %.2f | %s | disk_io=off",
                        score.breakout.score,
                        score.impulse.score,
-                       score.flow.score,
+                       flow_text,
                        score.execution.score,
                        score.regime.score,
                        score.calendar.state_tag);

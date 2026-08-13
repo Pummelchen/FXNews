@@ -1,6 +1,6 @@
-// FXNews version 1.6
+// FXNews version 1.7
 #property strict
-#property version   "1.600"
+#property version   "1.700"
 #property indicator_chart_window
 #property indicator_plots 0
 #property description "Chart-only multi-symbol breakout radar indicator. No trade execution. No disk I/O."
@@ -3598,7 +3598,10 @@ void BuildCompositeSignalScore(const int index,
    double breakout_weight = (UseTechnicalBreakoutEngine ? 0.22 : 0.0);
    double impulse_weight = (UseImpulseBreakoutEngine ? 0.22 : 0.0);
    double execution_weight = 0.18;
-   double flow_weight = 0.16;
+   // Mirrors the calendar handling below: an unmeasured component contributes
+   // nothing and is removed from the normaliser, instead of being imputed at a
+   // neutral constant that compresses every score toward that constant.
+   double flow_weight = (UseCurrencyStrength && score.flow.available ? 0.16 : 0.0);
    double regime_weight = 0.14;
    double calendar_weight = (UseEconomicCalendarContext && score.calendar.available ? 0.08 : 0.0);
 
@@ -3628,7 +3631,7 @@ void BuildCompositeSignalScore(const int index,
 
    if(!UseCurrencyStrength)
       capped = ApplyScoreCap(capped, 84.0, caps, "flow_disabled_cap");
-   else if(!score.flow.pass && score.flow.conflict_penalty < 0.35)
+   else if(!score.flow.available)
       capped = ApplyScoreCap(capped, 84.0, caps, "flow_absent_cap");
    else if(score.flow.conflict_penalty >= 0.35)
       capped = ApplyScoreCap(capped, 69.0, caps, "flow_conflict_cap");
@@ -3944,20 +3947,35 @@ void EvaluateImpulseQuality(const int index, const int direction, ImpulseQuality
    impulse.tick_sample_quality_score = g_profiles[index].tick_sample_quality_score;
    impulse.valid_ticks_used = g_profiles[index].valid_ticks_used;
    impulse.tick_state = g_profiles[index].tick_state;
-   double tick_rate_score = (UseTickRateScoring ? ScoreFromZ(impulse.tick_rate_z, 0.50, 2.50) : 0.65);
    double volume_score = ScoreFromZ(impulse.tick_volume_z, 0.50, 2.80);
-   double continuation = ContinuationScore(index, direction) / 100.0;
+   bool continuation_available = false;
+   double continuation = ContinuationScore(index, direction, continuation_available) / 100.0;
 
    double atr_pips = MathMax(g_profiles[index].atr_trigger / g_profiles[index].pip_size, 0.1);
    double extended_atr = DirectionalValue(g_profiles[index].movement_5m_pips, direction) / atr_pips;
    impulse.exhaustion_penalty = SmoothStep(MaxExhaustionAtr, MaxExhaustionAtr * 1.70, extended_atr);
 
-   impulse.score = Clamp01(speed_score * 0.25 +
-                           impulse.atr_expansion_score * 0.20 +
-                           volume_score * 0.15 +
-                           tick_rate_score * 0.10 +
-                           impulse.acceleration_score * 0.15 +
-                           continuation * 0.15 -
+   // Components that could not be measured are dropped from the blend and from
+   // its normaliser, rather than being imputed with a constant that would drag
+   // every score toward that constant.
+   double impulse_weighted = speed_score * 0.25 +
+                             impulse.atr_expansion_score * 0.20 +
+                             volume_score * 0.15 +
+                             impulse.acceleration_score * 0.15;
+   double impulse_weight_total = 0.25 + 0.20 + 0.15 + 0.15;
+
+   if(UseTickRateScoring)
+   {
+      impulse_weighted += ScoreFromZ(impulse.tick_rate_z, 0.50, 2.50) * 0.10;
+      impulse_weight_total += 0.10;
+   }
+   if(continuation_available)
+   {
+      impulse_weighted += continuation * 0.15;
+      impulse_weight_total += 0.15;
+   }
+
+   impulse.score = Clamp01(impulse_weighted / impulse_weight_total -
                            impulse.exhaustion_penalty * 0.22);
    if(UseCopyTicksForImpulse)
       impulse.score = Clamp01(impulse.score * (0.75 + impulse.tick_sample_quality_score * 0.25));
@@ -4000,22 +4018,32 @@ void EvaluateCurrencyFlowQuality(const int index,
    flow.base_strength = g_currency_strength[base];
    flow.quote_strength = g_currency_strength[quote];
    flow.directional_edge = (flow.base_strength - flow.quote_strength) * (double)direction;
-   flow.basket_agreement = CalculateBasketAgreement(index, direction);
+   bool agreement_available = false;
+   flow.basket_agreement = CalculateBasketAgreement(index, direction, agreement_available);
 
    double edge_score = SmoothStep(MinDirectionalEdgeForHighScore * 0.20,
                                   MinDirectionalEdgeForHighScore,
                                   flow.directional_edge);
-   double agreement_score = SmoothStep(BASKET_AGREEMENT_SCORE_FLOOR,
-                                       MinBasketAgreementForHighScore,
-                                       flow.basket_agreement);
+
    flow.conflict_penalty = 0.0;
    if(flow.directional_edge < -MinDirectionalEdgeForHighScore * 0.50)
       flow.conflict_penalty += 0.45;
-   if(flow.basket_agreement < 0.35)
+   // Only a measured disagreement is a conflict. An unmeasurable one is not.
+   if(agreement_available && flow.basket_agreement < 0.35)
       flow.conflict_penalty += 0.45;
    flow.conflict_penalty = Clamp01(flow.conflict_penalty);
 
-   flow.score = Clamp01(edge_score * 0.55 + agreement_score * 0.45 - flow.conflict_penalty * 0.35);
+   double flow_weighted = edge_score * 0.55;
+   double flow_weight_total = 0.55;
+   if(agreement_available)
+   {
+      flow_weighted += SmoothStep(BASKET_AGREEMENT_SCORE_FLOOR,
+                                  MinBasketAgreementForHighScore,
+                                  flow.basket_agreement) * 0.45;
+      flow_weight_total += 0.45;
+   }
+
+   flow.score = Clamp01(flow_weighted / flow_weight_total - flow.conflict_penalty * 0.35);
    flow.pass = (flow.conflict_penalty < 0.55);
 }
 
@@ -4323,8 +4351,9 @@ string BuildHumanReadableReason(const CompositeSignalScore &score, const SymbolP
    return lead + details;
 }
 
-double CalculateBasketAgreement(const int index, const int direction)
+double CalculateBasketAgreement(const int index, const int direction, bool &available)
 {
+   available = false;
    int base = g_profiles[index].base_index;
    int quote = g_profiles[index].quote_index;
    if(base < 0 || quote < 0)
@@ -4377,8 +4406,9 @@ double CalculateBasketAgreement(const int index, const int direction)
    }
 
    if(total_weight <= 0.0)
-      return 0.50;
+      return 0.50;   // no peer pairs; the caller drops the component instead of using this
 
+   available = true;
    return Clamp01(agreeing_weight / total_weight);
 }
 
@@ -5828,14 +5858,17 @@ double BreakoutDistance(const int index, const int direction)
    return 0.0;
 }
 
-double ContinuationScore(const int index, const int direction)
+double ContinuationScore(const int index, const int direction, bool &available)
 {
+   available = false;
    if(g_profiles[index].snapshot_count < 3)
-      return 35.0;
+      return 0.0;
 
    double old_mid = ReferenceMid(index, 30);
    if(old_mid <= 0.0)
-      return 35.0;
+      return 0.0;
+
+   available = true;
 
    double extreme = RecentExtremeMid(index, 30, direction);
    double move_to_extreme = (extreme - old_mid) * (double)direction;

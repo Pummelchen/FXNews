@@ -16,6 +16,22 @@ fi
 [ -f "$SRC" ] || { echo "build: no such source file: $SRC" >&2; exit 2; }
 SRC="$(cd "$(dirname "$SRC")" && pwd)/$(basename "$SRC")"
 
+# MetaEditor's /compile: switch cannot handle a path containing a space: it exits
+# silently, writes no log and reports no error. Verified by isolation on
+# 2026-08-13. This rules out compiling in place under
+# "MQL5/Indicators/..." because it sits below "Program Files/MetaTrader 5".
+# Compile from a space-free checkout and copy the .ex5 across, or use the
+# MetaEditor GUI, which is unaffected.
+case "$SRC" in
+  *\ *)
+    echo "build: MetaEditor cannot compile a path containing a space:" >&2
+    echo "         $SRC" >&2
+    echo "       Compile from a space-free path and copy FXNews.ex5 to the" >&2
+    echo "       MQL5/Indicators/FXNews/ folder, or press F7 in MetaEditor." >&2
+    exit 2
+    ;;
+esac
+
 WINE="/Applications/MetaTrader 5.app/Contents/SharedSupport/wine/bin/wine64"
 export WINEPREFIX="$HOME/Library/Application Support/net.metaquotes.wine.metatrader5"
 MT5="$WINEPREFIX/drive_c/Program Files/MetaTrader 5"

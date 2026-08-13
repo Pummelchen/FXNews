@@ -5170,15 +5170,20 @@ color StatusLineColor()
    return clrLime;
 }
 
+// The scan counters were permanent clutter on a line the user cannot dismiss.
+// They are still available on demand: the full set lives in the status-row
+// tooltip and, when ShowDiagnosticsPanel is enabled, on its own row. The only
+// thing that surfaces here unprompted is a symbol that failed to refresh,
+// because silently hiding that would put the operator back in the dark.
 string ActivityStatusText()
 {
-   return StringFormat("FXNews - %s | scan=%d ok=%d bad=%d act=%d %.1fms %s",
+   string warning = "";
+   if(g_last_invalid_symbols > 0)
+      warning = StringFormat(" | %d unavailable", g_last_invalid_symbols);
+
+   return StringFormat("FXNews - %s%s | %s",
                        OperatingModeText(),
-                       ArraySize(g_profiles),
-                       g_last_valid_symbols,
-                       g_last_invalid_symbols,
-                       g_last_active_profiles,
-                       g_average_scan_ms,
+                       warning,
                        TimeToString(TimeLocal(), TIME_SECONDS));
 }
 

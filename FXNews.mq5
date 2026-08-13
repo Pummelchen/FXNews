@@ -21,6 +21,7 @@ input FXNewsOperatingMode OperatingMode = FXNEWS_MODE_LIVE;
 input string SymbolsToScan =
 "EURUSD,GBPUSD,USDJPY,USDCHF,AUDUSD,NZDUSD,USDCAD,EURJPY,GBPJPY,EURGBP,EURAUD,EURNZD,EURCAD,EURCHF,GBPAUD,GBPNZD,GBPCAD,GBPCHF,AUDJPY,NZDJPY,CADJPY,CHFJPY,AUDNZD,AUDCAD,AUDCHF,NZDCAD,NZDCHF,CADCHF";
 input string TimeframesToScan = "M1,M5,M15,M30,H1,H4,H8,H12,D1";
+input string InstanceId = ""; // Optional stable namespace when multiple instances share a chart.
 
 input int ScanIntervalSeconds = 1;
 input int DisplayUpdateSeconds = 5;
@@ -154,18 +155,29 @@ double g_outcome_stop_atr = 0.0;
 #define SIGNAL_FIRST_ROW_INDEX 3
 #define CALENDAR_REFRESH_SECONDS 60
 #define SESSION_COUNT 6
+#define MAX_SYMBOL_TOKEN_LENGTH 32
+#define MAX_UNIQUE_SYMBOLS 32
+#define MAX_PROFILES 256
+#define MAX_RANGE_LOOKBACK 500
+#define MAX_ATR_PERIOD 200
+#define MAX_TICK_LOOKBACK_SECONDS 300
+#define MAX_CALENDAR_WINDOW_MINUTES 1440
+#define MAX_HISTORICAL_LOOKBACK_DAYS 365
+#define MAX_HISTORICAL_WARMUP_BARS 10000
+#define MAX_HISTORICAL_SIGNALS_PER_PROFILE 1000
+#define MAX_OUTCOME_HORIZON_MINUTES 240
+#define MAX_BASELINE_SAMPLES 5000
+#define MIN_ALERT_INTERVAL_SECONDS 30
+#define MAX_ALERTS_PER_MINUTE 12
+#define MAX_DEBUG_LINES_PER_MINUTE 30
 
 enum BreakoutEventState
 {
    STATE_IDLE = 0,
    STATE_WATCH = 1,
    STATE_CANDIDATE = 2,
-   STATE_ACTIVE_UNCONFIRMED = 3,
-   STATE_ACTIVE_CONFIRMED = 4,
-   STATE_ACTIVE_SIGNAL = 5,
-   STATE_EXPIRED = 6,
-   STATE_FAILED_FAST = 7,
-   STATE_COOLDOWN = 8
+   STATE_ACTIVE_CONFIRMED = 3,
+   STATE_COOLDOWN = 4
 };
 
 enum SessionBucket
@@ -249,7 +261,6 @@ struct CurrencyFlowQuality
 
 struct RegimeContext
 {
-   bool pass;
    double score;              // 0..1
    double session_score;
    double mtf_alignment_score;
@@ -265,10 +276,11 @@ struct CalendarContext
    bool relevant_event_nearby;
    bool high_impact_nearby;
    bool just_released;
+   bool future_high_impact_nearby;
    double score;              // 0..1
    double proximity_minutes;
+   double future_high_impact_minutes;
    double importance_score;
-   double surprise_score;
    double uncertainty_penalty;
    string state_tag;
 };
@@ -300,13 +312,6 @@ struct SessionBaseline
    double tick_rate_var;
    double tick_volume_mean;
    double tick_volume_var;
-   double atr_mean;
-   double atr_var;
-   double speed_mean;
-   double speed_var;
-   double range_width_mean;
-   double range_width_var;
-   int breakout_count;
 };
 
 struct DashboardSignal
@@ -339,34 +344,17 @@ struct HistoricalSignalScore
    bool valid;
    int direction;
    double displayed_score;
-   double raw_score;
-   double execution_score;
-   double breakout_score;
-   double impulse_score;
-   double flow_score;
-   double regime_score;
    double atr_price;
-   double spread_pips;
-   double spread_to_atr;
-   double range_width_pips;
-   double breakout_distance_atr;
-   string reason;
 };
 
 struct HistoricalOutcome
 {
-   double mfe_5m_pips;
-   double mae_5m_pips;
    double result_5m_R;
    bool target_5m;
    bool stop_5m;
-   double mfe_15m_pips;
-   double mae_15m_pips;
    double result_15m_R;
    bool target_15m;
    bool stop_15m;
-   double mfe_30m_pips;
-   double mae_30m_pips;
    double result_30m_R;
    bool target_30m;
    bool stop_30m;
@@ -374,7 +362,6 @@ struct HistoricalOutcome
 
 struct HistoricalBacktestStats
 {
-   string params_name;
    datetime from_time;
    datetime to_time;
    int symbols_requested;
@@ -420,8 +407,10 @@ struct CurrencyCalendarCache
    bool relevant_event_nearby;
    bool high_impact_nearby;
    bool just_released;
+   bool future_high_impact_nearby;
    double score;
    double proximity_minutes;
+   double future_high_impact_minutes;
    double importance_score;
    double uncertainty_penalty;
 };
@@ -450,10 +439,10 @@ struct SymbolProfile
    string timeframe_label;
    bool valid;
    bool selected;
+   datetime next_symbol_retry_time;
    int base_index;
    int quote_index;
 
-   int digits;
    double point;
    double pip_size;
 
@@ -463,7 +452,6 @@ struct SymbolProfile
    double bid;
    double ask;
    double mid;
-   double last_mid;
    double spread_pips;
    double median_spread_pips;
    double spread_z;
@@ -472,9 +460,6 @@ struct SymbolProfile
    double session_spread_z;
    double session_tick_rate_z;
    double session_tick_volume_z;
-   double session_atr_z;
-   double session_speed_z;
-   double session_range_z;
    bool session_baseline_ready;
    SessionBucket session_index;
    string session_name;
@@ -496,6 +481,7 @@ struct SymbolProfile
    double current_m1_high;
    double current_m1_low;
    double current_m1_close;
+   datetime trigger_bar_time;
    double current_m1_tick_volume;
    double last_completed_m1_tick_volume;
    double average_m1_tick_volume;
@@ -509,10 +495,6 @@ struct SymbolProfile
    double m5_move_atr;
    double m15_move_atr;
 
-   double technical_score_up;
-   double technical_score_down;
-   double impulse_score_up;
-   double impulse_score_down;
    double final_score_up;
    double final_score_down;
    CompositeSignalScore composite_up;
@@ -525,17 +507,19 @@ struct SymbolProfile
    datetime cooldown_end_up;
    datetime cooldown_end_down;
    datetime last_alert_sent_time;
-   bool strong_alert_sent;
+   bool strong_alert_handled;
    datetime confidence_below_since;
    int candidate_direction;
    datetime candidate_start_time;
+   datetime candidate_bar_time;
+   bool pending_alert;
+   bool pending_strong_upgrade;
+   double pending_alert_score;
 
    datetime outside_since_up;
    datetime outside_since_down;
    datetime reentered_since_up;
    datetime reentered_since_down;
-   datetime last_inside_range_time;
-   datetime last_confirmed_time;
    string dominant_currency_flow;
    string correlated_alert_group_id;
    bool group_leader_signal;
@@ -573,6 +557,10 @@ int g_last_valid_symbols = 0;
 int g_last_invalid_symbols = 0;
 int g_last_active_profiles = 0;
 int g_last_tick_history_ok = 0;
+datetime g_alert_window_started = 0;
+int g_alerts_in_window = 0;
+datetime g_debug_window_started = 0;
+int g_debug_lines_in_window = 0;
 
 datetime g_last_dashboard_update = 0;
 datetime g_last_signal_message_refresh = 0;
@@ -603,7 +591,8 @@ int OnInit()
    if(!ValidateInputs())
       return INIT_PARAMETERS_INCORRECT;
 
-   g_object_prefix = "COBR_" + IntegerToString((int)(ChartID() % 1000000)) + "_";
+   g_object_prefix = "COBR_" + IntegerToString((int)(ChartID() % 1000000)) + "_" +
+                     ObjectNamespaceToken(InstanceId) + "_";
 
    if(ParseSymbols() <= 0)
    {
@@ -613,7 +602,11 @@ int OnInit()
 
    InitializeCalendarCache();
 
-   AllocateHistoryBuffers();
+   if(!AllocateHistoryBuffers())
+   {
+      Print("FXNews: unable to allocate bounded runtime buffers.");
+      return INIT_FAILED;
+   }
 
    for(int i = 0; i < ArraySize(g_profiles); i++)
       EnsureSymbolReady(i);
@@ -666,27 +659,38 @@ int OnCalculate(const int rates_total,
 
 bool ValidateInputs()
 {
+   if(StringLen(SymbolsToScan) <= 0 || StringLen(SymbolsToScan) > MAX_UNIQUE_SYMBOLS * (MAX_SYMBOL_TOKEN_LENGTH + 1) ||
+      StringLen(TimeframesToScan) <= 0 || StringLen(TimeframesToScan) > 64 || StringLen(InstanceId) > 32)
+   {
+      Print("FXNews: symbol, timeframe, or instance identifier text is outside supported bounds.");
+      return false;
+   }
+
    if(ScanIntervalSeconds < 1 || DisplayUpdateSeconds < 1 || MaxQuoteAgeSeconds < 1)
    {
       Print("FXNews: scan, display, and quote-age inputs must be positive.");
       return false;
    }
 
-   if(g_min_display_confidence < 1.0 || g_min_display_confidence > 99.0 ||
+   if(!MathIsValidNumber(g_min_display_confidence) || !MathIsValidNumber(g_strong_alert_confidence) ||
+      g_min_display_confidence < 1.0 || g_min_display_confidence > 99.0 ||
       g_strong_alert_confidence < g_min_display_confidence || g_strong_alert_confidence > 100.0)
    {
       Print("FXNews: confidence inputs are inconsistent.");
       return false;
    }
 
-   if(g_range_lookback_m1 < 10 || ATRPeriod < 2 ||
+   if(g_range_lookback_m1 < 10 || g_range_lookback_m1 > MAX_RANGE_LOOKBACK ||
+      ATRPeriod < 2 || ATRPeriod > MAX_ATR_PERIOD ||
+      !MathIsValidNumber(g_breakout_buffer_atr) || !MathIsValidNumber(g_min_breakout_buffer_pips) ||
       g_breakout_buffer_atr < 0.0 || g_min_breakout_buffer_pips < 0.0)
    {
       Print("FXNews: range and ATR inputs are outside supported bounds.");
       return false;
    }
 
-   if(MaxSpreadPips <= 0.0 || MaxSpreadMedianMultiplier <= 1.0)
+   if(!MathIsValidNumber(MaxSpreadPips) || !MathIsValidNumber(MaxSpreadMedianMultiplier) ||
+      MaxSpreadPips <= 0.0 || MaxSpreadMedianMultiplier <= 1.0)
    {
       Print("FXNews: spread filters are outside supported bounds.");
       return false;
@@ -698,20 +702,31 @@ bool ValidateInputs()
       return false;
    }
 
-   if(g_max_spread_to_atr <= 0.0 || MaxTickGapSeconds <= 0.0 || MaxSpreadZScore <= 0.0)
+   if(!MathIsValidNumber(g_max_spread_to_atr) || !MathIsValidNumber(MaxTickGapSeconds) ||
+      !MathIsValidNumber(MaxSpreadZScore) || g_max_spread_to_atr <= 0.0 ||
+      MaxTickGapSeconds <= 0.0 || MaxSpreadZScore <= 0.0)
    {
       Print("FXNews: execution gate inputs must be positive.");
       return false;
    }
 
    if(MinHoldSecondsForHighScore < 0 || FullHoldScoreSeconds < 1 ||
-      FullHoldScoreSeconds < MinHoldSecondsForHighScore || g_max_overextension_atr <= 0.0)
+      FullHoldScoreSeconds < MinHoldSecondsForHighScore || !MathIsValidNumber(g_max_overextension_atr) ||
+      g_max_overextension_atr <= 0.0)
    {
       Print("FXNews: breakout-quality inputs are outside supported bounds.");
       return false;
    }
 
-   if(g_min_impulse_z_for_signal < 0.0 || MaxExhaustionAtr <= 0.0 ||
+   if(!UseTechnicalBreakoutEngine && !UseImpulseBreakoutEngine)
+   {
+      Print("FXNews: enable at least one signal engine.");
+      return false;
+   }
+
+   if(!MathIsValidNumber(g_min_impulse_z_for_signal) || !MathIsValidNumber(MaxExhaustionAtr) ||
+      !MathIsValidNumber(MinBasketAgreementForHighScore) || !MathIsValidNumber(MinDirectionalEdgeForHighScore) ||
+      g_min_impulse_z_for_signal < 0.0 || MaxExhaustionAtr <= 0.0 ||
       MinBasketAgreementForHighScore < 0.0 || MinBasketAgreementForHighScore > 1.0 ||
       MinDirectionalEdgeForHighScore < 0.0)
    {
@@ -719,21 +734,36 @@ bool ValidateInputs()
       return false;
    }
 
-   if(CalendarLookbackMinutes < 0 || CalendarLookaheadMinutes < 0 || CalendarPreNewsBlockMinutes < 0)
+   if(CalendarLookbackMinutes < 0 || CalendarLookbackMinutes > MAX_CALENDAR_WINDOW_MINUTES ||
+      CalendarLookaheadMinutes < 0 || CalendarLookaheadMinutes > MAX_CALENDAR_WINDOW_MINUTES ||
+      CalendarPreNewsBlockMinutes < 0 || CalendarPreNewsBlockMinutes > CalendarLookaheadMinutes)
    {
       Print("FXNews: calendar inputs must not be negative.");
       return false;
    }
 
+   if(RolloverStartHourServer < 0 || RolloverStartHourServer > 23 ||
+      RolloverEndHourServer < 0 || RolloverEndHourServer > 23 ||
+      AsiaStartHourServer < 0 || AsiaStartHourServer > 23 || AsiaEndHourServer < 0 || AsiaEndHourServer > 23 ||
+      LondonStartHourServer < 0 || LondonStartHourServer > 23 || LondonEndHourServer < 0 || LondonEndHourServer > 23 ||
+      NewYorkStartHourServer < 0 || NewYorkStartHourServer > 23 || NewYorkEndHourServer < 0 || NewYorkEndHourServer > 23 ||
+      LondonNYOverlapStartHourServer < 0 || LondonNYOverlapStartHourServer > 23 ||
+      LondonNYOverlapEndHourServer < 0 || LondonNYOverlapEndHourServer > 23)
+   {
+      Print("FXNews: session and rollover hours must be between 0 and 23.");
+      return false;
+   }
+
    if(OutcomeHorizonMinutes1 < 1 || OutcomeHorizonMinutes2 < OutcomeHorizonMinutes1 ||
-      OutcomeHorizonMinutes3 < OutcomeHorizonMinutes2 || g_outcome_target_atr <= 0.0 ||
-      g_outcome_stop_atr <= 0.0)
+      OutcomeHorizonMinutes3 < OutcomeHorizonMinutes2 || OutcomeHorizonMinutes3 > MAX_OUTCOME_HORIZON_MINUTES ||
+      !MathIsValidNumber(g_outcome_target_atr) || !MathIsValidNumber(g_outcome_stop_atr) ||
+      g_outcome_target_atr <= 0.0 || g_outcome_stop_atr <= 0.0)
    {
       Print("FXNews: outcome inputs are inconsistent.");
       return false;
    }
 
-   if(BaselineLookbackSamples < 50 || MinBaselineSamples < 10 ||
+   if(BaselineLookbackSamples < 50 || BaselineLookbackSamples > MAX_BASELINE_SAMPLES || MinBaselineSamples < 10 ||
       MinBaselineSamples > BaselineLookbackSamples)
    {
       Print("FXNews: session baseline inputs are inconsistent.");
@@ -741,15 +771,17 @@ bool ValidateInputs()
    }
 
    if(MaxDashboardRows < 1 || MaxDashboardRows > DASHBOARD_MAX_OBJECTS - SIGNAL_FIRST_ROW_INDEX ||
-      SignalTTLSeconds < 30 || CopyTicksLookbackSeconds < 5 ||
+      SignalTTLSeconds < 30 || CopyTicksLookbackSeconds < 5 || CopyTicksLookbackSeconds > MAX_TICK_LOOKBACK_SECONDS ||
       MinCopyTicksForGoodQuality < 1)
    {
       Print("FXNews: dashboard, lifecycle, or tick-quality inputs are inconsistent.");
       return false;
    }
 
-   if(HistoricalLookbackDays < 1 || HistoricalStepMinutes < 1 ||
-      HistoricalWarmupBars < 100 || HistoricalMaxSignalsPerProfile < 10 ||
+   if(HistoricalLookbackDays < 1 || HistoricalLookbackDays > MAX_HISTORICAL_LOOKBACK_DAYS ||
+      HistoricalStepMinutes < 1 || HistoricalStepMinutes > 60 || HistoricalWarmupBars < 100 ||
+      HistoricalWarmupBars > MAX_HISTORICAL_WARMUP_BARS || HistoricalMaxSignalsPerProfile < 10 ||
+      HistoricalMaxSignalsPerProfile > MAX_HISTORICAL_SIGNALS_PER_PROFILE ||
       AutotuneMinSignals < 10)
    {
       Print("FXNews: historical validation/autotune inputs are inconsistent.");
@@ -963,36 +995,10 @@ void RunAutotuneBacktest(const HistoricalParams &base_params)
       }
    }
 
-   bool applied = ApplyAutotuneParamsToRuntime(best_params, best_stats, default_objective, best_objective);
-   BuildAutotuneReport(default_stats, best_stats, base_params, best_params, applied);
+   // Historical results are advisory only: the source has no holdout or walk-forward control.
+   BuildAutotuneReport(default_stats, best_stats, base_params, best_params);
 
    g_runtime_operating_mode = FXNEWS_MODE_LIVE;
-}
-
-bool ApplyAutotuneParamsToRuntime(const HistoricalParams &params,
-                                  const HistoricalBacktestStats &stats,
-                                  const double default_objective,
-                                  const double best_objective)
-{
-   if(stats.signals < AutotuneMinSignals)
-      return false;
-   if(best_objective <= default_objective + 0.01)
-      return false;
-
-   g_range_lookback_m1 = params.range_lookback;
-   g_breakout_buffer_atr = params.breakout_buffer_atr;
-   g_min_breakout_buffer_pips = params.min_breakout_buffer_pips;
-   g_min_display_confidence = params.min_confidence;
-   g_max_spread_to_atr = params.max_spread_to_atr;
-   g_max_overextension_atr = params.max_overextension_atr;
-   g_min_impulse_z_for_signal = params.min_impulse_z;
-   g_outcome_target_atr = params.outcome_target_atr;
-   g_outcome_stop_atr = params.outcome_stop_atr;
-
-   if(g_strong_alert_confidence < g_min_display_confidence)
-      g_strong_alert_confidence = MathMin(100.0, g_min_display_confidence + 5.0);
-
-   return true;
 }
 
 double AutotuneObjective(const HistoricalBacktestStats &stats)
@@ -1010,11 +1016,8 @@ double AutotuneObjective(const HistoricalBacktestStats &stats)
 void RunHistoricalBacktest(const HistoricalParams &params, HistoricalBacktestStats &stats)
 {
    ResetHistoricalStats(stats);
-   stats.params_name = params.name;
-
    string symbols[];
-   int first_profile_indices[];
-   int symbol_count = CollectHistoricalSymbols(symbols, first_profile_indices);
+   int symbol_count = CollectHistoricalSymbols(symbols);
    stats.symbols_requested = symbol_count;
 
    for(int s = 0; s < symbol_count; s++)
@@ -1046,10 +1049,10 @@ void RunHistoricalBacktest(const HistoricalParams &params, HistoricalBacktestSta
    }
 }
 
-int CollectHistoricalSymbols(string &symbols[], int &first_profile_indices[])
+int CollectHistoricalSymbols(string &symbols[])
 {
-   ArrayResize(symbols, 0);
-   ArrayResize(first_profile_indices, 0);
+   if(ArrayResize(symbols, 0) != 0)
+      return 0;
 
    for(int i = 0; i < ArraySize(g_profiles); i++)
    {
@@ -1071,10 +1074,9 @@ int CollectHistoricalSymbols(string &symbols[], int &first_profile_indices[])
          continue;
 
       int next = ArraySize(symbols);
-      ArrayResize(symbols, next + 1);
-      ArrayResize(first_profile_indices, next + 1);
+      if(ArrayResize(symbols, next + 1) != next + 1)
+         return ArraySize(symbols);
       symbols[next] = g_profiles[i].symbol;
-      first_profile_indices[next] = i;
    }
 
    return ArraySize(symbols);
@@ -1082,7 +1084,8 @@ int CollectHistoricalSymbols(string &symbols[], int &first_profile_indices[])
 
 int LoadHistoricalM1Rates(const string symbol, MqlRates &rates[])
 {
-   ArrayResize(rates, 0);
+   if(ArrayResize(rates, 0) != 0)
+      return 0;
 
    datetime last_closed = iTime(symbol, PERIOD_M1, 1);
    if(last_closed <= 0)
@@ -1129,17 +1132,23 @@ void ProcessHistoricalProfile(const int profile_index,
       return;
 
    stats.profiles_tested++;
-   int step = IntMax(1, HistoricalStepMinutes);
+   int estimated_boundaries = IntMax(1, (last_index - required) / tf_minutes);
+   int boundary_stride = IntMax(1, (estimated_boundaries + HistoricalMaxSignalsPerProfile - 1) /
+                                HistoricalMaxSignalsPerProfile);
+   boundary_stride = IntMax(boundary_stride,
+                            (HistoricalStepMinutes + tf_minutes - 1) / tf_minutes);
+   int boundary_seen = 0;
    int cooldown_bars = IntMax(1, ValidSignalCooldownSeconds / 60);
    int next_up_allowed = -1000000;
    int next_down_allowed = -1000000;
-   int profile_signals = 0;
 
-   for(int i = required; i < last_index; i += step)
+   for(int i = required; i < last_index; i++)
    {
       if(IsStopped())
          return;
       if(!IsHistoricalEvaluationBoundary(rates[i].time + 60, tf_minutes))
+         continue;
+      if((boundary_seen++ % boundary_stride) != 0)
          continue;
 
       stats.bars_scanned++;
@@ -1164,7 +1173,6 @@ void ProcessHistoricalProfile(const int profile_index,
       HistoricalOutcome outcome;
       EvaluateHistoricalOutcome(rates, copied, i, best_score.direction,
                                 rates[i].close, best_score.atr_price,
-                                g_profiles[profile_index].pip_size,
                                 params,
                                 outcome);
       AddHistoricalStats(stats, best_score, outcome);
@@ -1174,9 +1182,6 @@ void ProcessHistoricalProfile(const int profile_index,
       else
          next_down_allowed = i + cooldown_bars;
 
-      profile_signals++;
-      if(profile_signals >= HistoricalMaxSignalsPerProfile)
-         break;
    }
 }
 
@@ -1365,23 +1370,7 @@ void BuildHistoricalSignalScore(const int profile_index,
 
    score.valid = (final_score >= params.min_confidence);
    score.displayed_score = Clamp(final_score, 0.0, 100.0);
-   score.raw_score = score.displayed_score;
-   score.execution_score = execution_score;
-   score.breakout_score = breakout_score;
-   score.impulse_score = impulse_score;
-   score.flow_score = flow_score;
-   score.regime_score = regime_score;
    score.atr_price = atr;
-   score.spread_pips = spread_pips;
-   score.spread_to_atr = spread_to_atr;
-   score.range_width_pips = range_width / pip_size;
-   score.breakout_distance_atr = SafeDiv(MathMax(breakout_distance, 0.0), atr, 0.0);
-   score.reason = StringFormat("BRK %.2f IMP %.2f FLOW %.2f EXEC %.2f %s",
-                               breakout_score,
-                               impulse_score,
-                               flow_score,
-                               execution_score,
-                               caps);
 }
 
 void ResetHistoricalSignalScore(HistoricalSignalScore &score, const int direction)
@@ -1389,18 +1378,7 @@ void ResetHistoricalSignalScore(HistoricalSignalScore &score, const int directio
    score.valid = false;
    score.direction = direction;
    score.displayed_score = 0.0;
-   score.raw_score = 0.0;
-   score.execution_score = 0.0;
-   score.breakout_score = 0.0;
-   score.impulse_score = 0.0;
-   score.flow_score = 0.0;
-   score.regime_score = 0.0;
    score.atr_price = 0.0;
-   score.spread_pips = 0.0;
-   score.spread_to_atr = 0.0;
-   score.range_width_pips = 0.0;
-   score.breakout_distance_atr = 0.0;
-   score.reason = "";
 }
 
 bool AggregateHistoricalTfBar(MqlRates &rates[],
@@ -1414,6 +1392,8 @@ bool AggregateHistoricalTfBar(MqlRates &rates[],
 {
    int start_index = end_index - tf_minutes + 1;
    if(start_index < 0 || end_index >= ArraySize(rates))
+      return false;
+   if(!HasContinuousHistoricalMinutes(rates, start_index, end_index))
       return false;
 
    open = rates[start_index].open;
@@ -1429,6 +1409,18 @@ bool AggregateHistoricalTfBar(MqlRates &rates[],
       tick_volume += (double)rates[i].tick_volume;
    }
 
+   return true;
+}
+
+bool HasContinuousHistoricalMinutes(MqlRates &rates[], const int start_index, const int end_index)
+{
+   if(start_index < 0 || end_index >= ArraySize(rates) || start_index > end_index)
+      return false;
+   for(int i = start_index + 1; i <= end_index; i++)
+   {
+      if(rates[i].time - rates[i - 1].time != 60)
+         return false;
+   }
    return true;
 }
 
@@ -1517,7 +1509,8 @@ double HistoricalMedianSpreadPips(MqlRates &rates[],
       return HistoricalSpreadPips(rates[index], point, pip_size);
 
    double values[];
-   ArrayResize(values, count);
+   if(ArrayResize(values, count) != count)
+      return HistoricalSpreadPips(rates[index], point, pip_size);
    for(int i = 0; i < count; i++)
       values[i] = HistoricalSpreadPips(rates[index - 1 - i], point, pip_size);
 
@@ -1531,7 +1524,8 @@ double HistoricalTickVolumeZ(MqlRates &rates[], const int index, const int lookb
       return 0.0;
 
    double values[];
-   ArrayResize(values, count);
+   if(ArrayResize(values, count) != count)
+      return 0.0;
    for(int i = 0; i < count; i++)
       values[i] = (double)rates[index - 1 - i].tick_volume;
 
@@ -1555,7 +1549,8 @@ double HistoricalSpeedZ(MqlRates &rates[],
       return 0.0;
 
    double values[];
-   ArrayResize(values, count);
+   if(ArrayResize(values, count) != count)
+      return 0.0;
    for(int i = 0; i < count; i++)
    {
       int end_index = index - 1 - i;
@@ -1608,42 +1603,32 @@ void EvaluateHistoricalOutcome(MqlRates &rates[],
                                const int direction,
                                const double entry,
                                const double atr_price,
-                               const double pip_size,
                                const HistoricalParams &params,
                                HistoricalOutcome &outcome)
 {
    ResetHistoricalOutcome(outcome);
    EvaluateHistoricalOutcomeAtHorizon(rates, copied, signal_index, direction, entry,
-                                      atr_price, pip_size, params.outcome_target_atr,
+                                      atr_price, params.outcome_target_atr,
                                       params.outcome_stop_atr, OutcomeHorizonMinutes1,
-                                      outcome.mfe_5m_pips, outcome.mae_5m_pips,
                                       outcome.result_5m_R, outcome.target_5m, outcome.stop_5m);
    EvaluateHistoricalOutcomeAtHorizon(rates, copied, signal_index, direction, entry,
-                                      atr_price, pip_size, params.outcome_target_atr,
+                                      atr_price, params.outcome_target_atr,
                                       params.outcome_stop_atr, OutcomeHorizonMinutes2,
-                                      outcome.mfe_15m_pips, outcome.mae_15m_pips,
                                       outcome.result_15m_R, outcome.target_15m, outcome.stop_15m);
    EvaluateHistoricalOutcomeAtHorizon(rates, copied, signal_index, direction, entry,
-                                      atr_price, pip_size, params.outcome_target_atr,
+                                      atr_price, params.outcome_target_atr,
                                       params.outcome_stop_atr, OutcomeHorizonMinutes3,
-                                      outcome.mfe_30m_pips, outcome.mae_30m_pips,
                                       outcome.result_30m_R, outcome.target_30m, outcome.stop_30m);
 }
 
 void ResetHistoricalOutcome(HistoricalOutcome &outcome)
 {
-   outcome.mfe_5m_pips = 0.0;
-   outcome.mae_5m_pips = 0.0;
    outcome.result_5m_R = 0.0;
    outcome.target_5m = false;
    outcome.stop_5m = false;
-   outcome.mfe_15m_pips = 0.0;
-   outcome.mae_15m_pips = 0.0;
    outcome.result_15m_R = 0.0;
    outcome.target_15m = false;
    outcome.stop_15m = false;
-   outcome.mfe_30m_pips = 0.0;
-   outcome.mae_30m_pips = 0.0;
    outcome.result_30m_R = 0.0;
    outcome.target_30m = false;
    outcome.stop_30m = false;
@@ -1655,28 +1640,25 @@ void EvaluateHistoricalOutcomeAtHorizon(MqlRates &rates[],
                                         const int direction,
                                         const double entry,
                                         const double atr_price,
-                                        const double pip_size,
                                         const double target_atr,
                                         const double stop_atr,
                                         const int horizon_minutes,
-                                        double &mfe_pips,
-                                        double &mae_pips,
                                         double &result_R,
                                         bool &target_hit,
                                         bool &stop_hit)
 {
-   mfe_pips = 0.0;
-   mae_pips = 0.0;
    result_R = 0.0;
    target_hit = false;
    stop_hit = false;
 
    double target_price = atr_price * target_atr;
    double stop_price = atr_price * stop_atr;
-   if(target_price <= 0.0 || stop_price <= 0.0 || pip_size <= 0.0)
+   if(target_price <= 0.0 || stop_price <= 0.0)
       return;
 
    int last_index = IntMin(copied - 1, signal_index + horizon_minutes);
+   if(last_index <= signal_index || !HasContinuousHistoricalMinutes(rates, signal_index, last_index))
+      return;
    for(int i = signal_index + 1; i <= last_index; i++)
    {
       double favorable = 0.0;
@@ -1692,9 +1674,6 @@ void EvaluateHistoricalOutcomeAtHorizon(MqlRates &rates[],
          adverse = rates[i].high - entry;
       }
 
-      mfe_pips = MathMax(mfe_pips, favorable / pip_size);
-      mae_pips = MathMax(mae_pips, adverse / pip_size);
-
       bool target_now = (favorable >= target_price);
       bool stop_now = (adverse >= stop_price);
       if(!target_hit && !stop_hit)
@@ -1709,13 +1688,14 @@ void EvaluateHistoricalOutcomeAtHorizon(MqlRates &rates[],
    }
 
    if(target_hit && !stop_hit)
-      result_R = 1.0;
+      result_R = SafeDiv(target_price, stop_price, 0.0);
    else if(stop_hit && !target_hit)
       result_R = -1.0;
    else
    {
       double close_move = DirectionalValue(rates[last_index].close - entry, direction);
-      result_R = Clamp(SafeDiv(close_move, target_price, 0.0), -1.0, 1.0);
+      result_R = Clamp(SafeDiv(close_move, stop_price, 0.0), -1.0,
+                       SafeDiv(target_price, stop_price, 0.0));
    }
 }
 
@@ -1794,7 +1774,6 @@ void AddHistoricalBucketStats(HistoricalBacktestStats &stats, const int bucket, 
 
 void ResetHistoricalStats(HistoricalBacktestStats &stats)
 {
-   stats.params_name = "";
    stats.from_time = 0;
    stats.to_time = 0;
    stats.symbols_requested = 0;
@@ -1887,8 +1866,7 @@ void BuildValidationReport(const HistoricalBacktestStats &stats, const Historica
 void BuildAutotuneReport(const HistoricalBacktestStats &default_stats,
                          const HistoricalBacktestStats &best_stats,
                          const HistoricalParams &default_params,
-                         const HistoricalParams &best_params,
-                         const bool applied)
+                         const HistoricalParams &best_params)
 {
    ClearHistoricalReport();
    AddHistoricalReportLine("FXNEWS AUTOTUNE REPORT | M1 HISTORY BACKTEST | NO FILE OUTPUT");
@@ -1948,12 +1926,7 @@ void BuildAutotuneReport(const HistoricalBacktestStats &default_stats,
    AddHistoricalReportLine(FormatHistoricalBucketLine("75-79", best_stats.bucket75_count, best_stats.bucket75_R));
    AddHistoricalReportLine(FormatHistoricalBucketLine("80-84", best_stats.bucket80_count, best_stats.bucket80_R));
    AddHistoricalReportLine(FormatHistoricalBucketLine("85+", best_stats.bucket85_count, best_stats.bucket85_R));
-   if(best_stats.signals < AutotuneMinSignals)
-      AddHistoricalReportLine("Applied: no change; low sample count, current session will continue in LIVE mode.");
-   else if(applied)
-      AddHistoricalReportLine("Applied: runtime settings updated and current session will continue in LIVE mode.");
-   else
-      AddHistoricalReportLine("Applied: no change; current runtime settings already ranked best and LIVE mode will continue.");
+   AddHistoricalReportLine("Applied: no runtime change; review the recommendation with an external holdout before editing inputs.");
 
    PrintHistoricalReportToJournal();
    SetHistoricalReadyMessage("AUTOTUNE");
@@ -2016,7 +1989,10 @@ double StopRate30(const HistoricalBacktestStats &stats)
 
 double ProfitFactorProxy(const HistoricalBacktestStats &stats)
 {
-   return SafeDiv(stats.gross_win_R, stats.gross_loss_R, stats.gross_win_R > 0.0 ? 99.0 : 0.0);
+   if(stats.gross_win_R <= 0.0)
+      return 0.0;
+   // A finite prior prevents a loss-free small sample from dominating the objective.
+   return Clamp(stats.gross_win_R / (stats.gross_loss_R + 1.0), 0.0, 5.0);
 }
 
 double AverageTargetScore(const HistoricalBacktestStats &stats)
@@ -2093,7 +2069,8 @@ void SetHistoricalReportHeader(const string text)
 
 void ClearHistoricalReport()
 {
-   ArrayResize(g_historical_report_lines, 0);
+   if(ArrayResize(g_historical_report_lines, 0) != 0)
+      Print("FXNews: unable to clear historical report buffer.");
 }
 
 void AddHistoricalReportLine(const string line)
@@ -2101,7 +2078,8 @@ void AddHistoricalReportLine(const string line)
    int next = ArraySize(g_historical_report_lines);
    if(next >= DASHBOARD_MAX_OBJECTS)
       return;
-   ArrayResize(g_historical_report_lines, next + 1);
+   if(ArrayResize(g_historical_report_lines, next + 1) != next + 1)
+      return;
    g_historical_report_lines[next] = line;
 }
 
@@ -2133,7 +2111,8 @@ void UpdateHistoricalReportDashboard()
 
 int ParseSymbols()
 {
-   ArrayResize(g_profiles, 0);
+   if(ArrayResize(g_profiles, 0) != 0)
+      return 0;
    if(ParseTimeframes() <= 0)
    {
       Print("FXNews: no valid scan timeframes were provided.");
@@ -2158,20 +2137,45 @@ int ParseSymbols()
       StringTrimRight(token);
       if(token == "")
          continue;
+      if(StringLen(token) > MAX_SYMBOL_TOKEN_LENGTH)
+      {
+         Print("FXNews: a symbol token exceeds the supported length.");
+         return 0;
+      }
 
-      AddUniqueSymbol(symbols, token);
+      bool already_known = SymbolListContains(symbols, token);
+      if(ArraySize(symbols) >= MAX_UNIQUE_SYMBOLS && !already_known)
+      {
+         PrintFormat("FXNews: at most %d unique symbols are supported.", MAX_UNIQUE_SYMBOLS);
+         return 0;
+      }
+      if(!already_known && !AddUniqueSymbol(symbols, token))
+      {
+         Print("FXNews: cannot allocate the symbol list.");
+         return 0;
+      }
    }
 
+   int profile_count = ArraySize(symbols) * ArraySize(g_scan_timeframes);
+   if(profile_count <= 0 || profile_count > MAX_PROFILES)
+   {
+      PrintFormat("FXNews: at most %d symbol/timeframe profiles are supported.", MAX_PROFILES);
+      return 0;
+   }
+
+   if(ArrayResize(g_profiles, profile_count) != profile_count)
+      return 0;
+
+   int next = 0;
    for(int symbol_index = 0; symbol_index < ArraySize(symbols); symbol_index++)
    {
       for(int timeframe_index = 0; timeframe_index < ArraySize(g_scan_timeframes); timeframe_index++)
       {
-         int next = ArraySize(g_profiles);
-         ArrayResize(g_profiles, next + 1);
          ResetProfile(g_profiles[next],
                       symbols[symbol_index],
                       g_scan_timeframes[timeframe_index],
                       g_scan_timeframe_labels[timeframe_index]);
+         next++;
       }
    }
 
@@ -2180,8 +2184,8 @@ int ParseSymbols()
 
 int ParseTimeframes()
 {
-   ArrayResize(g_scan_timeframes, 0);
-   ArrayResize(g_scan_timeframe_labels, 0);
+   if(ArrayResize(g_scan_timeframes, 0) != 0 || ArrayResize(g_scan_timeframe_labels, 0) != 0)
+      return 0;
 
    string cleaned = TimeframesToScan;
    StringReplace(cleaned, ";", ",");
@@ -2214,8 +2218,12 @@ int ParseTimeframes()
          continue;
 
       int next = ArraySize(g_scan_timeframes);
-      ArrayResize(g_scan_timeframes, next + 1);
-      ArrayResize(g_scan_timeframe_labels, next + 1);
+      if(next >= 9 || ArrayResize(g_scan_timeframes, next + 1) != next + 1 ||
+         ArrayResize(g_scan_timeframe_labels, next + 1) != next + 1)
+      {
+         Print("FXNews: unable to add another scan timeframe.");
+         return 0;
+      }
       g_scan_timeframes[next] = timeframe;
       g_scan_timeframe_labels[next] = label;
    }
@@ -2301,17 +2309,25 @@ bool TimeframeAlreadyAdded(const ENUM_TIMEFRAMES timeframe)
 
 bool AddUniqueSymbol(string &symbols[], const string symbol)
 {
+   if(SymbolListContains(symbols, symbol))
+      return false;
+
+   int next = ArraySize(symbols);
+   if(next >= MAX_UNIQUE_SYMBOLS || ArrayResize(symbols, next + 1) != next + 1)
+      return false;
+   symbols[next] = symbol;
+   return true;
+}
+
+bool SymbolListContains(string &symbols[], const string symbol)
+{
    string candidate = UpperAscii(symbol);
    for(int i = 0; i < ArraySize(symbols); i++)
    {
       if(UpperAscii(symbols[i]) == candidate)
-         return false;
+         return true;
    }
-
-   int next = ArraySize(symbols);
-   ArrayResize(symbols, next + 1);
-   symbols[next] = symbol;
-   return true;
+   return false;
 }
 
 void ResetProfile(SymbolProfile &profile,
@@ -2324,11 +2340,11 @@ void ResetProfile(SymbolProfile &profile,
    profile.timeframe_label = timeframe_label;
    profile.valid = false;
    profile.selected = false;
+   profile.next_symbol_retry_time = 0;
    profile.base_index = -1;
    profile.quote_index = -1;
    FindBaseQuoteCurrencies(symbol, profile.base_index, profile.quote_index);
 
-   profile.digits = 0;
    profile.point = 0.0;
    profile.pip_size = 0.0;
 
@@ -2338,7 +2354,6 @@ void ResetProfile(SymbolProfile &profile,
    profile.bid = 0.0;
    profile.ask = 0.0;
    profile.mid = 0.0;
-   profile.last_mid = 0.0;
    profile.spread_pips = 0.0;
    profile.median_spread_pips = 0.0;
    profile.spread_z = 0.0;
@@ -2347,9 +2362,6 @@ void ResetProfile(SymbolProfile &profile,
    profile.session_spread_z = 0.0;
    profile.session_tick_rate_z = 0.0;
    profile.session_tick_volume_z = 0.0;
-   profile.session_atr_z = 0.0;
-   profile.session_speed_z = 0.0;
-   profile.session_range_z = 0.0;
    profile.session_baseline_ready = false;
    profile.session_index = SESSION_OTHER;
    profile.session_name = "OTHER";
@@ -2370,6 +2382,7 @@ void ResetProfile(SymbolProfile &profile,
    profile.current_m1_high = 0.0;
    profile.current_m1_low = 0.0;
    profile.current_m1_close = 0.0;
+   profile.trigger_bar_time = 0;
    profile.current_m1_tick_volume = 0.0;
    profile.last_completed_m1_tick_volume = 0.0;
    profile.average_m1_tick_volume = 0.0;
@@ -2383,10 +2396,6 @@ void ResetProfile(SymbolProfile &profile,
    profile.m5_move_atr = 0.0;
    profile.m15_move_atr = 0.0;
 
-   profile.technical_score_up = 0.0;
-   profile.technical_score_down = 0.0;
-   profile.impulse_score_up = 0.0;
-   profile.impulse_score_down = 0.0;
    profile.final_score_up = 0.0;
    profile.final_score_down = 0.0;
    ResetCompositeSignalScore(profile.composite_up, DIR_UP);
@@ -2399,17 +2408,19 @@ void ResetProfile(SymbolProfile &profile,
    profile.cooldown_end_up = 0;
    profile.cooldown_end_down = 0;
    profile.last_alert_sent_time = 0;
-   profile.strong_alert_sent = false;
+   profile.strong_alert_handled = false;
    profile.confidence_below_since = 0;
    profile.candidate_direction = DIR_NONE;
    profile.candidate_start_time = 0;
+   profile.candidate_bar_time = 0;
+   profile.pending_alert = false;
+   profile.pending_strong_upgrade = false;
+   profile.pending_alert_score = 0.0;
 
    profile.outside_since_up = 0;
    profile.outside_since_down = 0;
    profile.reentered_since_up = 0;
    profile.reentered_since_down = 0;
-   profile.last_inside_range_time = 0;
-   profile.last_confirmed_time = 0;
    profile.dominant_currency_flow = "";
    profile.correlated_alert_group_id = "";
    profile.group_leader_signal = false;
@@ -2423,12 +2434,21 @@ void ResetProfile(SymbolProfile &profile,
    profile.status_message = "";
 }
 
-void AllocateHistoryBuffers()
+bool AllocateHistoryBuffers()
 {
-   int symbol_count = ArraySize(g_profiles);
-   ArrayResize(g_snapshots, symbol_count * SNAPSHOT_CAPACITY);
-   ArrayResize(g_spread_history, symbol_count * SPREAD_HISTORY_CAPACITY);
-   ArrayResize(g_session_baselines, symbol_count * SESSION_COUNT);
+   int profile_count = ArraySize(g_profiles);
+   if(profile_count <= 0 || profile_count > MAX_PROFILES)
+      return false;
+
+   int snapshots_required = profile_count * SNAPSHOT_CAPACITY;
+   int spreads_required = profile_count * SPREAD_HISTORY_CAPACITY;
+   int baselines_required = profile_count * SESSION_COUNT;
+   if(ArrayResize(g_snapshots, snapshots_required) != snapshots_required ||
+      ArrayResize(g_spread_history, spreads_required) != spreads_required ||
+      ArrayResize(g_session_baselines, baselines_required) != baselines_required)
+   {
+      return false;
+   }
 
    for(int i = 0; i < ArraySize(g_snapshots); i++)
    {
@@ -2438,6 +2458,7 @@ void AllocateHistoryBuffers()
 
    ArrayInitialize(g_spread_history, 0.0);
    ResetSessionBaselines();
+   return true;
 }
 
 void ScanAll(const bool force_dashboard)
@@ -2448,6 +2469,7 @@ void ScanAll(const bool force_dashboard)
    g_last_invalid_symbols = 0;
    g_last_active_profiles = 0;
    g_last_tick_history_ok = 0;
+   g_calendar_available = false;
 
    for(int i = 0; i < ArraySize(g_profiles); i++)
    {
@@ -2473,6 +2495,7 @@ void ScanAll(const bool force_dashboard)
    }
 
    UpdateAlertGroups(now);
+   DispatchPendingAlerts(now);
    UpdateScanDiagnostics(scan_start);
 
    if(force_dashboard || g_last_dashboard_update == 0 ||
@@ -2493,6 +2516,12 @@ void ScanAll(const bool force_dashboard)
 
 bool EnsureSymbolReady(const int index)
 {
+   datetime now = TimeCurrent();
+   if(g_profiles[index].valid && g_profiles[index].selected)
+      return true;
+   if(g_profiles[index].next_symbol_retry_time > now)
+      return false;
+
    string symbol = g_profiles[index].symbol;
 
    ResetLastError();
@@ -2505,6 +2534,7 @@ bool EnsureSymbolReady(const int index)
       {
          g_profiles[index].valid = false;
          g_profiles[index].selected = false;
+         g_profiles[index].next_symbol_retry_time = now + 60;
          g_profiles[index].status_message = StringFormat("%s: SymbolSelect failed, error %d", symbol, initial_error);
          return false;
       }
@@ -2514,6 +2544,7 @@ bool EnsureSymbolReady(const int index)
       {
          g_profiles[index].valid = false;
          g_profiles[index].selected = false;
+         g_profiles[index].next_symbol_retry_time = now + 60;
          g_profiles[index].status_message = StringFormat("%s: fallback SymbolSelect(%s) failed, error %d",
                                                          symbol, resolved_symbol, GetLastError());
          return false;
@@ -2531,6 +2562,7 @@ bool EnsureSymbolReady(const int index)
    {
       g_profiles[index].valid = false;
       g_profiles[index].selected = false;
+      g_profiles[index].next_symbol_retry_time = now + 60;
       g_profiles[index].status_message = StringFormat("%s %s: duplicate resolved scan profile.",
                                                       symbol, g_profiles[index].timeframe_label);
       return false;
@@ -2542,15 +2574,16 @@ bool EnsureSymbolReady(const int index)
    {
       g_profiles[index].valid = false;
       g_profiles[index].selected = false;
+      g_profiles[index].next_symbol_retry_time = now + 60;
       g_profiles[index].status_message = symbol + ": invalid symbol point or digits.";
       return false;
    }
 
    g_profiles[index].point = point;
-   g_profiles[index].digits = digits;
    g_profiles[index].pip_size = PipSize(point, digits);
    g_profiles[index].valid = true;
    g_profiles[index].selected = true;
+   g_profiles[index].next_symbol_retry_time = 0;
    return true;
 }
 
@@ -2627,6 +2660,17 @@ bool SymbolTimeframeUsedByAnotherProfile(const int current_index,
    return false;
 }
 
+bool IsFirstProfileForSymbol(const int index)
+{
+   string symbol = UpperAscii(g_profiles[index].symbol);
+   for(int i = 0; i < index; i++)
+   {
+      if(UpperAscii(g_profiles[i].symbol) == symbol)
+         return false;
+   }
+   return true;
+}
+
 void ClearProfileHistory(const int index)
 {
    for(int i = 0; i < SNAPSHOT_CAPACITY; i++)
@@ -2644,7 +2688,6 @@ void ClearProfileHistory(const int index)
    g_profiles[index].spread_write_index = 0;
    g_profiles[index].spread_count = 0;
    g_profiles[index].median_spread_pips = 0.0;
-   g_profiles[index].last_mid = 0.0;
 }
 
 bool UpdateMarketData(const int index, const datetime now)
@@ -2665,7 +2708,8 @@ bool UpdateMarketData(const int index, const datetime now)
       return false;
    }
 
-   if(tick.bid <= 0.0 || tick.ask <= 0.0 || tick.ask < tick.bid || tick.time <= 0)
+   if(!MathIsValidNumber(tick.bid) || !MathIsValidNumber(tick.ask) ||
+      tick.bid <= 0.0 || tick.ask <= 0.0 || tick.ask < tick.bid || tick.time <= 0)
    {
       ClearRuntimeMarketFlags(index);
       g_profiles[index].status_message = g_profiles[index].symbol + ": invalid quote.";
@@ -2684,12 +2728,12 @@ bool UpdateMarketData(const int index, const datetime now)
    g_profiles[index].session_name = SessionNameFromIndex(g_profiles[index].session_index);
    g_profiles[index].bid = tick.bid;
    g_profiles[index].ask = tick.ask;
-   g_profiles[index].last_mid = g_profiles[index].mid;
    g_profiles[index].mid = (tick.bid + tick.ask) * 0.5;
    g_profiles[index].spread_pips = (tick.ask - tick.bid) / g_profiles[index].pip_size;
 
-   AddSnapshot(index, g_profiles[index].quote_time_msc, g_profiles[index].mid);
-   AddSpreadSample(index, g_profiles[index].spread_pips);
+   bool new_quote_sample = AddSnapshot(index, g_profiles[index].quote_time_msc, g_profiles[index].mid);
+   if(new_quote_sample)
+      AddSpreadSample(index, g_profiles[index].spread_pips);
    g_profiles[index].median_spread_pips = CalculateMedianSpread(index);
    g_profiles[index].spread_z = SpreadRobustZ(index);
    g_profiles[index].tick_rate_per_sec = TickRateFromSnapshots(index, 30);
@@ -2698,7 +2742,8 @@ bool UpdateMarketData(const int index, const datetime now)
    UpdateRatesData(index);
    UpdateMovementData(index);
    UpdateOutsideTimers(index, now);
-   UpdateSessionBaseline(index);
+   if(new_quote_sample)
+      UpdateSessionBaseline(index);
 
    return true;
 }
@@ -2724,6 +2769,7 @@ void UpdateRatesData(const int index)
 
    MqlRates trigger_rates[];
    ArraySetAsSeries(trigger_rates, true);
+   ResetLastError();
    int copied_trigger = CopyRates(symbol, g_profiles[index].scan_timeframe, 0, need_trigger, trigger_rates);
    g_profiles[index].has_m1 = (copied_trigger >= min_trigger);
 
@@ -2735,6 +2781,7 @@ void UpdateRatesData(const int index)
       g_profiles[index].current_m1_high = trigger_rates[0].high;
       g_profiles[index].current_m1_low = trigger_rates[0].low;
       g_profiles[index].current_m1_close = trigger_rates[0].close;
+      g_profiles[index].trigger_bar_time = trigger_rates[0].time;
       g_profiles[index].current_m1_tick_volume = (double)trigger_rates[0].tick_volume;
       g_profiles[index].last_completed_m1_tick_volume = (double)trigger_rates[1].tick_volume;
       g_profiles[index].average_m1_tick_volume = AverageTickVolume(trigger_rates, copied_trigger);
@@ -2745,6 +2792,7 @@ void UpdateRatesData(const int index)
       g_profiles[index].range_high = 0.0;
       g_profiles[index].range_low = 0.0;
       g_profiles[index].range_width = 0.0;
+      g_profiles[index].trigger_bar_time = 0;
    }
 
    int context_source = FindFreshContextProfile(index);
@@ -2756,6 +2804,7 @@ void UpdateRatesData(const int index)
 
    MqlRates short_m1[];
    ArraySetAsSeries(short_m1, true);
+   ResetLastError();
    int copied_short_m1 = CopyRates(symbol, PERIOD_M1, 0, 20, short_m1);
    if(copied_short_m1 > 5)
       g_profiles[index].movement_5m_pips = (g_profiles[index].mid - short_m1[5].close) / g_profiles[index].pip_size;
@@ -2770,6 +2819,7 @@ void UpdateRatesData(const int index)
    MqlRates m5[];
    ArraySetAsSeries(m5, true);
    int need_m5 = IntMax(ATRPeriod + 10, 40);
+   ResetLastError();
    int copied_m5 = CopyRates(symbol, PERIOD_M5, 0, need_m5, m5);
    g_profiles[index].has_m5 = (copied_m5 >= ATRPeriod + 3);
 
@@ -2789,11 +2839,19 @@ void UpdateRatesData(const int index)
 
    MqlRates m15[];
    ArraySetAsSeries(m15, true);
-   int copied_m15 = CopyRates(symbol, PERIOD_M15, 0, 8, m15);
-   g_profiles[index].has_m15 = (copied_m15 >= 4);
+   int need_m15 = IntMax(ATRPeriod + 10, 40);
+   ResetLastError();
+   int copied_m15 = CopyRates(symbol, PERIOD_M15, 0, need_m15, m15);
+   g_profiles[index].has_m15 = (copied_m15 >= ATRPeriod + 3);
 
-   if(g_profiles[index].has_m15 && g_profiles[index].atr_m5 > 0.0)
-      g_profiles[index].m15_move_atr = (m15[0].close - m15[1].close) / g_profiles[index].atr_m5;
+   if(g_profiles[index].has_m15)
+   {
+      double atr_m15 = CalculateATRFromRates(m15, copied_m15, ATRPeriod);
+      if(atr_m15 > 0.0)
+         g_profiles[index].m15_move_atr = (m15[0].close - m15[1].close) / atr_m15;
+      else
+         g_profiles[index].m15_move_atr = 0.0;
+   }
    else
       g_profiles[index].m15_move_atr = 0.0;
 }
@@ -2900,13 +2958,6 @@ void ResetSessionBaselines()
       g_session_baselines[i].tick_rate_var = 0.0;
       g_session_baselines[i].tick_volume_mean = 0.0;
       g_session_baselines[i].tick_volume_var = 0.0;
-      g_session_baselines[i].atr_mean = 0.0;
-      g_session_baselines[i].atr_var = 0.0;
-      g_session_baselines[i].speed_mean = 0.0;
-      g_session_baselines[i].speed_var = 0.0;
-      g_session_baselines[i].range_width_mean = 0.0;
-      g_session_baselines[i].range_width_var = 0.0;
-      g_session_baselines[i].breakout_count = 0;
    }
 }
 
@@ -2926,49 +2977,28 @@ void UpdateSessionBaseline(const int index)
    SessionBaseline baseline = g_session_baselines[baseline_index];
    double tick_volume = MathMax(g_profiles[index].current_m1_tick_volume,
                                 g_profiles[index].last_completed_m1_tick_volume);
-   double atr_pips = (g_profiles[index].pip_size > 0.0 ?
-                      g_profiles[index].atr_m1 / g_profiles[index].pip_size :
-                      0.0);
-   double speed_abs = MathMax(MathAbs(g_profiles[index].speed_10s_pips),
-                              MathAbs(g_profiles[index].speed_30s_pips));
-   double range_pips = (g_profiles[index].pip_size > 0.0 ?
-                        g_profiles[index].range_width / g_profiles[index].pip_size :
-                        0.0);
+   g_profiles[index].session_baseline_ready = (baseline.sample_count >= MinBaselineSamples);
+   if(g_profiles[index].session_baseline_ready)
+   {
+      g_profiles[index].session_spread_z = BaselineZ(g_profiles[index].spread_pips,
+                                                      baseline.spread_mean,
+                                                      baseline.spread_var);
+      g_profiles[index].session_tick_rate_z = BaselineZ(g_profiles[index].tick_rate_per_sec,
+                                                         baseline.tick_rate_mean,
+                                                         baseline.tick_rate_var);
+      g_profiles[index].session_tick_volume_z = BaselineZ(tick_volume,
+                                                           baseline.tick_volume_mean,
+                                                           baseline.tick_volume_var);
+   }
 
    UpdateRollingMeanVar(baseline.spread_mean, baseline.spread_var, baseline.sample_count, g_profiles[index].spread_pips);
    UpdateRollingMeanVar(baseline.tick_rate_mean, baseline.tick_rate_var, baseline.sample_count, g_profiles[index].tick_rate_per_sec);
    UpdateRollingMeanVar(baseline.tick_volume_mean, baseline.tick_volume_var, baseline.sample_count, tick_volume);
-   UpdateRollingMeanVar(baseline.atr_mean, baseline.atr_var, baseline.sample_count, atr_pips);
-   UpdateRollingMeanVar(baseline.speed_mean, baseline.speed_var, baseline.sample_count, speed_abs);
-   UpdateRollingMeanVar(baseline.range_width_mean, baseline.range_width_var, baseline.sample_count, range_pips);
-   if(BreakoutDistance(index, DIR_UP) > 0.0 || BreakoutDistance(index, DIR_DOWN) > 0.0)
-      baseline.breakout_count++;
    if(baseline.sample_count < BaselineLookbackSamples)
       baseline.sample_count++;
 
    g_session_baselines[baseline_index] = baseline;
    g_profiles[index].session_baseline_ready = (baseline.sample_count >= MinBaselineSamples);
-   if(!g_profiles[index].session_baseline_ready)
-      return;
-
-   g_profiles[index].session_spread_z = BaselineZ(g_profiles[index].spread_pips,
-                                                  baseline.spread_mean,
-                                                  baseline.spread_var);
-   g_profiles[index].session_tick_rate_z = BaselineZ(g_profiles[index].tick_rate_per_sec,
-                                                     baseline.tick_rate_mean,
-                                                     baseline.tick_rate_var);
-   g_profiles[index].session_tick_volume_z = BaselineZ(tick_volume,
-                                                       baseline.tick_volume_mean,
-                                                       baseline.tick_volume_var);
-   g_profiles[index].session_atr_z = BaselineZ(atr_pips,
-                                               baseline.atr_mean,
-                                               baseline.atr_var);
-   g_profiles[index].session_speed_z = BaselineZ(speed_abs,
-                                                 baseline.speed_mean,
-                                                 baseline.speed_var);
-   g_profiles[index].session_range_z = BaselineZ(range_pips,
-                                                 baseline.range_width_mean,
-                                                 baseline.range_width_var);
 }
 
 void UpdateRollingMeanVar(double &mean,
@@ -3048,10 +3078,10 @@ void UpdateOutsideTimers(const int index, const datetime now)
    }
 }
 
-void AddSnapshot(const int index, const long time_msc, const double mid)
+bool AddSnapshot(const int index, const long time_msc, const double mid)
 {
    if(time_msc <= 0 || mid <= 0.0)
-      return;
+      return false;
 
    if(g_profiles[index].snapshot_count > 0)
    {
@@ -3062,7 +3092,7 @@ void AddSnapshot(const int index, const long time_msc, const double mid)
       if(g_snapshots[last_index].time_msc == time_msc &&
          MathAbs(g_snapshots[last_index].mid - mid) < g_profiles[index].point * 0.1)
       {
-         return;
+         return false;
       }
    }
 
@@ -3074,6 +3104,7 @@ void AddSnapshot(const int index, const long time_msc, const double mid)
    g_profiles[index].snapshot_write_index = (position + 1) % SNAPSHOT_CAPACITY;
    if(g_profiles[index].snapshot_count < SNAPSHOT_CAPACITY)
       g_profiles[index].snapshot_count++;
+   return true;
 }
 
 void AddSpreadSample(const int index, const double spread_pips)
@@ -3095,7 +3126,8 @@ double CalculateMedianSpread(const int index)
       return g_profiles[index].spread_pips;
 
    double values[];
-   ArrayResize(values, count);
+   if(ArrayResize(values, count) != count)
+      return g_profiles[index].spread_pips;
    for(int i = 0; i < count; i++)
    {
       int position = LogicalSpreadPosition(index, i);
@@ -3123,6 +3155,8 @@ void CalculateCurrencyStrength()
 
    for(int i = 0; i < ArraySize(g_profiles); i++)
    {
+      if(!IsFirstProfileForSymbol(i))
+         continue;
       if(!g_profiles[i].valid || !g_profiles[i].quote_fresh ||
          g_profiles[i].base_index < 0 || g_profiles[i].quote_index < 0 ||
          g_profiles[i].atr_m1 <= 0.0 || g_profiles[i].pip_size <= 0.0)
@@ -3171,10 +3205,6 @@ void CalculateCurrencyStrength()
 
 void CalculateScoresAndUpdateState(const int index, const datetime now)
 {
-   g_profiles[index].technical_score_up = 0.0;
-   g_profiles[index].technical_score_down = 0.0;
-   g_profiles[index].impulse_score_up = 0.0;
-   g_profiles[index].impulse_score_down = 0.0;
    g_profiles[index].final_score_up = 0.0;
    g_profiles[index].final_score_down = 0.0;
    ResetCompositeSignalScore(g_profiles[index].composite_up, DIR_UP);
@@ -3182,11 +3212,6 @@ void CalculateScoresAndUpdateState(const int index, const datetime now)
 
    BuildCompositeSignalScore(index, DIR_UP, now, g_profiles[index].composite_up);
    BuildCompositeSignalScore(index, DIR_DOWN, now, g_profiles[index].composite_down);
-
-   g_profiles[index].technical_score_up = g_profiles[index].composite_up.breakout.score * 100.0;
-   g_profiles[index].technical_score_down = g_profiles[index].composite_down.breakout.score * 100.0;
-   g_profiles[index].impulse_score_up = g_profiles[index].composite_up.impulse.score * 100.0;
-   g_profiles[index].impulse_score_down = g_profiles[index].composite_down.impulse.score * 100.0;
 
    if(g_profiles[index].composite_up.valid)
       g_profiles[index].final_score_up = g_profiles[index].composite_up.displayed_score;
@@ -3251,7 +3276,6 @@ void ResetCompositeSignalScore(CompositeSignalScore &score, const int direction)
    score.flow.basket_agreement = 0.0;
    score.flow.conflict_penalty = 0.0;
 
-   score.regime.pass = false;
    score.regime.score = 0.0;
    score.regime.session_score = 0.0;
    score.regime.mtf_alignment_score = 0.0;
@@ -3264,10 +3288,11 @@ void ResetCompositeSignalScore(CompositeSignalScore &score, const int direction)
    score.calendar.relevant_event_nearby = false;
    score.calendar.high_impact_nearby = false;
    score.calendar.just_released = false;
+   score.calendar.future_high_impact_nearby = false;
    score.calendar.score = 0.0;
    score.calendar.proximity_minutes = 0.0;
+   score.calendar.future_high_impact_minutes = 0.0;
    score.calendar.importance_score = 0.0;
-   score.calendar.surprise_score = 0.0;
    score.calendar.uncertainty_penalty = 0.0;
    score.calendar.state_tag = "NEWS_UNAVAILABLE";
 }
@@ -3291,7 +3316,7 @@ void BuildCompositeSignalScore(const int index,
    EvaluateImpulseQuality(index, direction, score.impulse);
    EvaluateCurrencyFlowQuality(index, direction, score.flow);
    EvaluateRegimeContext(index, direction, now, score.regime);
-   EvaluateCalendarContext(index, direction, now, score.calendar);
+   EvaluateCalendarContext(index, now, score.calendar);
 
    if(CalendarPreNewsBlock(score.calendar))
    {
@@ -3426,7 +3451,8 @@ void BuildCompositeSignalScore(const int index,
    score.compact_tags = BuildCompactTags(score);
    score.human_reason = BuildHumanReadableReason(score, g_profiles[index]);
 
-   if(DebugScoreBreakdown && DebugPrintToJournal && score.displayed_score >= g_min_display_confidence)
+   if(DebugScoreBreakdown && DebugPrintToJournal && score.displayed_score >= g_min_display_confidence &&
+      DebugLogAllowed(now))
    {
       PrintFormat("FXNews score %s %s %s %d%% raw=%.1f %s",
                   g_profiles[index].symbol,
@@ -3436,6 +3462,19 @@ void BuildCompositeSignalScore(const int index,
                   score.raw_score,
                   score.reason_summary);
    }
+}
+
+bool DebugLogAllowed(const datetime now)
+{
+   if(g_debug_window_started == 0 || now - g_debug_window_started >= 60)
+   {
+      g_debug_window_started = now;
+      g_debug_lines_in_window = 0;
+   }
+   if(g_debug_lines_in_window >= MAX_DEBUG_LINES_PER_MINUTE)
+      return false;
+   g_debug_lines_in_window++;
+   return true;
 }
 
 void EvaluateExecutionQuality(const int index, const datetime now, ExecutionQuality &execution)
@@ -3738,7 +3777,6 @@ void EvaluateRegimeContext(const int index,
                            const datetime now,
                            RegimeContext &regime)
 {
-   regime.pass = true;
    regime.session_score = SessionQualityScore(now);
    regime.m5_context_score = SmoothStep(M5RejectAtr, 0.35, g_profiles[index].m5_move_atr * (double)direction);
    regime.m15_context_score = SmoothStep(M15RejectAtr, 0.30, g_profiles[index].m15_move_atr * (double)direction);
@@ -3753,15 +3791,9 @@ void EvaluateRegimeContext(const int index,
                           regime.mtf_alignment_score * 0.42 +
                           regime.volatility_regime_score * 0.33 -
                           regime.rollover_penalty);
-   if(UseMultiTimeframeContextCaps &&
-      (regime.m5_context_score <= 0.10 || regime.m15_context_score <= 0.10))
-   {
-      regime.pass = false;
-   }
 }
 
 void EvaluateCalendarContext(const int index,
-                             const int direction,
                              const datetime now,
                              CalendarContext &calendar)
 {
@@ -3769,10 +3801,11 @@ void EvaluateCalendarContext(const int index,
    calendar.relevant_event_nearby = false;
    calendar.high_impact_nearby = false;
    calendar.just_released = false;
+   calendar.future_high_impact_nearby = false;
    calendar.score = 0.65;
    calendar.proximity_minutes = 0.0;
+   calendar.future_high_impact_minutes = 0.0;
    calendar.importance_score = 0.0;
-   calendar.surprise_score = 0.0;
    calendar.uncertainty_penalty = 0.0;
    calendar.state_tag = "NEWS_UNAVAILABLE";
 
@@ -3802,6 +3835,7 @@ void EvaluateCalendarContext(const int index,
    calendar.relevant_event_nearby = (base_cache.relevant_event_nearby || quote_cache.relevant_event_nearby);
    calendar.high_impact_nearby = (base_cache.high_impact_nearby || quote_cache.high_impact_nearby);
    calendar.just_released = (base_cache.just_released || quote_cache.just_released);
+   calendar.future_high_impact_nearby = (base_cache.future_high_impact_nearby || quote_cache.future_high_impact_nearby);
    calendar.importance_score = MathMax(base_cache.importance_score, quote_cache.importance_score);
    calendar.uncertainty_penalty = MathMax(base_cache.uncertainty_penalty, quote_cache.uncertainty_penalty);
 
@@ -3812,9 +3846,16 @@ void EvaluateCalendarContext(const int index,
    else
       calendar.proximity_minutes = MathMin(base_cache.proximity_minutes, quote_cache.proximity_minutes);
 
-   double release_bonus = (calendar.just_released ? 0.20 : 0.0);
-   double high_bonus = (calendar.high_impact_nearby ? 0.10 : 0.0);
-   calendar.score = Clamp01(0.60 + release_bonus + high_bonus -
+   if(base_cache.future_high_impact_minutes <= 0.0)
+      calendar.future_high_impact_minutes = quote_cache.future_high_impact_minutes;
+   else if(quote_cache.future_high_impact_minutes <= 0.0)
+      calendar.future_high_impact_minutes = base_cache.future_high_impact_minutes;
+   else
+      calendar.future_high_impact_minutes = MathMin(base_cache.future_high_impact_minutes,
+                                                     quote_cache.future_high_impact_minutes);
+
+   double high_bonus = (calendar.high_impact_nearby ? 0.05 : 0.0);
+   calendar.score = Clamp01(0.60 + high_bonus -
                             calendar.uncertainty_penalty * 0.30);
    if(CalendarPreNewsBlock(calendar))
       calendar.state_tag = "NEWS_PRE_BLOCK";
@@ -3829,13 +3870,13 @@ void EvaluateCalendarContext(const int index,
 bool CalendarPreNewsBlock(const CalendarContext &calendar)
 {
    if(!UseEconomicCalendarContext || !BlockImmediatelyBeforeHighImpactNews ||
-      !calendar.available || !calendar.high_impact_nearby || calendar.just_released)
+      !calendar.available || !calendar.future_high_impact_nearby)
    {
       return false;
    }
 
-   return (calendar.proximity_minutes >= 0.0 &&
-           calendar.proximity_minutes <= (double)CalendarPreNewsBlockMinutes);
+   return (calendar.future_high_impact_minutes >= 0.0 &&
+           calendar.future_high_impact_minutes <= (double)CalendarPreNewsBlockMinutes);
 }
 
 double ApplyScoreCap(const double score,
@@ -3889,7 +3930,8 @@ string TopReasonSummary(string &names[], double &values[], const int count, cons
 {
    string summary = "";
    bool used[];
-   ArrayResize(used, count);
+   if(count <= 0 || ArrayResize(used, count) != count)
+      return summary;
    for(int i = 0; i < count; i++)
       used[i] = false;
 
@@ -4016,7 +4058,7 @@ double CalculateBasketAgreement(const int index, const int direction)
 
    for(int i = 0; i < ArraySize(g_profiles); i++)
    {
-      if(i == index || !g_profiles[i].valid || !g_profiles[i].quote_fresh ||
+      if(i == index || !IsFirstProfileForSymbol(i) || !g_profiles[i].valid || !g_profiles[i].quote_fresh ||
          g_profiles[i].atr_m1 <= 0.0 || g_profiles[i].pip_size <= 0.0 ||
          g_profiles[i].base_index < 0 || g_profiles[i].quote_index < 0 ||
          g_profiles[i].spread_pips <= 0.0 || g_profiles[i].spread_pips > MaxSpreadPips)
@@ -4104,8 +4146,10 @@ void InitializeCalendarCache()
       g_calendar_cache[i].relevant_event_nearby = false;
       g_calendar_cache[i].high_impact_nearby = false;
       g_calendar_cache[i].just_released = false;
+      g_calendar_cache[i].future_high_impact_nearby = false;
       g_calendar_cache[i].score = 0.65;
       g_calendar_cache[i].proximity_minutes = 0.0;
+      g_calendar_cache[i].future_high_impact_minutes = 0.0;
       g_calendar_cache[i].importance_score = 0.0;
       g_calendar_cache[i].uncertainty_penalty = 0.0;
    }
@@ -4120,6 +4164,8 @@ void RefreshCalendarCache(const int currency_index, const datetime now)
    if(g_calendar_cache[currency_index].refreshed_at > 0 &&
       now - g_calendar_cache[currency_index].refreshed_at < CALENDAR_REFRESH_SECONDS)
    {
+      if(g_calendar_cache[currency_index].available)
+         g_calendar_available = true;
       return;
    }
 
@@ -4130,8 +4176,10 @@ void RefreshCalendarCache(const int currency_index, const datetime now)
    cache.relevant_event_nearby = false;
    cache.high_impact_nearby = false;
    cache.just_released = false;
+   cache.future_high_impact_nearby = false;
    cache.score = 0.65;
    cache.proximity_minutes = 0.0;
+   cache.future_high_impact_minutes = 0.0;
    cache.importance_score = 0.0;
    cache.uncertainty_penalty = 0.0;
 
@@ -4175,17 +4223,23 @@ void RefreshCalendarCache(const int currency_index, const datetime now)
 
       cache.relevant_event_nearby = true;
       cache.high_impact_nearby = (cache.high_impact_nearby || high_impact);
-      cache.just_released = (cache.just_released ||
-                             (minutes_signed <= 0.0 &&
-                              MathAbs(minutes_signed) <= (double)CalendarLookbackMinutes));
+      bool just_released = (minutes_signed <= 0.0 &&
+                            MathAbs(minutes_signed) <= (double)CalendarLookbackMinutes);
+      cache.just_released = (cache.just_released || just_released);
+      if(high_impact && minutes_signed >= 0.0 &&
+         minutes_signed <= (double)CalendarLookaheadMinutes)
+      {
+         if(!cache.future_high_impact_nearby || minutes_signed < cache.future_high_impact_minutes)
+            cache.future_high_impact_minutes = minutes_signed;
+         cache.future_high_impact_nearby = true;
+      }
       cache.importance_score = MathMax(cache.importance_score, Clamp01((double)importance / 3.0));
-      if(!cache.just_released && abs_minutes <= (double)CalendarLookaheadMinutes)
+      if(minutes_signed >= 0.0 && abs_minutes <= (double)CalendarLookaheadMinutes)
          cache.uncertainty_penalty = MathMax(cache.uncertainty_penalty, high_impact ? 0.55 : 0.25);
    }
 
    if(cache.relevant_event_nearby)
-      cache.score = Clamp01(0.58 + (cache.high_impact_nearby ? 0.16 : 0.06) +
-                            (cache.just_released ? 0.18 : 0.0) -
+      cache.score = Clamp01(0.58 + (cache.high_impact_nearby ? 0.16 : 0.06) -
                             cache.uncertainty_penalty * 0.25);
 
    g_calendar_cache[currency_index] = cache;
@@ -4275,9 +4329,7 @@ string BlockReasonText(const SignalBlockReason reason)
 
 bool IsActiveState(const BreakoutEventState state)
 {
-   return (state == STATE_ACTIVE_SIGNAL ||
-           state == STATE_ACTIVE_UNCONFIRMED ||
-           state == STATE_ACTIVE_CONFIRMED);
+   return (state == STATE_ACTIVE_CONFIRMED);
 }
 
 bool IsConfirmedSignal(const int index,
@@ -4292,7 +4344,11 @@ bool IsConfirmedSignal(const int index,
    if(SignalConfirmationMode == CONFIRM_LIVE_TICK)
       return true;
    if(SignalConfirmationMode == CONFIRM_BAR_CLOSE)
-      return (hold >= 0.70 && score >= g_min_display_confidence);
+   {
+      return (g_profiles[index].candidate_bar_time > 0 &&
+              g_profiles[index].trigger_bar_time > g_profiles[index].candidate_bar_time &&
+              score >= g_min_display_confidence);
+   }
 
    return (hold >= 0.35 ||
            score >= g_strong_alert_confidence ||
@@ -4316,9 +4372,13 @@ bool SignalExpiredByContext(const int index, const int direction, const datetime
    return false;
 }
 
-bool CanPromoteStrongAlert(const int index, const int direction)
+bool CanDispatchAlert(const int index, const int direction)
 {
-   return true;
+   if(g_profiles[index].active_direction != direction)
+      return false;
+   if(g_profiles[index].correlated_alert_group_id == "")
+      return true;
+   return g_profiles[index].group_leader_signal;
 }
 
 void UpdateAlertGroups(const datetime now)
@@ -4335,7 +4395,10 @@ void UpdateAlertGroups(const datetime now)
    {
       if(!IsActiveState(g_profiles[i].event_state) || g_profiles[i].active_direction == DIR_NONE)
          continue;
-      g_profiles[i].dominant_currency_flow = DominantCurrencyFlow(i, g_profiles[i].active_direction);
+      if(UseCurrencyStrength)
+         g_profiles[i].dominant_currency_flow = DominantCurrencyFlow(i, g_profiles[i].active_direction);
+      else
+         g_profiles[i].dominant_currency_flow = g_profiles[i].symbol + "_" + DirectionText(g_profiles[i].active_direction);
       g_profiles[i].correlated_alert_group_id = g_profiles[i].dominant_currency_flow;
    }
 
@@ -4345,6 +4408,18 @@ void UpdateAlertGroups(const datetime now)
          continue;
 
       string group_id = g_profiles[i].correlated_alert_group_id;
+      bool already_processed = false;
+      for(int prior = 0; prior < i; prior++)
+      {
+         if(g_profiles[prior].correlated_alert_group_id == group_id)
+         {
+            already_processed = true;
+            break;
+         }
+      }
+      if(already_processed)
+         continue;
+
       int leader = -1;
       double leader_score = -999999.0;
       int members = 0;
@@ -4411,7 +4486,11 @@ void UpdateSignalState(const int index, const datetime now)
       double opposite_score = DirectionScore(index, opposite_direction);
       int current_age = EventAgeSeconds(index, current_direction, now);
 
-      if(opposite_score >= g_strong_alert_confidence && opposite_score > current_score + 8.0)
+      bool opposite_allowed = (opposite_direction == DIR_UP ?
+                               now >= g_profiles[index].cooldown_end_up :
+                               now >= g_profiles[index].cooldown_end_down);
+      if(opposite_allowed && opposite_score >= g_strong_alert_confidence && opposite_score > current_score + 8.0 &&
+         IsConfirmedSignal(index, opposite_direction, opposite_score, now))
       {
          StartCooldown(index, current_direction, now, ValidSignalCooldownSeconds);
          ActivateSignal(index, opposite_direction, opposite_score, now);
@@ -4450,9 +4529,7 @@ void UpdateSignalState(const int index, const datetime now)
       if(g_profiles[index].event_state == STATE_CANDIDATE &&
          g_profiles[index].candidate_direction == best_direction)
       {
-         if(SignalConfirmationMode == CONFIRM_LIVE_TICK ||
-            IsConfirmedSignal(index, best_direction, best_score, now) ||
-            best_score >= g_strong_alert_confidence)
+         if(IsConfirmedSignal(index, best_direction, best_score, now))
          {
             ActivateSignal(index, best_direction, best_score, now);
          }
@@ -4462,8 +4539,9 @@ void UpdateSignalState(const int index, const datetime now)
       g_profiles[index].event_state = STATE_CANDIDATE;
       g_profiles[index].candidate_direction = best_direction;
       g_profiles[index].candidate_start_time = now;
+      g_profiles[index].candidate_bar_time = g_profiles[index].trigger_bar_time;
 
-      if(SignalConfirmationMode == CONFIRM_LIVE_TICK && best_score >= g_strong_alert_confidence)
+      if(SignalConfirmationMode == CONFIRM_LIVE_TICK)
          ActivateSignal(index, best_direction, best_score, now);
 
       return;
@@ -4475,6 +4553,7 @@ void UpdateSignalState(const int index, const datetime now)
       StartCooldown(index, g_profiles[index].candidate_direction, now, FailedSignalCooldownSeconds);
       g_profiles[index].candidate_direction = DIR_NONE;
       g_profiles[index].candidate_start_time = 0;
+      g_profiles[index].candidate_bar_time = 0;
       g_profiles[index].event_state = STATE_COOLDOWN;
       return;
    }
@@ -4493,10 +4572,8 @@ void PickBestDirection(const int index,
    best_direction = DIR_NONE;
    best_score = 0.0;
 
-   bool up_allowed = (now >= g_profiles[index].cooldown_end_up ||
-                      g_profiles[index].final_score_up >= g_strong_alert_confidence);
-   bool down_allowed = (now >= g_profiles[index].cooldown_end_down ||
-                        g_profiles[index].final_score_down >= g_strong_alert_confidence);
+   bool up_allowed = (now >= g_profiles[index].cooldown_end_up);
+   bool down_allowed = (now >= g_profiles[index].cooldown_end_down);
 
    if(up_allowed && g_profiles[index].final_score_up >= g_min_display_confidence)
    {
@@ -4517,25 +4594,29 @@ void ActivateSignal(const int index,
                     const double score,
                     const datetime now)
 {
+   if(!IsConfirmedSignal(index, direction, score, now))
+      return;
+
    bool new_signal = (!IsActiveState(g_profiles[index].event_state) ||
                       g_profiles[index].active_direction != direction);
-   BreakoutEventState active_state = (IsConfirmedSignal(index, direction, score, now) ?
-                                      STATE_ACTIVE_CONFIRMED :
-                                      STATE_ACTIVE_UNCONFIRMED);
+   BreakoutEventState active_state = STATE_ACTIVE_CONFIRMED;
 
    if(new_signal)
    {
       g_profiles[index].event_start_time = now;
       g_profiles[index].event_local_time = TimeLocal();
-      g_profiles[index].strong_alert_sent = false;
+      g_profiles[index].strong_alert_handled = false;
       PushSignalHistory(index, direction, score, g_profiles[index].event_local_time);
-      SendOptionalAlert(index, direction, score, now, false);
+      g_profiles[index].pending_alert = true;
+      g_profiles[index].pending_strong_upgrade = (score >= g_strong_alert_confidence);
+      g_profiles[index].pending_alert_score = score;
    }
-   else if(score >= g_strong_alert_confidence && !g_profiles[index].strong_alert_sent)
+   else if(score >= g_strong_alert_confidence && !g_profiles[index].strong_alert_handled)
    {
       UpdateSignalHistory(index, direction, score);
-      if(CanPromoteStrongAlert(index, direction))
-         SendOptionalAlert(index, direction, score, now, true);
+      g_profiles[index].pending_alert = true;
+      g_profiles[index].pending_strong_upgrade = true;
+      g_profiles[index].pending_alert_score = score;
    }
    else
    {
@@ -4544,14 +4625,11 @@ void ActivateSignal(const int index,
 
    g_profiles[index].active_direction = direction;
    g_profiles[index].event_state = active_state;
-   if(active_state == STATE_ACTIVE_CONFIRMED)
-      g_profiles[index].last_confirmed_time = now;
    g_profiles[index].candidate_direction = DIR_NONE;
    g_profiles[index].candidate_start_time = 0;
+   g_profiles[index].candidate_bar_time = 0;
    g_profiles[index].confidence_below_since = 0;
 
-   if(score >= g_strong_alert_confidence && CanPromoteStrongAlert(index, direction))
-      g_profiles[index].strong_alert_sent = true;
 }
 
 void EndActiveSignal(const int index, const int direction, const datetime now)
@@ -4562,7 +4640,7 @@ void EndActiveSignal(const int index, const int direction, const datetime now)
    g_profiles[index].event_start_time = 0;
    g_profiles[index].event_local_time = 0;
    g_profiles[index].confidence_below_since = 0;
-   g_profiles[index].strong_alert_sent = false;
+   g_profiles[index].strong_alert_handled = false;
 }
 
 void StartCooldown(const int index,
@@ -4592,6 +4670,45 @@ void SendOptionalAlert(const int index,
       SendNotification(prefix + text);
 
    g_profiles[index].last_alert_sent_time = now;
+}
+
+bool AlertRateLimitAllows(const int index, const datetime now)
+{
+   if(g_profiles[index].last_alert_sent_time > 0 &&
+      now - g_profiles[index].last_alert_sent_time < MIN_ALERT_INTERVAL_SECONDS)
+   {
+      return false;
+   }
+
+   if(g_alert_window_started == 0 || now - g_alert_window_started >= 60)
+   {
+      g_alert_window_started = now;
+      g_alerts_in_window = 0;
+   }
+   return (g_alerts_in_window < MAX_ALERTS_PER_MINUTE);
+}
+
+void DispatchPendingAlerts(const datetime now)
+{
+   for(int i = 0; i < ArraySize(g_profiles); i++)
+   {
+      if(!g_profiles[i].pending_alert)
+         continue;
+
+      int direction = g_profiles[i].active_direction;
+      bool deliver = (direction != DIR_NONE && CanDispatchAlert(i, direction) && AlertRateLimitAllows(i, now));
+      if(deliver)
+      {
+         SendOptionalAlert(i, direction, g_profiles[i].pending_alert_score, now,
+                           g_profiles[i].pending_strong_upgrade);
+         g_alerts_in_window++;
+      }
+      if(g_profiles[i].pending_strong_upgrade)
+         g_profiles[i].strong_alert_handled = true;
+      g_profiles[i].pending_alert = false;
+      g_profiles[i].pending_strong_upgrade = false;
+      g_profiles[i].pending_alert_score = 0.0;
+   }
 }
 
 void UpdateScanDiagnostics(const uint scan_start)
@@ -4729,7 +4846,8 @@ string ActivityStatusText()
 
 void CollectDashboardSignals(DashboardSignal &signals[])
 {
-   ArrayResize(signals, 0);
+   if(ArrayResize(signals, 0) != 0)
+      return;
    datetime now = TimeCurrent();
    for(int i = 0; i < ArraySize(g_profiles); i++)
    {
@@ -4761,7 +4879,8 @@ void CollectDashboardSignals(DashboardSignal &signals[])
       signal.tooltip = score.human_reason + "\n" + DashboardTooltip(score);
 
       int next = ArraySize(signals);
-      ArrayResize(signals, next + 1);
+      if(ArrayResize(signals, next + 1) != next + 1)
+         return;
       signals[next] = signal;
    }
 }
@@ -4784,7 +4903,8 @@ void AddBlockedDebugSignal(const int index, DashboardSignal &signals[], const da
    signal.tooltip = score.reason_summary;
 
    int next = ArraySize(signals);
-   ArrayResize(signals, next + 1);
+   if(ArrayResize(signals, next + 1) != next + 1)
+      return;
    signals[next] = signal;
 }
 
@@ -5485,7 +5605,8 @@ double SpreadRobustZ(const int index)
       return 0.0;
 
    double values[];
-   ArrayResize(values, count);
+   if(ArrayResize(values, count) != count)
+      return 0.0;
    for(int i = 0; i < count; i++)
    {
       int position = LogicalSpreadPosition(index, i);
@@ -5522,7 +5643,8 @@ void SnapshotPipRateStats(const int index, double &median_rate, double &mad_rate
       return;
 
    double rates[];
-   ArrayResize(rates, 0);
+   if(ArrayResize(rates, 0) != 0)
+      return;
    int added = 0;
    for(int logical = 1; logical < count; logical++)
    {
@@ -5536,7 +5658,8 @@ void SnapshotPipRateStats(const int index, double &median_rate, double &mad_rate
 
       double pips = MathAbs(g_snapshots[curr_index].mid - g_snapshots[prev_index].mid) /
                     g_profiles[index].pip_size;
-      ArrayResize(rates, added + 1);
+      if(ArrayResize(rates, added + 1) != added + 1)
+         return;
       rates[added] = pips / MathMax(0.001, (double)dt / 1000.0);
       added++;
    }
@@ -5724,6 +5847,22 @@ string UpperAscii(string value)
    return value;
 }
 
+string ObjectNamespaceToken(const string requested)
+{
+   string token = requested;
+   if(token == "")
+      token = IntegerToString((int)GetTickCount());
+   for(int i = 0; i < StringLen(token); i++)
+   {
+      ushort ch = StringGetCharacter(token, i);
+      bool allowed = ((ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) ||
+                      (ch >= 48 && ch <= 57) || ch == 95);
+      if(!allowed)
+         StringSetCharacter(token, i, '_');
+   }
+   return token;
+}
+
 bool IsRolloverTime(const datetime now)
 {
    int start_hour = NormalizeHour(RolloverStartHourServer);
@@ -5811,7 +5950,8 @@ double MedianAbsDeviation(double &values[], const int count, const double median
       return 0.0;
 
    double deviations[];
-   ArrayResize(deviations, count);
+   if(ArrayResize(deviations, count) != count)
+      return 0.0;
    for(int i = 0; i < count; i++)
       deviations[i] = MathAbs(values[i] - median);
 

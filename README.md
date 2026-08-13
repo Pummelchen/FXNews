@@ -8,10 +8,10 @@ FXNews is a chart-only MetaTrader 5 custom indicator for discretionary FX market
 - Ranked active-signal rows with symbol, timeframe, direction, score, execution cost, session, calendar context, correlation grouping, and reason tags.
 - A recent-signal fallback when no active candidate qualifies for display.
 - Composite scoring based on breakout structure, impulse quality, execution conditions, currency flow, market regime, and optional MT5 economic-calendar context.
-- Historical Validation reports and fixed-candidate Autotune using locally available MT5 M1 history.
+- Historical Validation reports and advisory fixed-candidate Autotune recommendations using locally available MT5 M1 history.
 - Optional sound and terminal push notifications, both disabled by default.
 
-FXNews does not place, modify, or manage trades. It uses no `WebRequest`, DLL, external data feed, CSV logging, or file persistence. The displayed percentage is an event-quality ranking, not a win probability or trade instruction.
+FXNews does not place, modify, or manage trades. It uses no `WebRequest`, DLL, external data feed, CSV logging, or file persistence. The displayed percentage is an event-quality ranking, not a win probability or trade instruction. Autotune never changes the active runtime settings: review its Journal recommendation and validate it on a separate holdout period before entering settings manually.
 
 ## Requirements
 

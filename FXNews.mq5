@@ -1,6 +1,6 @@
-// FXNews version 1.7
+// FXNews version 1.8
 #property strict
-#property version   "1.700"
+#property version   "1.800"
 #property indicator_chart_window
 #property indicator_plots 0
 #property description "Chart-only multi-symbol breakout radar indicator. No trade execution. No disk I/O."
@@ -16,7 +16,8 @@ enum FXNewsOperatingMode
 {
    FXNEWS_MODE_LIVE = 0,
    FXNEWS_MODE_VALIDATION = 1,
-   FXNEWS_MODE_AUTOTUNE = 2
+   FXNEWS_MODE_AUTOTUNE = 2,
+   FXNEWS_MODE_SELFTEST = 3
 };
 
 input FXNewsOperatingMode OperatingMode = FXNEWS_MODE_LIVE;
@@ -63,7 +64,12 @@ input int MinHoldSecondsForHighScore = 3;
 input int FullHoldScoreSeconds = 12;
 input double MaxOverextensionAtr = 1.8;
 
-input double MinImpulseZForSignal = 1.25;
+// 1.4 recentred the speed baseline on a signed distribution, which changed the
+// scale this threshold is measured on. 1.25 on the old unsigned scale
+// corresponds to about 1.40 on the current one, so the default was rescaled to
+// preserve the previous selectivity. That is a scale correction, not a tuning
+// claim: derive your own value from a VALIDATION run on your broker's history.
+input double MinImpulseZForSignal = 1.40;
 input double MaxExhaustionAtr = 2.2;
 input bool UseTickRateScoring = true;
 
@@ -89,7 +95,13 @@ input double OutcomeTargetAtr = 0.50;
 input double OutcomeStopAtr = 0.35;
 
 input bool UseSessionAwareBaselines = true;
-input int BaselineLookbackSamples = 500; // EWMA horizon, not a hard rolling window: old samples decay, never drop out.
+// EWMA horizon in SAMPLES, not a hard rolling window: old samples decay, they
+// never drop out. One sample accrues per scan at most, so the horizon in time is
+// BaselineLookbackSamples * ScanIntervalSeconds. The old 500 default was only
+// ~17 minutes at a 2s scan, which is not a session baseline in any meaningful
+// sense; 1800 is about an hour. The effective horizon is reported on the
+// diagnostics line so the relationship is never hidden again.
+input int BaselineLookbackSamples = 1800;
 input int MinBaselineSamples = 50;
 input bool ShowSessionOnDashboard = true;
 input int AsiaStartHourServer = 0;
@@ -598,6 +610,9 @@ double g_rate_scratch[];    // reused by the per-scan statistics helpers
 double g_spread_scratch[];
 double g_mad_scratch[];
 bool g_symbol_identity_dirty = true;
+bool g_selftest_done = false;
+int g_selftest_passed = 0;
+int g_selftest_failed = 0;
 bool g_historical_run_started = false;
 bool g_historical_run_finished = false;
 string g_historical_report_lines[];
@@ -645,7 +660,7 @@ int OnInit()
    for(int i = 0; i < ArraySize(g_profiles); i++)
       EnsureSymbolReady(i);
 
-   if(IsHistoricalMode())
+   if(!IsScanningMode())
       SetHistoricalReportHeader("FXNews - " + OperatingModeText() + " | waiting");
 
    ResetLastError();
@@ -655,7 +670,7 @@ int OnInit()
       return INIT_FAILED;
    }
 
-   if(!IsHistoricalMode())
+   if(IsScanningMode())
       ScanAll(true);
    return INIT_SUCCEEDED;
 }
@@ -668,6 +683,12 @@ void OnDeinit(const int reason)
 
 void OnTimer()
 {
+   if(IsSelfTestMode())
+   {
+      RunSelfTest();
+      return;
+   }
+
    if(IsHistoricalMode())
    {
       RunHistoricalOperatingMode();
@@ -857,13 +878,258 @@ bool IsHistoricalMode()
            g_runtime_operating_mode == FXNEWS_MODE_AUTOTUNE);
 }
 
+bool IsSelfTestMode()
+{
+   return (g_runtime_operating_mode == FXNEWS_MODE_SELFTEST);
+}
+
+// Only Live drives the market scan; the other modes run once and report.
+bool IsScanningMode()
+{
+   return (g_runtime_operating_mode == FXNEWS_MODE_LIVE);
+}
+
 string OperatingModeText()
 {
    if(g_runtime_operating_mode == FXNEWS_MODE_VALIDATION)
       return "VALIDATION";
    if(g_runtime_operating_mode == FXNEWS_MODE_AUTOTUNE)
       return "AUTOTUNE";
+   if(g_runtime_operating_mode == FXNEWS_MODE_SELFTEST)
+      return "SELFTEST";
    return "LIVE";
+}
+
+// ---------------------------------------------------------------------------
+// Self test. Exercises the pure helpers against known inputs and prints a
+// pass/fail report to the Journal. Needs no market data, no symbols and no
+// history, so it runs anywhere including a closed market.
+//
+// It exists because the MQL5 compiler warns only about variables that are never
+// touched at all: a reversed score ramp, a saturating z-score on degenerate
+// input and an imputed neutral constant all compile silently. Three defects of
+// exactly that kind shipped before 1.4. Each is now asserted below.
+// ---------------------------------------------------------------------------
+void SelfTestCheck(const bool condition, const string name)
+{
+   if(condition)
+   {
+      g_selftest_passed++;
+      return;
+   }
+   g_selftest_failed++;
+   PrintFormat("FXNews SELFTEST FAIL: %s", name);
+}
+
+void SelfTestNear(const double actual, const double expected, const string name)
+{
+   if(MathAbs(actual - expected) <= 0.0001)
+   {
+      g_selftest_passed++;
+      return;
+   }
+   g_selftest_failed++;
+   PrintFormat("FXNews SELFTEST FAIL: %s (got %.6f, expected %.6f)", name, actual, expected);
+}
+
+int SelfTestGroup(const string title, const int failed_before)
+{
+   int failed_now = g_selftest_failed - failed_before;
+   AddHistoricalReportLine(StringFormat("  %-26s %s", title,
+                                        (failed_now == 0 ? "ok" : StringFormat("%d FAILED", failed_now))));
+   return g_selftest_failed;
+}
+
+int SelfTestRamps()
+{
+   int before = g_selftest_failed;
+
+   SelfTestNear(SmoothStep(0.0, 1.0, 0.5), 0.5, "SmoothStep midpoint");
+   SelfTestNear(SmoothStep(0.0, 1.0, -1.0), 0.0, "SmoothStep below edge0");
+   SelfTestNear(SmoothStep(0.0, 1.0, 2.0), 1.0, "SmoothStep above edge1");
+   SelfTestNear(SmoothStep(5.0, 5.0, 5.0), 1.0, "SmoothStep equal edges at edge");
+   SelfTestNear(SmoothStep(5.0, 5.0, 4.0), 0.0, "SmoothStep equal edges below");
+
+   // Reversed edges must still rise with x. Before 1.4 this ramp ran backwards
+   // and scored 1.00 for moves against the signal.
+   SelfTestCheck(SmoothStep(0.50, 0.35, 0.20) < SmoothStep(0.50, 0.35, 0.60),
+                 "SmoothStep reversed edges must stay monotone rising");
+   SelfTestNear(SmoothStep(1.0, 0.0, 0.5), 0.5, "SmoothStep reversed edges midpoint");
+
+   SelfTestNear(ScoreFromZ(0.5, 0.5, 2.5), 0.0, "ScoreFromZ at low edge");
+   SelfTestNear(ScoreFromZ(2.5, 0.5, 2.5), 1.0, "ScoreFromZ at high edge");
+
+   SelfTestNear(LinearScore(0.5, 0.0, 1.0), 50.0, "LinearScore midpoint");
+   SelfTestNear(LinearScore(-1.0, 0.0, 1.0), 0.0, "LinearScore below zero level");
+   SelfTestNear(LinearScore(2.0, 0.0, 1.0), 100.0, "LinearScore above full level");
+   SelfTestNear(LinearScore(0.5, 1.0, 0.0), 0.0, "LinearScore rejects inverted levels");
+
+   SelfTestNear(Clamp(5.0, 0.0, 1.0), 1.0, "Clamp upper");
+   SelfTestNear(Clamp(-5.0, 0.0, 1.0), 0.0, "Clamp lower");
+   SelfTestNear(Clamp01(2.0), 1.0, "Clamp01 upper");
+   SelfTestNear(Clamp01(-2.0), 0.0, "Clamp01 lower");
+
+   return SelfTestGroup("ramps and clamps", before);
+}
+
+int SelfTestRobustStats()
+{
+   int before = g_selftest_failed;
+
+   // Degenerate dispersion carries no information. Before 1.4 this returned
+   // +/-4.0, which saturated every ramp that treats a high z as evidence.
+   SelfTestNear(RobustZ(1.9, 1.2, 0.0), 0.0, "RobustZ zero MAD returns no signal");
+   SelfTestNear(RobustZ(0.4, 1.2, 0.0), 0.0, "RobustZ zero MAD, value below median");
+   SelfTestNear(RobustZ(1.2, 1.2, 0.0), 0.0, "RobustZ zero MAD, value at median");
+   SelfTestNear(RobustZ(1.4826, 0.0, 1.0), 1.0, "RobustZ unit scaling");
+   SelfTestCheck(RobustZ(-1.4826, 0.0, 1.0) < 0.0, "RobustZ sign below median");
+
+   double odd[3];
+   odd[0] = 3.0; odd[1] = 1.0; odd[2] = 2.0;
+   SelfTestNear(MedianOfArray(odd, 3), 2.0, "MedianOfArray odd count");
+
+   double even[4];
+   even[0] = 4.0; even[1] = 1.0; even[2] = 3.0; even[3] = 2.0;
+   SelfTestNear(MedianOfArray(even, 4), 2.5, "MedianOfArray even count");
+
+   double dev[3];
+   dev[0] = 1.0; dev[1] = 2.0; dev[2] = 3.0;
+   SelfTestNear(MedianAbsDeviation(dev, 3, 2.0), 1.0, "MedianAbsDeviation");
+
+   SelfTestNear(SafeDiv(1.0, 0.0, 99.0), 99.0, "SafeDiv guards zero denominator");
+   SelfTestNear(SafeDiv(10.0, 2.0, 0.0), 5.0, "SafeDiv normal");
+
+   // The cached speed baseline relies on this identity holding for the median.
+   double a[5];
+   double b[5];
+   for(int i = 0; i < 5; i++)
+   {
+      a[i] = (double)(i - 2) + 0.5;
+      b[i] = -a[i];
+   }
+   double median_a = MedianOfArray(a, 5);
+   double median_b = MedianOfArray(b, 5);
+   SelfTestNear(median_b, -median_a, "median(-x) == -median(x)");
+
+   return SelfTestGroup("robust statistics", before);
+}
+
+int SelfTestTimeAndSession()
+{
+   int before = g_selftest_failed;
+
+   SelfTestCheck(NormalizeHour(-1) == 23, "NormalizeHour wraps negative");
+   SelfTestCheck(NormalizeHour(25) == 1, "NormalizeHour wraps above 23");
+   SelfTestCheck(NormalizeHour(23) == 23, "NormalizeHour identity");
+
+   SelfTestCheck(HourInSession(10, 7, 16), "HourInSession inside daytime window");
+   SelfTestCheck(!HourInSession(16, 7, 16), "HourInSession excludes end hour");
+   SelfTestCheck(HourInSession(7, 7, 16), "HourInSession includes start hour");
+   SelfTestCheck(HourInSession(23, 23, 1), "HourInSession overnight start");
+   SelfTestCheck(HourInSession(0, 23, 1), "HourInSession overnight wrap");
+   SelfTestCheck(!HourInSession(1, 23, 1), "HourInSession overnight excludes end");
+   SelfTestCheck(!HourInSession(5, 5, 5), "HourInSession empty window");
+
+   return SelfTestGroup("time and session", before);
+}
+
+int SelfTestSymbolsAndTimeframes()
+{
+   int before = g_selftest_failed;
+
+   SelfTestNear(PipSize(0.00001, 5), 0.0001, "PipSize 5 digit");
+   SelfTestNear(PipSize(0.001, 3), 0.01, "PipSize 3 digit");
+   SelfTestNear(PipSize(0.0001, 4), 0.0001, "PipSize 4 digit");
+   SelfTestNear(PipSize(0.01, 2), 0.01, "PipSize 2 digit");
+
+   SelfTestCheck(TimeframeMinutes(PERIOD_M1) == 1, "TimeframeMinutes M1");
+   SelfTestCheck(TimeframeMinutes(PERIOD_M15) == 15, "TimeframeMinutes M15");
+   SelfTestCheck(TimeframeMinutes(PERIOD_H4) == 240, "TimeframeMinutes H4");
+   SelfTestCheck(TimeframeMinutes(PERIOD_D1) == 1440, "TimeframeMinutes D1");
+   SelfTestCheck(TimeframeMinutes(PERIOD_MN1) == 0, "TimeframeMinutes rejects unsupported");
+
+   ENUM_TIMEFRAMES parsed = PERIOD_CURRENT;
+   string label = "";
+   SelfTestCheck(ParseTimeframeToken("m15", parsed, label) && parsed == PERIOD_M15 && label == "M15",
+                 "ParseTimeframeToken lowercase");
+   SelfTestCheck(ParseTimeframeToken("PERIOD_H4", parsed, label) && parsed == PERIOD_H4 && label == "H4",
+                 "ParseTimeframeToken PERIOD_ form");
+   SelfTestCheck(ParseTimeframeToken("240", parsed, label) && parsed == PERIOD_H4,
+                 "ParseTimeframeToken numeric form");
+   SelfTestCheck(!ParseTimeframeToken("XYZ", parsed, label), "ParseTimeframeToken rejects junk");
+
+   int base = -1;
+   int quote = -1;
+   SelfTestCheck(FindBaseQuoteCurrencies("EURUSD", base, quote) && base == 0 && quote == 1,
+                 "FindBaseQuoteCurrencies EURUSD");
+   SelfTestCheck(FindBaseQuoteCurrencies("eurusd", base, quote) && base == 0 && quote == 1,
+                 "FindBaseQuoteCurrencies is case insensitive");
+   SelfTestCheck(FindBaseQuoteCurrencies("GBPJPY.pro", base, quote) && base == 2 && quote == 3,
+                 "FindBaseQuoteCurrencies tolerates a broker suffix");
+   SelfTestCheck(!FindBaseQuoteCurrencies("NOTAPAIR", base, quote),
+                 "FindBaseQuoteCurrencies rejects a non pair");
+
+   SelfTestCheck(UpperAscii("eurusd") == "EURUSD", "UpperAscii");
+   SelfTestCheck(ObjectNamespaceToken("ab-1") == "ab_1", "ObjectNamespaceToken sanitises");
+   SelfTestCheck(StringLen(ObjectNamespaceToken("")) > 0, "ObjectNamespaceToken fills an empty id");
+
+   return SelfTestGroup("symbols and timeframes", before);
+}
+
+int SelfTestScoringHelpers()
+{
+   int before = g_selftest_failed;
+
+   string caps = "";
+   SelfTestNear(ApplyScoreCap(90.0, 80.0, caps, "over"), 80.0, "ApplyScoreCap caps");
+   SelfTestCheck(caps == "over", "ApplyScoreCap records the reason");
+   SelfTestNear(ApplyScoreCap(70.0, 80.0, caps, "under"), 70.0, "ApplyScoreCap leaves a lower score");
+   SelfTestCheck(caps == "over", "ApplyScoreCap does not record an unused reason");
+
+   SelfTestCheck(ScoreBucketFloor(87.0) == 85, "ScoreBucketFloor 85+");
+   SelfTestCheck(ScoreBucketFloor(72.0) == 70, "ScoreBucketFloor 70s");
+   SelfTestCheck(ScoreBucketFloor(10.0) == 60, "ScoreBucketFloor floor");
+
+   SelfTestCheck(BlockStageRank(BLOCK_NONE) < 0, "BlockStageRank none");
+   SelfTestCheck(BlockStageRank(BLOCK_CONTEXT_CONFLICT) > BlockStageRank(BLOCK_BAD_SPREAD),
+                 "BlockStageRank orders later stages above execution");
+
+   SelfTestNear(DirectionalValue(5.0, DIR_DOWN), -5.0, "DirectionalValue inverts for DOWN");
+   SelfTestNear(DirectionalValue(5.0, DIR_UP), 5.0, "DirectionalValue passes through for UP");
+   SelfTestNear(Max3(1.0, 5.0, 3.0), 5.0, "Max3");
+   SelfTestCheck(IntMax(3, 7) == 7 && IntMin(3, 7) == 3 && IntAbs(-4) == 4, "integer helpers");
+
+   SelfTestCheck(BaselineHorizonMinutes() >= 1, "BaselineHorizonMinutes is positive");
+
+   return SelfTestGroup("scoring helpers", before);
+}
+
+void RunSelfTest()
+{
+   if(g_selftest_done)
+      return;
+   g_selftest_done = true;
+
+   g_selftest_passed = 0;
+   g_selftest_failed = 0;
+
+   ClearHistoricalReport();
+   AddHistoricalReportLine("FXNEWS SELF TEST | pure-function checks | no market data required");
+
+   SelfTestRamps();
+   SelfTestRobustStats();
+   SelfTestTimeAndSession();
+   SelfTestSymbolsAndTimeframes();
+   SelfTestScoringHelpers();
+
+   AddHistoricalReportLine(StringFormat("RESULT: %d passed, %d failed",
+                                        g_selftest_passed, g_selftest_failed));
+   if(g_selftest_failed > 0)
+      AddHistoricalReportLine("Failures are listed individually above in the Journal.");
+
+   PrintHistoricalReportToJournal();
+   SetHistoricalReadyMessage(StringFormat("SELFTEST %s",
+                                          (g_selftest_failed == 0 ? "PASSED" : "FAILED")));
 }
 
 void RunHistoricalOperatingMode()
@@ -5083,7 +5349,7 @@ void UpdateScanDiagnostics(const uint scan_start)
 
 string DiagnosticsText()
 {
-   return StringFormat("DIAG valid=%d invalid=%d profiles=%d active=%d tick_ok=%d calendar=%s disk_io=disabled scan_avg=%.1fms scan_max=%.1fms objects=%d/%d",
+   return StringFormat("DIAG valid=%d invalid=%d profiles=%d active=%d tick_ok=%d calendar=%s disk_io=disabled scan_avg=%.1fms scan_max=%.1fms baseline=%dmin objects=%d/%d",
                        g_last_valid_symbols,
                        g_last_invalid_symbols,
                        ArraySize(g_profiles),
@@ -5092,8 +5358,15 @@ string DiagnosticsText()
                        (g_calendar_available ? "yes" : "no"),
                        g_average_scan_ms,
                        g_max_scan_ms,
+                       BaselineHorizonMinutes(),
                        CountDashboardObjects(),
                        DASHBOARD_MAX_OBJECTS);
+}
+
+// The baseline is configured in samples but experienced as a duration.
+int BaselineHorizonMinutes()
+{
+   return IntMax(1, (BaselineLookbackSamples * IntMax(1, ScanIntervalSeconds)) / 60);
 }
 
 int CountDashboardObjects()

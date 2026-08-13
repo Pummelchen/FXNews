@@ -1,6 +1,6 @@
-// FXNews version 1.4
+// FXNews version 1.5
 #property strict
-#property version   "1.400"
+#property version   "1.500"
 #property indicator_chart_window
 #property indicator_plots 0
 #property description "Chart-only multi-symbol breakout radar indicator. No trade execution. No disk I/O."

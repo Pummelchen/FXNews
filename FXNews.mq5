@@ -1,6 +1,6 @@
-// FXNews version 2.1
+// FXNews version 2.2
 #property strict
-#property version   "2.100"
+#property version   "2.200"
 #property indicator_chart_window
 #property indicator_plots 0
 #property description "Chart-only multi-symbol breakout radar indicator. No trade execution. No disk I/O."
@@ -171,7 +171,11 @@ double g_outcome_stop_atr = 0.0;
 #define DASHBOARD_MIN_TEXT_CHARS 12
 #define DASHBOARD_MAX_TEXT_CHARS 82
 #define DASHBOARD_FALLBACK_TEXT_CHARS 64
-#define SIGNAL_HISTORY_SIZE 5
+#define SIGNAL_HISTORY_SIZE 10
+// A row stays on the chart for at least this long after it first appears, even
+// if the signal's score decays back below SIGNAL_MESSAGE_MIN_SCORE. Measured
+// from the entry's activation timestamp, which is what the row displays.
+#define SIGNAL_MESSAGE_MIN_VISIBLE_SECONDS 30
 #define SIGNAL_MESSAGE_REFRESH_SECONDS 10
 #define SIGNAL_MESSAGE_MIN_SCORE 75.0
 #define STATUS_ROW_INDEX 1
@@ -5823,7 +5827,24 @@ void PushSignalHistory(const int index,
       return;
    }
 
-   for(int i = SIGNAL_HISTORY_SIZE - 1; i > 0; i--)
+   // Entries are held newest-first. Drop the oldest slot that has already met
+   // its minimum dwell rather than always dropping the tail, so a burst of new
+   // signals cannot sweep a row off the chart seconds after it appeared. If
+   // every slot is still within its dwell the tail goes anyway: capacity is a
+   // hard bound. Removing a slot from the tail region preserves newest-first
+   // order for everything that stays.
+   int evict = SIGNAL_HISTORY_SIZE - 1;
+   for(int i = SIGNAL_HISTORY_SIZE - 1; i >= 0; i--)
+   {
+      if(!g_signal_history[i].used ||
+         local_time - g_signal_history[i].local_time >= SIGNAL_MESSAGE_MIN_VISIBLE_SECONDS)
+      {
+         evict = i;
+         break;
+      }
+   }
+
+   for(int i = evict; i > 0; i--)
       CopySignalHistoryEntry(g_signal_history[i - 1], g_signal_history[i]);
 
    SetSignalHistoryEntry(g_signal_history[0], symbol, timeframe_label, direction, score, local_time);
@@ -5844,8 +5865,15 @@ void UpdateSignalHistory(const int index, const int direction, const double scor
 
    if(!IsSignalMessageDisplayable(score))
    {
-      if(existing >= 0)
+      // The score fell back below the list threshold. Hold the row until it has
+      // been on the chart for its minimum dwell, and leave its stored score at
+      // the last displayable value so the list never shows a sub-threshold
+      // number. Once the dwell has elapsed the row is dropped as before.
+      if(existing >= 0 &&
+         TimeLocal() - g_signal_history[existing].local_time >= SIGNAL_MESSAGE_MIN_VISIBLE_SECONDS)
+      {
          RemoveSignalHistoryEntry(existing);
+      }
       return;
    }
 

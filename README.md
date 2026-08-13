@@ -15,13 +15,23 @@ FXNews does not place, modify, or manage trades. It uses no `WebRequest`, DLL, e
 
 ## Version
 
-Current source version: **1.3** (`#property version "1.300"`). See the [Changelog](https://github.com/Pummelchen/FXNews/wiki/Changelog) for versioned changes.
+Current source version: **1.4** (`#property version "1.400"`). See the [Changelog](https://github.com/Pummelchen/FXNews/wiki/Changelog) for versioned changes.
 
 ## Requirements
 
 - MetaTrader 5 with MetaEditor.
 - Broker symbols and sufficient M1, M5, M15, and scan-timeframe history for the configured basket.
 - A demo or other non-production environment for initial validation.
+
+## Building
+
+Compile `FXNews.mq5` in MetaEditor. On macOS, `tools/build-macos.sh` drives MetaEditor through the Wine bundle inside the MetaQuotes build of MetaTrader 5 and fails on any error **or** warning, so it can gate a commit:
+
+```bash
+./tools/build-macos.sh
+```
+
+A clean compile is a syntax gate only. The MQL5 compiler warns about a variable only when it is never touched at all — an initialised-but-unread local, a dead struct copy, a struct field written but never read, and unreachable code all compile silently. Run the dead-code census in [Testing and Validation](https://github.com/Pummelchen/FXNews/wiki/Testing-and-Validation) alongside it.
 
 ## Documentation
 

@@ -1,6 +1,6 @@
-// FXNews version 1.2
+// FXNews version 1.3
 #property strict
-#property version   "1.200"
+#property version   "1.300"
 #property indicator_chart_window
 #property indicator_plots 0
 #property description "Chart-only multi-symbol breakout radar indicator. No trade execution. No disk I/O."
@@ -25,7 +25,7 @@ input string SymbolsToScan =
 input string TimeframesToScan = "M1,M5,M15,M30,H1,H4,H8,H12,D1";
 input string InstanceId = ""; // Optional stable namespace when multiple instances share a chart.
 
-input int ScanIntervalSeconds = 1;
+input int ScanIntervalSeconds = 2;
 input int DisplayUpdateSeconds = 5;
 input double MinDisplayConfidence = 60.0;
 input double StrongAlertConfidence = 70.0;

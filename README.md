@@ -13,6 +13,10 @@ FXNews is a chart-only MetaTrader 5 custom indicator for discretionary FX market
 
 FXNews does not place, modify, or manage trades. It uses no `WebRequest`, DLL, external data feed, CSV logging, or file persistence. The displayed percentage is an event-quality ranking, not a win probability or trade instruction. Autotune never changes the active runtime settings: review its Journal recommendation and validate it on a separate holdout period before entering settings manually.
 
+## Version
+
+Current source version: **1.1** (`#property version "1.100"`). See the [Changelog](https://github.com/Pummelchen/FXNews/wiki/Changelog) for versioned changes.
+
 ## Requirements
 
 - MetaTrader 5 with MetaEditor.
@@ -34,3 +38,4 @@ The [GitHub Wiki](https://github.com/Pummelchen/FXNews/wiki) is the complete pro
 - [Safety and Security](https://github.com/Pummelchen/FXNews/wiki/Safety-and-Security)
 - [Release Checklist](https://github.com/Pummelchen/FXNews/wiki/Release-Checklist)
 - [Known Limitations](https://github.com/Pummelchen/FXNews/wiki/Known-Limitations)
+- [Changelog](https://github.com/Pummelchen/FXNews/wiki/Changelog)

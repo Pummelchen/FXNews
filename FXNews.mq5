@@ -1,6 +1,6 @@
-// FXNews version 2.0
+// FXNews version 2.1
 #property strict
-#property version   "2.000"
+#property version   "2.100"
 #property indicator_chart_window
 #property indicator_plots 0
 #property description "Chart-only multi-symbol breakout radar indicator. No trade execution. No disk I/O."
@@ -113,6 +113,9 @@ input int NewYorkEndHourServer = 22;
 input int LondonNYOverlapStartHourServer = 13;
 input int LondonNYOverlapEndHourServer = 16;
 
+// Default display is the timestamped recent-signal list only. Set true to get
+// the detailed live rows instead (rank, session, cost, calendar, group, tags).
+input bool ShowActiveSignalRows = false;
 input int MaxDashboardRows = 12;
 input bool ShowOnlyGroupLeaders = false;
 input bool ShowBlockedSignalsDebug = false;
@@ -5400,21 +5403,25 @@ void UpdateDashboard()
    SetActivityStatusRow(STATUS_ROW_INDEX);
    SetDiagnosticsRowIfEnabled();
 
-   DashboardSignal signals[];
-   CollectDashboardSignals(signals);
-
    int row = SIGNAL_FIRST_ROW_INDEX;
    int max_row = DashboardSignalRowLimit();
-   int ranked = SortDashboardSignalsTopN(signals, max_row - SIGNAL_FIRST_ROW_INDEX);
-   for(int i = 0; i < ranked && row < max_row; i++)
+
+   if(ShowActiveSignalRows)
    {
-      string text = DashboardRowText(signals[i], i + 1);
-      if(text == "")
-         continue;
-      SetDashboardRow(row, text, DashboardRowTooltip(signals[i]), clrWhite);
-      row++;
+      DashboardSignal signals[];
+      CollectDashboardSignals(signals);
+      int ranked = SortDashboardSignalsTopN(signals, max_row - SIGNAL_FIRST_ROW_INDEX);
+      for(int i = 0; i < ranked && row < max_row; i++)
+      {
+         string text = DashboardRowText(signals[i], i + 1);
+         if(text == "")
+            continue;
+         SetDashboardRow(row, text, DashboardRowTooltip(signals[i]), clrWhite);
+         row++;
+      }
    }
 
+   // With active rows disabled this is the only signal display, so it always runs.
    if(row == SIGNAL_FIRST_ROW_INDEX)
    {
       RefreshVisibleSignalHistoryIfDue();

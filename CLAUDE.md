@@ -38,27 +38,32 @@ initialised-but-unread local, a struct copied into a local and never read, a str
 assigned but never read, a tautological comparison and an unreachable statement after
 `return` all compile with zero warnings.
 
-Alongside the build, run:
+Alongside the build, run the other two gates:
 
-- `OperatingMode = FXNEWS_MODE_SELFTEST` — 74 assertions over the pure helpers; needs no
-  market data, no symbols and no history.
-- the dead-code census in the wiki's *Testing and Validation* page — the field and local
-  audits the compiler cannot do.
+```bash
+tools/census.py            # dead-code and placeholder census, exits non-zero on any finding
+./tools/selftest-macos.sh  # 117 assertions in the terminal; --validation / --autotune run
+                           # a short historical pass and require a complete report
+```
 
-Neither covers stateful behaviour: the signal lifecycle, correlation grouping, alert
-dispatch and the dashboard are verified only by manual runtime observation.
+The self-test covers the pure helpers, the shared composer, the historical engine on
+synthetic bars and the recent-signal list. It does not cover the live signal lifecycle,
+correlation grouping, alert dispatch or dashboard rendering; those are verified by manual
+runtime observation.
 
 ## Version bumps touch three locations plus the wiki
 
 1. **This repo** — `FXNews.mq5` line 1 and `#property version`, plus `README.md`.
 2. **`MQL5/Indicators/FXNews/`** — a separate clone of this repository. Update it with git
-   (`fetch` + `reset --hard origin/main`), then copy a freshly compiled `FXNews.ex5` in.
-   A stale `.ex5` next to a current `.mq5` is a trap: MT5 loads the binary.
+   (`fetch` + `reset --hard origin/main`), then `./tools/build-macos.sh --install` (or copy
+   a freshly compiled `FXNews.ex5` in). A stale `.ex5` next to a current `.mq5` is a trap:
+   MT5 loads the binary.
 3. **`origin/main`**.
 
-Then the wiki (a separate git repository): `Home.md` version line and a `Changelog.md`
-entry. The README links to that Changelog, so a version bump without it is visibly
-inconsistent.
+Then the wiki (a separate git repository): `Home.md` version line, a `Changelog.md`
+entry, and the `Project-Tracker.md` page (close what the revision completes, log what
+was found but deferred). The README links to the Changelog, so a version bump without it
+is visibly inconsistent.
 
 ## Product boundaries
 
@@ -73,5 +78,12 @@ A component that could not be measured is **excluded** from a blend — its weig
 zero and it leaves the normaliser — rather than imputed with a neutral constant. Imputing
 drags every score toward that constant, penalising strong candidates and flattering weak
 ones exactly when the least information is available. Consumers gate on an explicit
-`available` flag, never on a sentinel value, and no tag or reason text may assert a
-component that was not evaluated.
+`available` / `measured` flag, never on a sentinel value, and no tag or reason text may
+assert a component that was not evaluated. This applies inside every component too.
+
+The blend and the cap ladder exist once, in `ComposeSignalScore()`, and the breakout
+structure, impulse blend, regime blend and execution blend are pure functions shared by
+the live scanner and the historical modes. Change them there; never fork a copy.
+
+The terminal keeps only the first 63 characters of a chart label. Compose rows to that
+budget and put detail in the tooltip.

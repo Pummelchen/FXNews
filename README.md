@@ -66,3 +66,7 @@ The [GitHub Wiki](https://github.com/Pummelchen/FXNews/wiki) is the complete pro
 - [Known Limitations](https://github.com/Pummelchen/FXNews/wiki/Known-Limitations)
 - [Changelog](https://github.com/Pummelchen/FXNews/wiki/Changelog)
 - [Project Tracker](https://github.com/Pummelchen/FXNews/wiki/Project-Tracker)
+
+## License
+
+MIT — see [LICENSE](LICENSE).

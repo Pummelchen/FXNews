@@ -9,11 +9,24 @@
 #   4. read the Experts journal and fail unless it reports "SELFTEST PASSED"
 #      with zero failed assertions
 #
-# Usage:  ./tools/selftest-macos.sh
-# Exits 0 on PASSED, 1 on FAILED or timeout, 2 on an environment problem.
+# Usage:  ./tools/selftest-macos.sh [--validation | --autotune]
+#   default      run the built-in self-test (72 pure-helper assertions)
+#   --validation run a VALIDATION pass over EURUSD,GBPUSD on M5,H1 and require
+#                a complete report (exercises the historical engine end to end)
+#   --autotune   the same for an AUTOTUNE sweep
+# Exits 0 on PASSED / a complete report, 1 on FAILED, ABORTED or timeout,
+# 2 on an environment problem.
 # The terminal must not already be running: MetaTrader refuses a second
 # instance and the harness would wait on the wrong process.
 set -uo pipefail
+
+MODE="selftest"
+case "${1:-}" in
+  "") ;;
+  --validation) MODE="validation" ;;
+  --autotune) MODE="autotune" ;;
+  *) echo "selftest: unknown option $1" >&2; exit 2 ;;
+esac
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null || dirname "$HERE")"
@@ -24,6 +37,9 @@ MT5="$WINEPREFIX/drive_c/Program Files/MetaTrader 5"
 TERMINAL="$MT5/terminal64.exe"
 export WINEDEBUG="${WINEDEBUG:--all}"
 TIMEOUT_SECONDS="${FXNEWS_SELFTEST_TIMEOUT:-240}"
+if [ "$MODE" != "selftest" ]; then
+  TIMEOUT_SECONDS="${FXNEWS_SELFTEST_TIMEOUT:-900}"
+fi
 
 [ -x "$WINE" ]     || { echo "selftest: wine64 not found at $WINE" >&2; exit 2; }
 [ -f "$TERMINAL" ] || { echo "selftest: terminal64.exe not found at $TERMINAL" >&2; exit 2; }
@@ -42,7 +58,9 @@ echo "selftest: compiling harness script"
 
 INSTALL_DIR="$MT5/MQL5/Indicators/FXNews-selftest"
 SCRIPT_DIR="$MT5/MQL5/Scripts"
-mkdir -p "$INSTALL_DIR" "$SCRIPT_DIR" || exit 2
+PRESET_DIR="$MT5/MQL5/Presets"
+PRESET="$PRESET_DIR/FXNewsHarness.set"
+mkdir -p "$INSTALL_DIR" "$SCRIPT_DIR" "$PRESET_DIR" || exit 2
 cp "$ROOT/FXNews.ex5" "$INSTALL_DIR/FXNews.ex5" || exit 2
 cp "$ROOT/tools/mql5/FXNewsSelfTest.ex5" "$SCRIPT_DIR/FXNewsSelfTest.ex5" || exit 2
 
@@ -51,13 +69,24 @@ WORK="$(mktemp -d -t fxnews-selftest)"
 cleanup() {
   rm -rf "$WORK"
   rm -rf "$INSTALL_DIR"
-  rm -f "$SCRIPT_DIR/FXNewsSelfTest.ex5"
+  rm -f "$SCRIPT_DIR/FXNewsSelfTest.ex5" "$PRESET"
 }
 trap cleanup EXIT
 
+# The script's inputs travel through a preset file; the historical modes get a
+# small basket so a run finishes in minutes rather than the full default sweep.
+case "$MODE" in
+  selftest)
+    printf 'HarnessMode=3\r\nHarnessSymbols=\r\nHarnessTimeframes=\r\nHarnessTimeoutSeconds=90\r\n' > "$PRESET" ;;
+  validation)
+    printf 'HarnessMode=1\r\nHarnessSymbols=EURUSD,GBPUSD\r\nHarnessTimeframes=M5,H1\r\nHarnessTimeoutSeconds=%d\r\n' "$((TIMEOUT_SECONDS - 60))" > "$PRESET" ;;
+  autotune)
+    printf 'HarnessMode=2\r\nHarnessSymbols=EURUSD,GBPUSD\r\nHarnessTimeframes=M5,H1\r\nHarnessTimeoutSeconds=%d\r\n' "$((TIMEOUT_SECONDS - 60))" > "$PRESET" ;;
+esac
+
 # Windows ini files are read as ANSI; the content is pure ASCII so no BOM is needed.
 CONFIG="$WORK/fxnews-selftest.ini"
-printf '[StartUp]\r\nSymbol=EURUSD\r\nPeriod=M5\r\nScript=FXNewsSelfTest\r\nShutdownTerminal=1\r\n' > "$CONFIG"
+printf '[StartUp]\r\nSymbol=EURUSD\r\nPeriod=M5\r\nScript=FXNewsSelfTest\r\nScriptParameters=FXNewsHarness.set\r\nShutdownTerminal=1\r\n' > "$CONFIG"
 
 LOG_DIR="$MT5/MQL5/Logs"
 STAMP="$(date +%Y%m%d)"
@@ -93,20 +122,36 @@ JOURNAL="$(iconv -f UTF-16LE -t UTF-8 "$LOG" 2>/dev/null | tr -d '\r' | tail -n 
 printf '%s\n' "$JOURNAL" | grep -E 'FXNews|FXNEWS' | sed 's/^/  journal: /'
 
 VERDICT="$(printf '%s' "$JOURNAL" | grep -o 'FXNEWS_HARNESS: .*' | tail -1)"
-RESULT="$(printf '%s' "$JOURNAL" | grep -o 'RESULT: [0-9]* passed, [0-9]* failed' | tail -1)"
-FAILED="$(printf '%s' "$RESULT" | sed -n 's/.*, \([0-9]*\) failed/\1/p')"
-
 if [ -z "$VERDICT" ]; then
   echo "selftest: the harness script produced no verdict line" >&2
   exit 1
 fi
+
+if [ "$MODE" = "selftest" ]; then
+  RESULT="$(printf '%s' "$JOURNAL" | grep -o 'RESULT: [0-9]* passed, [0-9]* failed' | tail -1)"
+  FAILED="$(printf '%s' "$RESULT" | sed -n 's/.*, \([0-9]*\) failed/\1/p')"
+  case "$VERDICT" in
+    *"SELFTEST PASSED"*)
+      if [ "${FAILED:-1}" -eq 0 ]; then
+        echo "selftest: OK ($RESULT)"
+        exit 0
+      fi
+      ;;
+  esac
+  echo "selftest: FAILED ($VERDICT; ${RESULT:-no result line})" >&2
+  exit 1
+fi
+
+# A historical run passes when the ready label appeared and the Journal holds
+# the report's signal line; ABORTED or a timeout fails.
+SIGNALS="$(printf '%s' "$JOURNAL" | grep -o 'signals=[0-9]*\|Signals=[0-9]*' | tail -1)"
 case "$VERDICT" in
-  *"SELFTEST PASSED"*)
-    if [ "${FAILED:-1}" -eq 0 ]; then
-      echo "selftest: OK ($RESULT)"
+  *"VALIDATION ready"*|*"AUTOTUNE ready"*)
+    if [ -n "$SIGNALS" ]; then
+      echo "selftest: OK ($MODE report complete, $SIGNALS)"
       exit 0
     fi
     ;;
 esac
-echo "selftest: FAILED ($VERDICT; ${RESULT:-no result line})" >&2
+echo "selftest: FAILED ($VERDICT)" >&2
 exit 1

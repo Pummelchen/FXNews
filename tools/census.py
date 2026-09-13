@@ -173,7 +173,7 @@ def find_functions(src: Source) -> list[Function]:
         body = src.code[brace + 1:j]
         params: list[str] = []
         for chunk in match.group("params").split(","):
-            chunk = chunk.strip()
+            chunk = chunk.split("=", 1)[0].strip()   # drop a default value
             if not chunk:
                 continue
             ident = re.search(rf"&?\s*({IDENT})\s*(?:\[\s*\])?\s*$", chunk)

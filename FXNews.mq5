@@ -144,7 +144,9 @@ input bool PrintDiagnosticsEveryMinute = false;
 input int HistoricalLookbackDays = 90;  // Calendar days including weekends, so ~64 trading days at the default.
 input int HistoricalStepMinutes = 1;
 input int HistoricalWarmupBars = 500;
-input int HistoricalMaxSignalsPerProfile = 250;
+// Boundaries (scan-timeframe bar closes) evaluated per profile at most; denser
+// history is sub-sampled uniformly and the report prints the coverage.
+input int HistoricalMaxBoundariesPerProfile = 2000;
 input int AutotuneMinSignals = 100;
 
 
@@ -199,7 +201,23 @@ input int AutotuneMinSignals = 100;
 #define MAX_CALENDAR_WINDOW_MINUTES 1440
 #define MAX_HISTORICAL_LOOKBACK_DAYS 365
 #define MAX_HISTORICAL_WARMUP_BARS 10000
-#define MAX_HISTORICAL_SIGNALS_PER_PROFILE 1000
+#define MAX_HISTORICAL_BOUNDARIES_PER_PROFILE 20000
+// Historical model constants: an aggregated bar or an outcome window needs
+// this share of its minutes present; spread and volume baselines look back
+// this far; the minute-scale acceleration proxy ramps over this ATR/minute.
+#define HISTORICAL_MIN_BAR_COVERAGE 0.50
+#define HISTORICAL_SPREAD_BASELINE_MINUTES 120
+#define HISTORICAL_VOLUME_BASELINE_BARS 40
+#define HISTORICAL_ACCELERATION_FULL_ATR_PER_MINUTE 0.10
+#define HISTORICAL_SCRATCH_RESERVE 200
+// Where a boundary's spread came from. Many brokers store no spread on most
+// M1 bars, so the window median of the bars that carry one, and failing that
+// the symbol's current spread, stand in; each is a measurement and the report
+// prints the mix.
+#define HISTORICAL_SPREAD_NONE 0
+#define HISTORICAL_SPREAD_BAR 1
+#define HISTORICAL_SPREAD_MEDIAN 2
+#define HISTORICAL_SPREAD_SYMBOL 3
 #define MAX_OUTCOME_HORIZON_MINUTES 240
 #define MAX_BASELINE_SAMPLES 5000
 // An unmeasured basket now carries no score at all: the component is dropped
@@ -388,6 +406,19 @@ struct CompositeSignalScore
    string compact_tags;
 };
 
+// Direction-dependent context the composer needs beyond the component structs.
+// The live scanner and the historical validator both fill one of these, so
+// the blend and the cap ladder exist exactly once.
+struct CompositeContext
+{
+   int direction;
+   double m5_move_directional;    // last closed M5 bar move in ATR, signed by direction
+   double m15_move_directional;
+   int age_seconds;               // 0 when no event is live in this direction
+   int age_limit_seconds;         // 0 = no age limit
+   double max_spread_to_atr;      // the execution cap threshold in force
+};
+
 struct SessionBaseline
 {
    int sample_count;
@@ -417,9 +448,7 @@ struct HistoricalParams
    double min_confidence;
    double max_spread_to_atr;
    double max_overextension_atr;
-   double min_impulse_z;
-   double outcome_target_atr;
-   double outcome_stop_atr;
+   double minute_impulse_z;      // proxy threshold for the minute-scale speed windows
 };
 
 struct HistoricalSignalScore
@@ -428,10 +457,12 @@ struct HistoricalSignalScore
    int direction;
    double displayed_score;
    double atr_price;
+   double spread_price;
 };
 
 struct HistoricalOutcome
 {
+   bool evaluable;               // false when a horizon window lacks too many minutes
    double result_5m_R;
    bool target_5m;
    bool stop_5m;
@@ -449,9 +480,18 @@ struct HistoricalBacktestStats
    datetime to_time;
    int symbols_requested;
    int symbols_loaded;
-   int profiles_tested;
-   int bars_scanned;
+   int bars_loaded;
+   int profiles_tested;          // profiles with at least one evaluated boundary
+   int boundaries_total;         // boundaries in the window before sub-sampling
+   int boundary_stride_max;
+   int boundaries_rejected;      // boundaries without enough bar data
+   int bars_scanned;             // boundaries evaluated
+   int spread_from_bar;          // spread source counts over evaluated boundaries
+   int spread_from_median;
+   int spread_from_symbol;
+   int spread_unavailable;
    int signals;
+   int signals_unevaluable;      // outcome window too gapped to judge
    int target_5m;
    int stop_5m;
    int target_15m;
@@ -674,6 +714,7 @@ string g_object_prefix = "COBR_";
 double g_rate_scratch[];    // reused by the per-scan statistics helpers
 double g_spread_scratch[];
 double g_mad_scratch[];
+double g_hist_scratch[];    // historical baselines
 MqlRates g_rates_trigger[];  // CopyRates targets reused across profiles and scans
 MqlRates g_rates_m1[];
 MqlRates g_rates_m5[];
@@ -1041,8 +1082,8 @@ bool ValidateInputs()
 
    if(HistoricalLookbackDays < 1 || HistoricalLookbackDays > MAX_HISTORICAL_LOOKBACK_DAYS ||
       HistoricalStepMinutes < 1 || HistoricalStepMinutes > 60 || HistoricalWarmupBars < 100 ||
-      HistoricalWarmupBars > MAX_HISTORICAL_WARMUP_BARS || HistoricalMaxSignalsPerProfile < 10 ||
-      HistoricalMaxSignalsPerProfile > MAX_HISTORICAL_SIGNALS_PER_PROFILE ||
+      HistoricalWarmupBars > MAX_HISTORICAL_WARMUP_BARS || HistoricalMaxBoundariesPerProfile < 10 ||
+      HistoricalMaxBoundariesPerProfile > MAX_HISTORICAL_BOUNDARIES_PER_PROFILE ||
       AutotuneMinSignals < 10)
    {
       Print("FXNews: historical validation/autotune inputs are inconsistent.");
@@ -1344,20 +1385,92 @@ void RunHistoricalOperatingMode()
    HistoricalParams base_params;
    BuildBaseHistoricalParams(base_params);
 
+   bool completed = false;
    if(OperatingMode == FXNEWS_MODE_VALIDATION)
    {
       HistoricalBacktestStats stats;
-      RunHistoricalBacktest(base_params, stats);
-      BuildValidationReport(stats, base_params);
+      completed = RunHistoricalBacktest(base_params, stats);
+      if(completed)
+         BuildValidationReport(stats, base_params);
    }
    else
    {
-      RunAutotuneBacktest(base_params);
+      completed = RunAutotuneBacktest(base_params);
+   }
+
+   if(!completed)
+   {
+      // The terminal asked us to stop mid-run; partial statistics are not a
+      // report and must not read like one.
+      Print("FXNews: " + OperatingModeText() + " run ABORTED before completion; no report was produced.");
+      SetHistoricalReportHeader("FXNews - " + OperatingModeText() + " | ABORTED, no report");
    }
 
    g_historical_run_finished = true;
    UpdateHistoricalReportDashboard();
 }
+
+// ---------------------------------------------------------------------------
+// Historical validation and Autotune.
+//
+// The validator replays closed M1 history through the SAME composer, breakout
+// structure, impulse blend and regime blend as the live scanner. Only the
+// feature extraction differs, and every feature that bar data cannot provide
+// is left unmeasured rather than approximated:
+//   - the currency basket (needs every symbol at once)  -> flow unavailable
+//   - the economic calendar                            -> calendar unavailable
+//   - tick rate, tick sample quality, quote age, tick gap -> unavailable
+//   - the impulse speed z-scores are MINUTE-scale windows, not the live
+//     second-scale ones, and carry their own proxy threshold
+//     (HistoricalParams.minute_impulse_z, never MinImpulseZForSignal)
+// The composite is therefore capped at flow_absent_cap (84) and
+// no_calendar_cap (94) exactly as a live instance without a basket reading
+// would be, and the report says so.
+// ---------------------------------------------------------------------------
+
+struct HistoricalBar
+{
+   bool valid;
+   double open;
+   double high;
+   double low;
+   double close;
+   double volume;
+};
+
+// Everything about one evaluation boundary that no candidate parameter and no
+// direction changes; computed once and reused for every candidate and both
+// directions.
+struct HistoricalBoundaryFeatures
+{
+   bool valid;
+   datetime close_time;            // close of the M1 bar at the boundary
+   double atr;                     // scan-timeframe ATR in price units
+   double atr_pips;
+   double pip_size;
+   double point;
+   double spread_pips;
+   double spread_price;
+   int spread_source;              // HISTORICAL_SPREAD_* below
+   bool median_available;
+   double median_spread_pips;
+   double spread_ratio;
+   bool spread_z_available;
+   double spread_z;
+   double cost_to_atr;
+   bool rollover;
+   double session_score;
+   bool speed_ready[SPEED_WINDOW_COUNT];
+   double speed_z_up[SPEED_WINDOW_COUNT];   // signed for DIR_UP; negate for DIR_DOWN
+   double acceleration_up;                  // ATR per minute, signed for DIR_UP
+   bool tick_volume_available;
+   double tick_volume_z;
+   double move5_atr_up;                     // five-minute close move in ATR, signed for DIR_UP
+   bool m5_available;
+   double m5_move_up;                       // last closed 5-minute bar move / ATR5
+   bool m15_available;
+   double m15_move_up;
+};
 
 void BuildBaseHistoricalParams(HistoricalParams &params)
 {
@@ -1368,21 +1481,16 @@ void BuildBaseHistoricalParams(HistoricalParams &params)
    params.min_confidence = MinDisplayConfidence;
    params.max_spread_to_atr = MaxSpreadToAtrRatio;
    params.max_overextension_atr = MaxOverextensionAtr;
-   params.min_impulse_z = MinImpulseZForSignal;
-   params.outcome_target_atr = OutcomeTargetAtr;
-   params.outcome_stop_atr = OutcomeStopAtr;
+   params.minute_impulse_z = MinImpulseZForSignal;
 }
 
+// Eight fixed candidate profiles. Every candidate is judged on the same
+// outcome definition (OutcomeTargetAtr / OutcomeStopAtr), so a candidate can
+// only win on better signals, never on a more forgiving target geometry.
 void BuildAutotuneCandidate(const int candidate, const HistoricalParams &base_params, HistoricalParams &params)
 {
    params = base_params;
    params.name = "C" + IntegerToString(candidate);
-
-   if(candidate == 0)
-   {
-      params.name = "CURRENT";
-      return;
-   }
 
    if(candidate == 1)
    {
@@ -1393,9 +1501,7 @@ void BuildAutotuneCandidate(const int candidate, const HistoricalParams &base_pa
       params.min_confidence = 58.0;
       params.max_spread_to_atr = 0.50;
       params.max_overextension_atr = 2.20;
-      params.min_impulse_z = 1.05;
-      params.outcome_target_atr = 0.45;
-      params.outcome_stop_atr = 0.30;
+      params.minute_impulse_z = 1.05;
    }
    else if(candidate == 2)
    {
@@ -1406,9 +1512,7 @@ void BuildAutotuneCandidate(const int candidate, const HistoricalParams &base_pa
       params.min_confidence = 60.0;
       params.max_spread_to_atr = 0.45;
       params.max_overextension_atr = 2.00;
-      params.min_impulse_z = 1.20;
-      params.outcome_target_atr = 0.50;
-      params.outcome_stop_atr = 0.35;
+      params.minute_impulse_z = 1.20;
    }
    else if(candidate == 3)
    {
@@ -1419,9 +1523,7 @@ void BuildAutotuneCandidate(const int candidate, const HistoricalParams &base_pa
       params.min_confidence = 62.0;
       params.max_spread_to_atr = 0.35;
       params.max_overextension_atr = 1.80;
-      params.min_impulse_z = 1.25;
-      params.outcome_target_atr = 0.50;
-      params.outcome_stop_atr = 0.35;
+      params.minute_impulse_z = 1.25;
    }
    else if(candidate == 4)
    {
@@ -1432,9 +1534,7 @@ void BuildAutotuneCandidate(const int candidate, const HistoricalParams &base_pa
       params.min_confidence = 62.0;
       params.max_spread_to_atr = 0.45;
       params.max_overextension_atr = 1.80;
-      params.min_impulse_z = 1.30;
-      params.outcome_target_atr = 0.55;
-      params.outcome_stop_atr = 0.35;
+      params.minute_impulse_z = 1.30;
    }
    else if(candidate == 5)
    {
@@ -1445,9 +1545,7 @@ void BuildAutotuneCandidate(const int candidate, const HistoricalParams &base_pa
       params.min_confidence = 64.0;
       params.max_spread_to_atr = 0.40;
       params.max_overextension_atr = 1.60;
-      params.min_impulse_z = 1.35;
-      params.outcome_target_atr = 0.55;
-      params.outcome_stop_atr = 0.40;
+      params.minute_impulse_z = 1.35;
    }
    else if(candidate == 6)
    {
@@ -1458,9 +1556,7 @@ void BuildAutotuneCandidate(const int candidate, const HistoricalParams &base_pa
       params.min_confidence = 64.0;
       params.max_spread_to_atr = 0.45;
       params.max_overextension_atr = 2.20;
-      params.min_impulse_z = 1.10;
-      params.outcome_target_atr = 0.60;
-      params.outcome_stop_atr = 0.35;
+      params.minute_impulse_z = 1.10;
    }
    else if(candidate == 7)
    {
@@ -1471,9 +1567,7 @@ void BuildAutotuneCandidate(const int candidate, const HistoricalParams &base_pa
       params.min_confidence = 66.0;
       params.max_spread_to_atr = 0.35;
       params.max_overextension_atr = 1.80;
-      params.min_impulse_z = 1.40;
-      params.outcome_target_atr = 0.60;
-      params.outcome_stop_atr = 0.40;
+      params.minute_impulse_z = 1.40;
    }
    else
    {
@@ -1484,13 +1578,11 @@ void BuildAutotuneCandidate(const int candidate, const HistoricalParams &base_pa
       params.min_confidence = 60.0;
       params.max_spread_to_atr = 0.55;
       params.max_overextension_atr = 2.10;
-      params.min_impulse_z = 1.15;
-      params.outcome_target_atr = 0.50;
-      params.outcome_stop_atr = 0.30;
+      params.minute_impulse_z = 1.15;
    }
 }
 
-void RunAutotuneBacktest(const HistoricalParams &base_params)
+bool RunAutotuneBacktest(const HistoricalParams &base_params)
 {
    HistoricalParams candidates[AUTOTUNE_CANDIDATE_COUNT];
    HistoricalBacktestStats results[AUTOTUNE_CANDIDATE_COUNT];
@@ -1498,7 +1590,8 @@ void RunAutotuneBacktest(const HistoricalParams &base_params)
    for(int candidate = 1; candidate < AUTOTUNE_CANDIDATE_COUNT; candidate++)
       BuildAutotuneCandidate(candidate, base_params, candidates[candidate]);
 
-   RunHistoricalBacktestSet(candidates, results, AUTOTUNE_CANDIDATE_COUNT);
+   if(!RunHistoricalBacktestSet(candidates, results, AUTOTUNE_CANDIDATE_COUNT))
+      return false;
 
    int best = 0;
    double best_objective = AutotuneObjective(results[0]);
@@ -1512,11 +1605,13 @@ void RunAutotuneBacktest(const HistoricalParams &base_params)
       }
    }
 
-   // Historical results are advisory only: the source has no holdout or walk-forward control.
-   // The instance stays parked in AUTOTUNE afterwards, exactly like VALIDATION:
-   // switching to LIVE here wiped the report off the chart on the next scan
-   // and let alerts fire from a run the user started as an analysis.
+   // Historical results are advisory only: the source has no holdout or
+   // walk-forward control. The instance stays parked in AUTOTUNE afterwards,
+   // exactly like VALIDATION: switching to LIVE here wiped the report off the
+   // chart on the next scan and let alerts fire from a run the user started as
+   // an analysis.
    BuildAutotuneReport(results[0], results[best], base_params, candidates[best]);
+   return true;
 }
 
 bool HasSufficientAutotuneSample(const HistoricalBacktestStats &stats)
@@ -1526,9 +1621,8 @@ bool HasSufficientAutotuneSample(const HistoricalBacktestStats &stats)
 
 double AutotuneObjective(const HistoricalBacktestStats &stats)
 {
-   // A candidate below the sample floor is not ranked at all. The previous form
-   // ordered these by signal count, so an under-sampled candidate could win on
-   // sample size alone and then be printed as a recommendation.
+   // A candidate below the sample floor is not ranked at all, so an
+   // under-sampled candidate can never win on sample size alone.
    if(!HasSufficientAutotuneSample(stats))
       return -100000.0;
 
@@ -1539,18 +1633,20 @@ double AutotuneObjective(const HistoricalBacktestStats &stats)
           ScoreEdge(stats) * 0.35;
 }
 
-void RunHistoricalBacktest(const HistoricalParams &params, HistoricalBacktestStats &stats)
+bool RunHistoricalBacktest(const HistoricalParams &params, HistoricalBacktestStats &stats)
 {
    HistoricalParams single_set[1];
    HistoricalBacktestStats single_stats[1];
    single_set[0] = params;
-   RunHistoricalBacktestSet(single_set, single_stats, 1);
+   bool completed = RunHistoricalBacktestSet(single_set, single_stats, 1);
    stats = single_stats[0];
+   return completed;
 }
 
 // Every parameter set is scored against the same in-memory history, so a full
-// Autotune sweep loads each symbol once instead of once per candidate.
-void RunHistoricalBacktestSet(HistoricalParams &params_set[],
+// Autotune sweep loads each symbol once and computes each boundary's features
+// once for all candidates. Returns false when the terminal asked us to stop.
+bool RunHistoricalBacktestSet(HistoricalParams &params_set[],
                               HistoricalBacktestStats &stats_set[],
                               const int set_count)
 {
@@ -1566,18 +1662,30 @@ void RunHistoricalBacktestSet(HistoricalParams &params_set[],
    for(int s = 0; s < symbol_count; s++)
    {
       if(IsStopped())
-         return;
+         return false;
 
       MqlRates rates[];
       int copied = LoadHistoricalM1Rates(symbols[s], rates);
       if(copied <= 0)
+      {
+         PrintFormat("FXNews %s: %s has no M1 history in the window (error %d) and is skipped; "
+                     "open a chart of the symbol so the terminal downloads it, then re-run.",
+                     OperatingModeText(), symbols[s], GetLastError());
          continue;
+      }
 
       datetime first_time = rates[0].time;
       datetime last_time = rates[copied - 1].time;
+      double achieved_days = (double)(last_time - first_time) / 86400.0;
+      if(achieved_days < 0.5 * (double)HistoricalLookbackDays)
+      {
+         PrintFormat("FXNews %s: %s covers only %.1f of the requested %d days (%d M1 bars).",
+                     OperatingModeText(), symbols[s], achieved_days, HistoricalLookbackDays, copied);
+      }
       for(int c = 0; c < set_count; c++)
       {
          stats_set[c].symbols_loaded++;
+         stats_set[c].bars_loaded += copied;
          if(stats_set[c].from_time == 0 || first_time < stats_set[c].from_time)
             stats_set[c].from_time = first_time;
          if(last_time > stats_set[c].to_time)
@@ -1592,18 +1700,15 @@ void RunHistoricalBacktestSet(HistoricalParams &params_set[],
          {
             continue;
          }
-
-         for(int c = 0; c < set_count; c++)
-         {
-            if(IsStopped())
-               return;
-            ProcessHistoricalProfile(profile_index, rates, copied, params_set[c], stats_set[c]);
-         }
+         if(!ProcessHistoricalProfile(profile_index, rates, copied, params_set, stats_set, set_count))
+            return false;
       }
 
-      PrintFormat("FXNews %s: %d/%d symbols processed (%s)",
-                  OperatingModeText(), s + 1, symbol_count, symbols[s]);
+      PrintFormat("FXNews %s: %d/%d symbols processed (%s, %d M1 bars, %.1f days)",
+                  OperatingModeText(), s + 1, symbol_count, symbols[s], copied, achieved_days);
    }
+
+   return true;
 }
 
 int CollectHistoricalSymbols(string &symbols[])
@@ -1615,19 +1720,7 @@ int CollectHistoricalSymbols(string &symbols[])
    {
       if(!g_profiles[i].valid || !g_profiles[i].selected)
          continue;
-
-      string candidate = g_profiles[i].symbol_upper;
-      bool exists = false;
-      for(int j = 0; j < ArraySize(symbols); j++)
-      {
-         if(UpperAscii(symbols[j]) == candidate)
-         {
-            exists = true;
-            break;
-         }
-      }
-
-      if(exists)
+      if(SymbolListContains(symbols, g_profiles[i].symbol))
          continue;
 
       int next = ArraySize(symbols);
@@ -1639,6 +1732,8 @@ int CollectHistoricalSymbols(string &symbols[])
    return ArraySize(symbols);
 }
 
+// Oldest-first M1 history ending at the last closed bar. CopyRates into a
+// fresh, non-series array always delivers index 0 as the oldest bar.
 int LoadHistoricalM1Rates(const string symbol, MqlRates &rates[])
 {
    if(ArrayResize(rates, 0) != 0)
@@ -1650,285 +1745,635 @@ int LoadHistoricalM1Rates(const string symbol, MqlRates &rates[])
 
    datetime from_time = last_closed - (datetime)HistoricalLookbackDays * 86400;
    ResetLastError();
+   ArraySetAsSeries(rates, false);
    int copied = CopyRates(symbol, PERIOD_M1, from_time, last_closed, rates);
    if(copied <= 0)
       return 0;
 
-   ArraySetAsSeries(rates, false);
-   if(copied > 1 && rates[0].time > rates[copied - 1].time)
-      ReverseRates(rates);
-
    return ArraySize(rates);
 }
 
-void ReverseRates(MqlRates &rates[])
+// Largest of the candidates' range lookbacks, so the aggregated bars are built
+// once per boundary and serve every candidate.
+int MaxRangeLookback(HistoricalParams &params_set[], const int set_count)
 {
-   int total = ArraySize(rates);
-   for(int i = 0; i < total / 2; i++)
-   {
-      MqlRates tmp = rates[i];
-      rates[i] = rates[total - 1 - i];
-      rates[total - 1 - i] = tmp;
-   }
+   int longest = 1;
+   for(int c = 0; c < set_count; c++)
+      longest = IntMax(longest, params_set[c].range_lookback);
+   return longest;
 }
 
-void ProcessHistoricalProfile(const int profile_index,
+// Scans one symbol/timeframe profile over the loaded history for every
+// candidate at once. Boundaries are sub-sampled uniformly so at most
+// HistoricalMaxBoundariesPerProfile are evaluated; the report prints the
+// achieved coverage. Returns false when the terminal asked us to stop.
+bool ProcessHistoricalProfile(const int profile_index,
                               MqlRates &rates[],
                               const int copied,
-                              const HistoricalParams &params,
-                              HistoricalBacktestStats &stats)
+                              HistoricalParams &params_set[],
+                              HistoricalBacktestStats &stats_set[],
+                              const int set_count)
 {
    int tf_minutes = TimeframeMinutes(g_profiles[profile_index].scan_timeframe);
-   if(tf_minutes <= 0)
-      return;
+   if(tf_minutes <= 0 || set_count <= 0)
+      return true;
 
-   int required = (params.range_lookback + ATRPeriod + 4) * tf_minutes + 70;
+   int max_lookback = MaxRangeLookback(params_set, set_count);
+   int bars_needed = IntMax(max_lookback, IntMax(ATRPeriod + 1, HISTORICAL_VOLUME_BASELINE_BARS)) + 1;
+   int required = bars_needed * tf_minutes + 70;
    required = IntMax(required, HistoricalWarmupBars);
    int last_index = copied - OutcomeHorizonMinutes3 - 2;
    if(last_index <= required)
-      return;
+      return true;
 
-   stats.profiles_tested++;
    int estimated_boundaries = IntMax(1, (last_index - required) / tf_minutes);
-   int boundary_stride = IntMax(1, (estimated_boundaries + HistoricalMaxSignalsPerProfile - 1) /
-                                HistoricalMaxSignalsPerProfile);
-   boundary_stride = IntMax(boundary_stride,
-                            (HistoricalStepMinutes + tf_minutes - 1) / tf_minutes);
-   int boundary_seen = 0;
-   int cooldown_bars = IntMax(1, ValidSignalCooldownSeconds / 60);
-   int next_up_allowed = -1000000;
-   int next_down_allowed = -1000000;
+   int boundary_stride = IntMax(1, (estimated_boundaries + HistoricalMaxBoundariesPerProfile - 1) /
+                                HistoricalMaxBoundariesPerProfile);
+   boundary_stride = IntMax(boundary_stride, (HistoricalStepMinutes + tf_minutes - 1) / tf_minutes);
+   for(int c = 0; c < set_count; c++)
+   {
+      stats_set[c].boundaries_total += estimated_boundaries;
+      stats_set[c].boundary_stride_max = IntMax(stats_set[c].boundary_stride_max, boundary_stride);
+   }
 
+   datetime next_up_allowed[];
+   datetime next_down_allowed[];
+   bool profile_counted[];
+   if(ArrayResize(next_up_allowed, set_count) != set_count ||
+      ArrayResize(next_down_allowed, set_count) != set_count ||
+      ArrayResize(profile_counted, set_count) != set_count)
+   {
+      return true;
+   }
+   for(int c = 0; c < set_count; c++)
+   {
+      next_up_allowed[c] = 0;
+      next_down_allowed[c] = 0;
+      profile_counted[c] = false;
+   }
+
+   HistoricalBar bars[];
+   if(ArrayResize(bars, bars_needed) != bars_needed)
+      return true;
+
+   // Last-resort spread for bars without a spread column: the symbol's
+   // current spread, read once per profile.
+   double symbol_spread_pips = 0.0;
+   if(g_profiles[profile_index].pip_size > 0.0)
+   {
+      symbol_spread_pips = (double)SymbolInfoInteger(g_profiles[profile_index].symbol, SYMBOL_SPREAD) *
+                           g_profiles[profile_index].point / g_profiles[profile_index].pip_size;
+   }
+
+   int boundary_seen = 0;
    for(int i = required; i < last_index; i++)
    {
       if(IsStopped())
-         return;
+         return false;
       if(!IsHistoricalEvaluationBoundary(rates[i].time + 60, tf_minutes))
          continue;
       if((boundary_seen++ % boundary_stride) != 0)
          continue;
 
-      stats.bars_scanned++;
-
-      HistoricalSignalScore up_score;
-      HistoricalSignalScore down_score;
-      BuildHistoricalSignalScore(profile_index, rates, copied, i, DIR_UP, params, up_score);
-      BuildHistoricalSignalScore(profile_index, rates, copied, i, DIR_DOWN, params, down_score);
-
-      HistoricalSignalScore best_score = up_score;
-      if(down_score.valid && (!up_score.valid || down_score.displayed_score > up_score.displayed_score))
-         best_score = down_score;
-
-      if(!best_score.valid || best_score.displayed_score < params.min_confidence)
+      HistoricalBoundaryFeatures features;
+      if(!BuildHistoricalBoundaryFeatures(profile_index, rates, copied, i, tf_minutes, symbol_spread_pips,
+                                          bars, bars_needed, features))
+      {
+         for(int c = 0; c < set_count; c++)
+            stats_set[c].boundaries_rejected++;
          continue;
+      }
 
-      if(best_score.direction == DIR_UP && i < next_up_allowed)
-         continue;
-      if(best_score.direction == DIR_DOWN && i < next_down_allowed)
-         continue;
+      for(int c = 0; c < set_count; c++)
+      {
+         stats_set[c].bars_scanned++;
+         if(!profile_counted[c])
+         {
+            stats_set[c].profiles_tested++;
+            profile_counted[c] = true;
+         }
+         if(features.spread_source == HISTORICAL_SPREAD_BAR)
+            stats_set[c].spread_from_bar++;
+         else if(features.spread_source == HISTORICAL_SPREAD_MEDIAN)
+            stats_set[c].spread_from_median++;
+         else if(features.spread_source == HISTORICAL_SPREAD_SYMBOL)
+            stats_set[c].spread_from_symbol++;
+         else
+            stats_set[c].spread_unavailable++;
 
-      HistoricalOutcome outcome;
-      EvaluateHistoricalOutcome(rates, copied, i, best_score.direction,
-                                rates[i].close, best_score.atr_price,
-                                params,
-                                outcome);
-      AddHistoricalStats(stats, best_score, outcome);
+         double range_high = 0.0;
+         double range_low = 0.0;
+         if(!HistoricalRangeBox(bars, params_set[c].range_lookback, range_high, range_low))
+            continue;
 
-      if(best_score.direction == DIR_UP)
-         next_up_allowed = i + cooldown_bars;
-      else
-         next_down_allowed = i + cooldown_bars;
+         HistoricalSignalScore up_score;
+         HistoricalSignalScore down_score;
+         ScoreHistoricalBoundary(features, bars[0], range_high, range_low, DIR_UP, params_set[c], up_score);
+         ScoreHistoricalBoundary(features, bars[0], range_high, range_low, DIR_DOWN, params_set[c], down_score);
 
+         HistoricalSignalScore best_score = up_score;
+         if(down_score.valid && (!up_score.valid || down_score.displayed_score > up_score.displayed_score))
+            best_score = down_score;
+         if(!best_score.valid || !MeetsThreshold(best_score.displayed_score, params_set[c].min_confidence))
+            continue;
+
+         if(best_score.direction == DIR_UP && features.close_time < next_up_allowed[c])
+            continue;
+         if(best_score.direction == DIR_DOWN && features.close_time < next_down_allowed[c])
+            continue;
+
+         HistoricalOutcome outcome;
+         EvaluateHistoricalOutcome(rates, copied, i, best_score.direction, bars[0].close,
+                                   best_score.spread_price, best_score.atr_price, outcome);
+         if(!outcome.evaluable)
+         {
+            stats_set[c].signals_unevaluable++;
+            continue;
+         }
+         AddHistoricalStats(stats_set[c], best_score, outcome);
+
+         if(best_score.direction == DIR_UP)
+            next_up_allowed[c] = features.close_time + ValidSignalCooldownSeconds;
+         else
+            next_down_allowed[c] = features.close_time + ValidSignalCooldownSeconds;
+      }
    }
+
+   return true;
 }
 
-void BuildHistoricalSignalScore(const int profile_index,
-                                MqlRates &rates[],
-                                const int copied,
-                                const int index,
-                                const int direction,
-                                const HistoricalParams &params,
-                                HistoricalSignalScore &score)
+// Index of the last M1 bar whose open time is at or before `time`, or -1.
+int HistoricalIndexAtOrBefore(MqlRates &rates[], const int copied, const datetime time)
 {
-   ResetHistoricalSignalScore(score, direction);
+   int low = 0;
+   int high = copied - 1;
+   int found = -1;
+   while(low <= high)
+   {
+      int mid = (low + high) / 2;
+      if(rates[mid].time <= time)
+      {
+         found = mid;
+         low = mid + 1;
+      }
+      else
+         high = mid - 1;
+   }
+   return found;
+}
 
-   int tf_minutes = TimeframeMinutes(g_profiles[profile_index].scan_timeframe);
-   if(tf_minutes <= 0 || index <= 0 || index >= copied)
-      return;
+// Aggregates the bar of `tf_seconds` that ends `bar_back` bars before the
+// boundary closing at `close_time`, by TIME rather than by index count, so a
+// missing minute inside the bar does not throw the whole bar away. The bar is
+// valid when at least HISTORICAL_MIN_BAR_COVERAGE of its minutes exist.
+bool AggregateHistoricalBarAt(MqlRates &rates[],
+                              const int copied,
+                              const datetime close_time,
+                              const int tf_seconds,
+                              const int bar_back,
+                              HistoricalBar &bar)
+{
+   bar.valid = false;
+   datetime bar_close = close_time - (datetime)bar_back * tf_seconds;
+   datetime last_minute = bar_close - 60;
+   datetime first_minute = bar_close - tf_seconds;
 
-   double current_open = 0.0;
-   double current_high = 0.0;
-   double current_low = 0.0;
-   double current_close = 0.0;
-   double current_volume = 0.0;
-   if(!AggregateHistoricalTfBar(rates, index, tf_minutes,
-                                current_open, current_high, current_low,
-                                current_close, current_volume))
+   int end_index = HistoricalIndexAtOrBefore(rates, copied, last_minute);
+   if(end_index < 0 || rates[end_index].time < first_minute)
+      return false;
+
+   int minutes = 0;
+   bar.high = rates[end_index].high;
+   bar.low = rates[end_index].low;
+   bar.close = rates[end_index].close;
+   bar.volume = 0.0;
+   int start_index = end_index;
+   for(int j = end_index; j >= 0 && rates[j].time >= first_minute; j--)
+   {
+      bar.high = MathMax(bar.high, rates[j].high);
+      bar.low = MathMin(bar.low, rates[j].low);
+      bar.volume += (double)rates[j].tick_volume;
+      start_index = j;
+      minutes++;
+   }
+   bar.open = rates[start_index].open;
+
+   double coverage = (double)minutes / (double)(tf_seconds / 60);
+   bar.valid = (coverage >= HISTORICAL_MIN_BAR_COVERAGE);
+   return bar.valid;
+}
+
+// ATR of the scan timeframe from the aggregated bars 1..period, with each
+// bar's true range measured against the previous aggregated bar's close.
+double HistoricalATRFromBars(HistoricalBar &bars[], const int bars_available, const int period)
+{
+   double total = 0.0;
+   int counted = 0;
+   for(int bar = 1; bar <= period && bar + 1 < bars_available; bar++)
+   {
+      if(!bars[bar].valid || !bars[bar + 1].valid)
+         break;
+      double previous_close = bars[bar + 1].close;
+      total += Max3(bars[bar].high - bars[bar].low,
+                    MathAbs(bars[bar].high - previous_close),
+                    MathAbs(bars[bar].low - previous_close));
+      counted++;
+   }
+   if(counted <= 0)
+      return 0.0;
+   return total / (double)counted;
+}
+
+// The range box over the aggregated bars 1..lookback, exactly as the live
+// box is built from the closed bars before the trigger bar.
+bool HistoricalRangeBox(HistoricalBar &bars[], const int lookback, double &range_high, double &range_low)
+{
+   if(lookback < 1 || lookback >= ArraySize(bars))
+      return false;
+   range_high = bars[1].high;
+   range_low = bars[1].low;
+   for(int bar = 1; bar <= lookback; bar++)
+   {
+      if(!bars[bar].valid)
+         return false;
+      range_high = MathMax(range_high, bars[bar].high);
+      range_low = MathMin(range_low, bars[bar].low);
+   }
+   return (range_high > range_low);
+}
+
+double HistoricalSpreadPips(const MqlRates &rate, const double point, const double pip_size)
+{
+   if(rate.spread > 0)
+      return (double)rate.spread * point / pip_size;
+   return 0.0;   // no spread column: unmeasured, never an assumed value
+}
+
+// Median and robust z of the spread over the previous `lookback` M1 bars that
+// carry a spread; unavailable until MIN_SPREAD_SAMPLES of them exist.
+bool HistoricalSpreadStatistics(MqlRates &rates[],
+                                const int index,
+                                const double point,
+                                const double pip_size,
+                                const int lookback,
+                                const double current_spread_pips,
+                                double &median,
+                                double &robust_z)
+{
+   median = 0.0;
+   robust_z = 0.0;
+   int count = IntMin(lookback, index);
+   if(count <= 0 || !PrepareScratch(g_hist_scratch, count, HISTORICAL_SCRATCH_RESERVE))
+      return false;
+
+   int added = 0;
+   for(int i = 0; i < count; i++)
+   {
+      double spread = HistoricalSpreadPips(rates[index - 1 - i], point, pip_size);
+      if(spread <= 0.0)
+         continue;
+      g_hist_scratch[added] = spread;
+      added++;
+   }
+   if(added < MIN_SPREAD_SAMPLES || !PrepareScratch(g_hist_scratch, added, HISTORICAL_SCRATCH_RESERVE))
+      return false;
+
+   median = MedianOfArray(g_hist_scratch, added);
+   double mad = MedianAbsDeviationInto(g_mad_scratch, g_hist_scratch, added, median, HISTORICAL_SCRATCH_RESERVE);
+   robust_z = RobustZ(current_spread_pips, median, mad);
+   return true;
+}
+
+// Robust z of the current aggregated bar's tick volume against the previous
+// aggregated bars, the historical stand-in for the live volume baseline.
+bool HistoricalTickVolumeZ(HistoricalBar &bars[], const int bars_available, double &z)
+{
+   z = 0.0;
+   int count = IntMin(HISTORICAL_VOLUME_BASELINE_BARS, bars_available - 1);
+   if(count <= 10 || !PrepareScratch(g_hist_scratch, count, HISTORICAL_SCRATCH_RESERVE))
+      return false;
+
+   int added = 0;
+   for(int bar = 1; bar <= count; bar++)
+   {
+      if(!bars[bar].valid)
+         continue;
+      g_hist_scratch[added] = bars[bar].volume;
+      added++;
+   }
+   if(added <= 10 || !PrepareScratch(g_hist_scratch, added, HISTORICAL_SCRATCH_RESERVE))
+      return false;
+
+   double median = MedianOfArray(g_hist_scratch, added);
+   double mad = MedianAbsDeviationInto(g_mad_scratch, g_hist_scratch, added, median, HISTORICAL_SCRATCH_RESERVE);
+   z = RobustZ(bars[0].volume, median, mad);
+   return true;
+}
+
+// Minute-scale speed z: the close move over `window_minutes` in pips per
+// minute, against the distribution of the same window over the previous
+// `lookback` minutes. Signed for DIR_UP. A proxy for the live second-scale
+// windows, never comparable with them.
+bool HistoricalSpeedZ(MqlRates &rates[],
+                      const int index,
+                      const int window_minutes,
+                      const int lookback,
+                      const double pip_size,
+                      const double atr_pips,
+                      double &z)
+{
+   z = 0.0;
+   if(index <= window_minutes || pip_size <= 0.0)
+      return false;
+
+   int count = IntMin(lookback, index - window_minutes - 1);
+   if(count <= 10 || !PrepareScratch(g_hist_scratch, count, HISTORICAL_SCRATCH_RESERVE))
+      return false;
+
+   int added = 0;
+   for(int i = 0; i < count; i++)
+   {
+      int end_index = index - 1 - i;
+      int start_index = end_index - window_minutes;
+      // A pair spanning a gap is not a window of that length.
+      if(rates[end_index].time - rates[start_index].time != (datetime)window_minutes * 60)
+         continue;
+      g_hist_scratch[added] = (rates[end_index].close - rates[start_index].close) / pip_size / (double)window_minutes;
+      added++;
+   }
+   if(added <= 10 || !PrepareScratch(g_hist_scratch, added, HISTORICAL_SCRATCH_RESERVE))
+      return false;
+
+   int current_start = index - window_minutes;
+   if(rates[index].time - rates[current_start].time != (datetime)window_minutes * 60)
+      return false;
+   double current = (rates[index].close - rates[current_start].close) / pip_size / (double)window_minutes;
+   double median = MedianOfArray(g_hist_scratch, added);
+   double mad = MedianAbsDeviationInto(g_mad_scratch, g_hist_scratch, added, median, HISTORICAL_SCRATCH_RESERVE);
+   // The live floor is atr_pips/600 per second; per minute that is atr_pips/10.
+   z = RobustZ(current, median, mad, MathMax(atr_pips / 10.0, 0.01));
+   return true;
+}
+
+// Move of the last closed bar of `tf_seconds` at or before the boundary,
+// against that timeframe's own ATR, signed for DIR_UP. Mirrors the live
+// closed-bar M5/M15 context.
+bool HistoricalContextMove(MqlRates &rates[],
+                           const int copied,
+                           const datetime close_time,
+                           const int tf_seconds,
+                           double &move_atr)
+{
+   move_atr = 0.0;
+   datetime grid_close = close_time - (close_time % tf_seconds);
+   HistoricalBar bar_last;
+   HistoricalBar bar_previous;
+   if(!AggregateHistoricalBarAt(rates, copied, grid_close, tf_seconds, 0, bar_last) ||
+      !AggregateHistoricalBarAt(rates, copied, grid_close, tf_seconds, 1, bar_previous))
+   {
+      return false;
+   }
+
+   double total = 0.0;
+   int counted = 0;
+   HistoricalBar bar;
+   HistoricalBar older;
+   for(int k = 1; k <= ATRPeriod; k++)
+   {
+      if(!AggregateHistoricalBarAt(rates, copied, grid_close, tf_seconds, k, bar) ||
+         !AggregateHistoricalBarAt(rates, copied, grid_close, tf_seconds, k + 1, older))
+      {
+         break;
+      }
+      total += Max3(bar.high - bar.low, MathAbs(bar.high - older.close), MathAbs(bar.low - older.close));
+      counted++;
+   }
+   if(counted < ATRPeriod / 2 || total <= 0.0)
+      return false;
+
+   double atr = total / (double)counted;
+   move_atr = (bar_last.close - bar_previous.close) / atr;
+   return true;
+}
+
+// Everything a boundary offers that no candidate parameter changes.
+bool BuildHistoricalBoundaryFeatures(const int profile_index,
+                                     MqlRates &rates[],
+                                     const int copied,
+                                     const int index,
+                                     const int tf_minutes,
+                                     const double symbol_spread_pips,
+                                     HistoricalBar &bars[],
+                                     const int bars_needed,
+                                     HistoricalBoundaryFeatures &features)
+{
+   features.valid = false;
+   features.close_time = rates[index].time + 60;
+   int tf_seconds = tf_minutes * 60;
+
+   for(int bar = 0; bar < bars_needed; bar++)
+   {
+      if(!AggregateHistoricalBarAt(rates, copied, features.close_time, tf_seconds, bar, bars[bar]))
+      {
+         // The current bar and the ATR window are mandatory; deeper bars only
+         // matter to a range lookback that reaches them.
+         if(bar <= ATRPeriod + 1)
+            return false;
+      }
+   }
+
+   features.atr = HistoricalATRFromBars(bars, bars_needed, ATRPeriod);
+   if(features.atr <= 0.0)
+      return false;
+
+   double pip_size = g_profiles[profile_index].pip_size;
+   double point = g_profiles[profile_index].point;
+   if(pip_size <= 0.0 || point <= 0.0)
+      return false;
+   features.atr_pips = MathMax(features.atr / pip_size, 0.1);
+   features.pip_size = pip_size;
+   features.point = point;
+
+   double bar_spread_pips = HistoricalSpreadPips(rates[index], point, pip_size);
+   features.median_available = HistoricalSpreadStatistics(rates, index, point, pip_size,
+                                                          HISTORICAL_SPREAD_BASELINE_MINUTES,
+                                                          bar_spread_pips,
+                                                          features.median_spread_pips,
+                                                          features.spread_z);
+   if(bar_spread_pips > 0.0)
+   {
+      features.spread_pips = bar_spread_pips;
+      features.spread_source = HISTORICAL_SPREAD_BAR;
+   }
+   else if(features.median_available)
+   {
+      features.spread_pips = features.median_spread_pips;
+      features.spread_source = HISTORICAL_SPREAD_MEDIAN;
+   }
+   else if(symbol_spread_pips > 0.0)
+   {
+      features.spread_pips = symbol_spread_pips;
+      features.spread_source = HISTORICAL_SPREAD_SYMBOL;
+   }
+   else
+   {
+      features.spread_pips = 0.0;
+      features.spread_source = HISTORICAL_SPREAD_NONE;
+   }
+   features.spread_price = features.spread_pips * pip_size;
+   // The robust z compares the bar's own spread with the window; a stand-in
+   // spread has no z of its own.
+   features.spread_z_available = (features.median_available && features.spread_source == HISTORICAL_SPREAD_BAR);
+   if(!features.spread_z_available)
+      features.spread_z = 0.0;
+   features.spread_ratio = (features.median_available && features.median_spread_pips > 0.0 ?
+                            features.spread_pips / features.median_spread_pips : 0.0);
+   features.cost_to_atr = SafeDiv(features.spread_price, features.atr, 999.0);
+   features.rollover = (IgnoreRolloverTime && IsRolloverTime(features.close_time));
+   features.session_score = SessionQualityScore(features.close_time);
+
+   for(int window = 0; window < SPEED_WINDOW_COUNT; window++)
+   {
+      int minutes = g_speed_window_seconds[window];
+      int lookback = (minutes >= 30 ? 160 : 120);
+      features.speed_ready[window] = HistoricalSpeedZ(rates, index, minutes, lookback, pip_size,
+                                                      features.atr_pips, features.speed_z_up[window]);
+   }
+
+   int index5 = HistoricalIndexAtOrBefore(rates, copied, rates[index].time - 300);
+   int index30 = HistoricalIndexAtOrBefore(rates, copied, rates[index].time - 1800);
+   double move5_pips = (index5 >= 0 ? (rates[index].close - rates[index5].close) / pip_size : 0.0);
+   double move30_pips = (index30 >= 0 ? (rates[index].close - rates[index30].close) / pip_size : 0.0);
+   features.move5_atr_up = (index5 >= 0 ? move5_pips / features.atr_pips : 0.0);
+   features.acceleration_up = (index5 >= 0 && index30 >= 0 ?
+                               (move5_pips / 5.0 - move30_pips / 30.0) / features.atr_pips : 0.0);
+
+   features.tick_volume_available = HistoricalTickVolumeZ(bars, bars_needed, features.tick_volume_z);
+   features.m5_available = HistoricalContextMove(rates, copied, features.close_time, 300, features.m5_move_up);
+   features.m15_available = HistoricalContextMove(rates, copied, features.close_time, 900, features.m15_move_up);
+
+   features.valid = true;
+   return true;
+}
+
+// Scores one direction at a boundary through the shared composer.
+void ScoreHistoricalBoundary(const HistoricalBoundaryFeatures &features,
+                             const HistoricalBar &bar,
+                             const double range_high,
+                             const double range_low,
+                             const int direction,
+                             const HistoricalParams &params,
+                             HistoricalSignalScore &result)
+{
+   ResetHistoricalSignalScore(result, direction);
+   result.atr_price = features.atr;
+   result.spread_price = features.spread_price;
+
+   CompositeSignalScore score;
+   ResetCompositeSignalScore(score);
+
+   // Execution: the live gates on the spread terms bar data can measure.
+   score.execution.spread_pips = features.spread_pips;
+   score.execution.median_available = features.median_available;
+   score.execution.median_spread_pips = features.median_spread_pips;
+   score.execution.spread_ratio = features.spread_ratio;
+   score.execution.spread_z_available = features.spread_z_available;
+   score.execution.spread_z = features.spread_z;
+   score.execution.cost_to_atr = features.cost_to_atr;
+   if(features.rollover ||
+      features.spread_pips <= 0.0 || features.spread_pips > MaxSpreadPips ||
+      (features.median_available && features.spread_ratio > MaxSpreadMedianMultiplier) ||
+      features.cost_to_atr > params.max_spread_to_atr ||
+      (UseStrictExecutionGate && features.spread_z_available && features.spread_z > MaxSpreadZScore))
    {
       return;
    }
-
-   double atr = HistoricalATR(rates, index, tf_minutes, ATRPeriod);
-   if(atr <= 0.0)
-      return;
-
-   double range_high = 0.0;
-   double range_low = 0.0;
-   if(!HistoricalRangeBox(rates, index, tf_minutes, params.range_lookback, range_high, range_low))
-      return;
+   score.execution.score = BlendExecutionScore(score.execution, params.max_spread_to_atr, false);
+   score.execution.pass = true;
 
    double range_width = range_high - range_low;
    if(range_width <= 0.0)
       return;
 
-   double pip_size = g_profiles[profile_index].pip_size;
-   double point = g_profiles[profile_index].point;
-   if(pip_size <= 0.0 || point <= 0.0)
-      return;
-
-   double spread_pips = HistoricalSpreadPips(rates[index], point, pip_size);
-   double median_spread_pips = HistoricalMedianSpreadPips(rates, index, point, pip_size, 120);
-   double spread_price = spread_pips * pip_size;
-   double spread_ratio = SafeDiv(spread_pips, MathMax(median_spread_pips, 0.1), 1.0);
-   double spread_to_atr = SafeDiv(spread_price, atr, 999.0);
-
-   if(IgnoreRolloverTime && IsRolloverTime(rates[index].time + 60))
-      return;
-   if(spread_pips <= 0.0 || spread_pips > MaxSpreadPips ||
-      spread_ratio > MaxSpreadMedianMultiplier ||
-      spread_to_atr > params.max_spread_to_atr)
-   {
-      return;
-   }
-
-   double buffer = Max3(spread_price * 1.20,
-                        atr * params.breakout_buffer_atr,
-                        params.min_breakout_buffer_pips * pip_size);
+   double buffer = Max3(features.spread_price * 1.20,
+                        features.atr * params.breakout_buffer_atr,
+                        params.min_breakout_buffer_pips * features.pip_size);
    double boundary = (direction == DIR_UP ? range_high + buffer : range_low - buffer);
-   double breakout_distance = (direction == DIR_UP ? current_close - boundary : boundary - current_close);
-   bool breakout_candidate = (breakout_distance > 0.0);
+   double distance = (direction == DIR_UP ? bar.close - boundary : boundary - bar.close);
 
-   double speed5 = HistoricalSpeedZ(rates, index, 5, 120, direction, pip_size);
-   double speed10 = HistoricalSpeedZ(rates, index, 10, 120, direction, pip_size);
-   double speed30 = HistoricalSpeedZ(rates, index, 30, 160, direction, pip_size);
-   // The 60s window was computed and discarded here, mirroring the dead
-   // speed_60s_z in the live scorer. Both models now use the 5/10/30 triple.
-   double impulse_z = Max3(speed5, speed10, speed30);
-   bool impulse_candidate = (impulse_z >= params.min_impulse_z);
-   if(!breakout_candidate && !impulse_candidate)
-      return;
-
-   double execution_score = Clamp01(1.0 -
-                                    SmoothStep(params.max_spread_to_atr * 0.45,
-                                               params.max_spread_to_atr,
-                                               spread_to_atr));
-   execution_score = Clamp01(execution_score * 0.55 +
-                             (1.0 - SmoothStep(1.0, MaxSpreadMedianMultiplier, spread_ratio)) * 0.45);
-
-   double range_atr = range_width / atr;
-   double compression = Clamp01(0.10 + 0.90 *
-                                SmoothStep(0.65, 1.80, range_atr) *
-                                (1.0 - SmoothStep(7.0, 16.0, range_atr)));
-   double distance_units = SafeDiv(MathMax(breakout_distance, 0.0), buffer, 0.0);
-   double distance_atr = SafeDiv(MathMax(breakout_distance, 0.0), atr, 0.0);
-   double extension_penalty = SmoothStep(params.max_overextension_atr,
-                                         params.max_overextension_atr * 1.80,
-                                         distance_atr);
-   double distance_score = Clamp01(SmoothStep(0.20, 1.60, distance_units) *
-                                   (1.0 - extension_penalty * 0.45));
-   double candle_range = current_high - current_low;
-   double close_location = 0.50;
-   double body_quality = 0.50;
-   double wick_penalty = 0.0;
-   if(candle_range > 0.0)
+   // Breakout: the bar closed outside the box, so the price has held outside
+   // for at least the minute the close represents; sub-minute hold is not
+   // resolvable in history and no re-entry is tracked.
+   if(UseTechnicalBreakoutEngine)
    {
-      close_location = (direction == DIR_UP ?
-                        Clamp01((current_close - current_low) / candle_range) :
-                        Clamp01((current_high - current_close) / candle_range));
-      double body = MathAbs(current_close - current_open);
-      double body_ratio = body / candle_range;
-      double directional_body = DirectionalValue(current_close - current_open, direction) / candle_range;
-      body_quality = Clamp01(SmoothStep(0.18, 0.62, body_ratio) * 0.65 +
-                             SmoothStep(0.03, 0.38, directional_body) * 0.35);
-      double rejection_wick = (direction == DIR_UP ?
-                               current_high - MathMax(current_open, current_close) :
-                               MathMin(current_open, current_close) - current_low);
-      wick_penalty = Clamp01(rejection_wick / candle_range);
+      ComputeBreakoutStructure(direction, features.atr, range_width, distance,
+                               MathMax(buffer, features.point), params.max_overextension_atr,
+                               bar.open, bar.high, bar.low, bar.close,
+                               (distance > 0.0 ? 60.0 : -1.0), -1.0, score.breakout);
    }
 
-   double hold_score = HistoricalHoldScore(rates, index, direction, boundary);
-   double breakout_score = Clamp01(compression * 0.17 +
-                                   distance_score * 0.24 +
-                                   close_location * 0.17 +
-                                   hold_score * 0.20 +
-                                   body_quality * 0.17 -
-                                   wick_penalty * 0.15);
+   // Impulse: minute-scale proxies with their own threshold.
+   if(UseImpulseBreakoutEngine)
+   {
+      double speed_max = -999.0;
+      bool any_window = false;
+      for(int window = 0; window < SPEED_WINDOW_COUNT; window++)
+      {
+         if(!features.speed_ready[window])
+            continue;
+         double z = features.speed_z_up[window] * (double)direction;
+         if(window == 0)
+            score.impulse.speed_5s_z = z;
+         else if(window == 1)
+            score.impulse.speed_10s_z = z;
+         else
+            score.impulse.speed_30s_z = z;
+         speed_max = MathMax(speed_max, z);
+         any_window = true;
+      }
+      if(any_window)
+      {
+         score.impulse.measured = true;
+         double speed_score = Clamp01(ScoreFromZ(speed_max, params.minute_impulse_z, params.minute_impulse_z + 2.75));
+         score.impulse.acceleration_score = SmoothStep(0.0, HISTORICAL_ACCELERATION_FULL_ATR_PER_MINUTE,
+                                                       features.acceleration_up * (double)direction);
+         double directional_range = (direction == DIR_UP ? bar.high - bar.open : bar.open - bar.low);
+         score.impulse.atr_expansion_score = SmoothStep(0.20, 1.25, SafeDiv(directional_range, features.atr, 0.0));
+         score.impulse.tick_volume_available = features.tick_volume_available;
+         score.impulse.tick_volume_z = features.tick_volume_z;
+         double move5 = features.move5_atr_up * (double)direction;
+         double continuation = SmoothStep(0.0, 0.80, move5);
+         score.impulse.exhaustion_penalty = SmoothStep(MaxExhaustionAtr, MaxExhaustionAtr * 1.70, move5);
+         BlendImpulseScore(score.impulse, speed_score, true, true, continuation);
+         score.impulse.pass = (speed_max >= params.minute_impulse_z || score.impulse.atr_expansion_score >= 0.45);
+      }
+   }
 
-   double speed_score = ScoreFromZ(impulse_z, params.min_impulse_z, params.min_impulse_z + 2.75);
-   double acceleration = SmoothStep(0.0, 0.10,
-                                    SafeDiv(DirectionalValue(rates[index].close - rates[index - 5].close, direction) / pip_size, 5.0, 0.0) -
-                                    SafeDiv(DirectionalValue(rates[index].close - rates[index - 30].close, direction) / pip_size, 30.0, 0.0));
-   double atr_expansion = SmoothStep(0.20, 1.25,
-                                     SafeDiv(DirectionalValue((direction == DIR_UP ?
-                                                              current_high - current_open :
-                                                              current_open - current_low),
-                                                             DIR_UP),
-                                             atr,
-                                             0.0));
-   double volume_score = ScoreFromZ(HistoricalTickVolumeZ(rates, index, 160), 0.50, 2.80);
-   double continuation = SmoothStep(0.0, 0.80,
-                                    SafeDiv(DirectionalValue(rates[index].close - rates[index - 5].close, direction),
-                                            atr,
-                                            0.0));
-   double extended_atr = SafeDiv(DirectionalValue(rates[index].close - rates[index - 30].close, direction),
-                                 atr,
-                                 0.0);
-   double exhaustion = SmoothStep(params.max_overextension_atr, params.max_overextension_atr * 1.70, extended_atr);
-   double impulse_score = Clamp01(speed_score * 0.30 +
-                                  atr_expansion * 0.20 +
-                                  volume_score * 0.15 +
-                                  acceleration * 0.15 +
-                                  continuation * 0.20 -
-                                  exhaustion * 0.22);
+   if(!score.breakout.measured && !score.impulse.measured)
+      return;
+   bool engine_pass = ((UseTechnicalBreakoutEngine && score.breakout.pass) ||
+                       (UseImpulseBreakoutEngine && score.impulse.pass));
+   if(!engine_pass)
+      return;
 
-   double flow_score = HistoricalLocalFlowScore(rates, index, direction, atr);
-   double m5_context = SmoothStep(-0.10, 0.55,
-                                  SafeDiv(DirectionalValue(rates[index].close - rates[index - 5].close, direction),
-                                          atr,
-                                          0.0));
-   double m15_context = SmoothStep(-0.10, 0.45,
-                                   SafeDiv(DirectionalValue(rates[index].close - rates[index - 15].close, direction),
-                                           atr,
-                                           0.0));
-   double regime_score = Clamp01(SessionQualityScore(rates[index].time) * 0.35 +
-                                 m5_context * 0.30 +
-                                 m15_context * 0.25 +
-                                 (1.0 - SmoothStep(0.0, 4.5, MathAbs(range_atr - 3.0))) * 0.10);
+   // Flow and calendar are unavailable in history and leave the blend; the
+   // composer applies the same caps a live instance without them would get.
+   ComposeRegimeScore(score.regime, features.session_score,
+                      features.m5_available, features.m5_move_up * (double)direction,
+                      features.m15_available, features.m15_move_up * (double)direction,
+                      range_width / features.atr);
 
-   double raw01 = breakout_score * 0.26 +
-                  impulse_score * 0.26 +
-                  execution_score * 0.18 +
-                  flow_score * 0.16 +
-                  regime_score * 0.14;
-   double final_score = 100.0 * SmoothStep(0.35, 0.92, raw01);
+   CompositeContext context;
+   context.direction = direction;
+   context.m5_move_directional = features.m5_move_up * (double)direction;
+   context.m15_move_directional = features.m15_move_up * (double)direction;
+   context.age_seconds = 0;
+   context.age_limit_seconds = 0;
+   context.max_spread_to_atr = params.max_spread_to_atr;
+   ComposeSignalScore(score, context, false);
 
-   string caps = "";
-   if(hold_score < 0.35 && breakout_candidate)
-      final_score = ApplyHistoricalCap(final_score, 74.0, caps, "weak_hold");
-   if(body_quality < 0.35)
-      final_score = ApplyHistoricalCap(final_score, 79.0, caps, "weak_body");
-   if(flow_score < 0.35)
-      final_score = ApplyHistoricalCap(final_score, 69.0, caps, "flow_conflict");
-   if(UseMultiTimeframeContextCaps && (m5_context < 0.20 || m15_context < 0.20))
-      final_score = ApplyHistoricalCap(final_score, 69.0, caps, "mtf_reject");
-   if(exhaustion >= 0.45)
-      final_score = ApplyHistoricalCap(final_score, 75.0, caps, "overextended");
-   if(final_score > 95.0)
-      final_score = 95.0;
-
-   score.valid = (final_score >= params.min_confidence);
-   score.displayed_score = Clamp(final_score, 0.0, 100.0);
-   score.atr_price = atr;
+   result.valid = score.valid;
+   result.displayed_score = score.displayed_score;
 }
 
 void ResetHistoricalSignalScore(HistoricalSignalScore &score, const int direction)
@@ -1937,251 +2382,37 @@ void ResetHistoricalSignalScore(HistoricalSignalScore &score, const int directio
    score.direction = direction;
    score.displayed_score = 0.0;
    score.atr_price = 0.0;
+   score.spread_price = 0.0;
 }
 
-bool AggregateHistoricalTfBar(MqlRates &rates[],
-                              const int end_index,
-                              const int tf_minutes,
-                              double &open,
-                              double &high,
-                              double &low,
-                              double &close,
-                              double &tick_volume)
-{
-   int start_index = end_index - tf_minutes + 1;
-   if(start_index < 0 || end_index >= ArraySize(rates))
-      return false;
-   if(!HasContinuousHistoricalMinutes(rates, start_index, end_index))
-      return false;
-
-   open = rates[start_index].open;
-   high = rates[start_index].high;
-   low = rates[start_index].low;
-   close = rates[end_index].close;
-   tick_volume = 0.0;
-
-   for(int i = start_index; i <= end_index; i++)
-   {
-      high = MathMax(high, rates[i].high);
-      low = MathMin(low, rates[i].low);
-      tick_volume += (double)rates[i].tick_volume;
-   }
-
-   return true;
-}
-
-bool HasContinuousHistoricalMinutes(MqlRates &rates[], const int start_index, const int end_index)
-{
-   if(start_index < 0 || end_index >= ArraySize(rates) || start_index > end_index)
-      return false;
-   for(int i = start_index + 1; i <= end_index; i++)
-   {
-      if(rates[i].time - rates[i - 1].time != 60)
-         return false;
-   }
-   return true;
-}
-
-double HistoricalATR(MqlRates &rates[], const int current_index, const int tf_minutes, const int period)
-{
-   double total = 0.0;
-   int counted = 0;
-   for(int bar = 1; bar <= period; bar++)
-   {
-      int end_index = current_index - bar * tf_minutes;
-      int previous_end = current_index - (bar + 1) * tf_minutes;
-      if(end_index < 0 || previous_end < 0)
-         break;
-
-      double open = 0.0;
-      double high = 0.0;
-      double low = 0.0;
-      double close = 0.0;
-      double volume = 0.0;
-      if(!AggregateHistoricalTfBar(rates, end_index, tf_minutes, open, high, low, close, volume))
-         break;
-
-      double previous_close = rates[previous_end].close;
-      total += Max3(high - low, MathAbs(high - previous_close), MathAbs(low - previous_close));
-      counted++;
-   }
-
-   if(counted <= 0)
-      return 0.0;
-   return total / (double)counted;
-}
-
-bool HistoricalRangeBox(MqlRates &rates[],
-                        const int current_index,
-                        const int tf_minutes,
-                        const int lookback,
-                        double &range_high,
-                        double &range_low)
-{
-   bool initialized = false;
-   for(int bar = 1; bar <= lookback; bar++)
-   {
-      int end_index = current_index - bar * tf_minutes;
-      if(end_index < 0)
-         return false;
-
-      double open = 0.0;
-      double high = 0.0;
-      double low = 0.0;
-      double close = 0.0;
-      double volume = 0.0;
-      if(!AggregateHistoricalTfBar(rates, end_index, tf_minutes, open, high, low, close, volume))
-         return false;
-
-      if(!initialized)
-      {
-         range_high = high;
-         range_low = low;
-         initialized = true;
-      }
-      else
-      {
-         range_high = MathMax(range_high, high);
-         range_low = MathMin(range_low, low);
-      }
-   }
-
-   return initialized;
-}
-
-double HistoricalSpreadPips(const MqlRates &rate, const double point, const double pip_size)
-{
-   if(rate.spread > 0)
-      return (double)rate.spread * point / pip_size;
-   return MathMin(MaxSpreadPips * 0.50, 1.0);
-}
-
-double HistoricalMedianSpreadPips(MqlRates &rates[],
-                                  const int index,
-                                  const double point,
-                                  const double pip_size,
-                                  const int lookback)
-{
-   int count = IntMin(lookback, index);
-   if(count <= 0)
-      return HistoricalSpreadPips(rates[index], point, pip_size);
-
-   double values[];
-   if(ArrayResize(values, count) != count)
-      return HistoricalSpreadPips(rates[index], point, pip_size);
-   for(int i = 0; i < count; i++)
-      values[i] = HistoricalSpreadPips(rates[index - 1 - i], point, pip_size);
-
-   return MedianOfArray(values, count);
-}
-
-double HistoricalTickVolumeZ(MqlRates &rates[], const int index, const int lookback)
-{
-   int count = IntMin(lookback, index);
-   if(count <= 10)
-      return 0.0;
-
-   double values[];
-   if(ArrayResize(values, count) != count)
-      return 0.0;
-   for(int i = 0; i < count; i++)
-      values[i] = (double)rates[index - 1 - i].tick_volume;
-
-   double median = MedianOfArray(values, count);
-   double mad = MedianAbsDeviation(values, count, median);
-   return RobustZ((double)rates[index].tick_volume, median, mad);
-}
-
-double HistoricalSpeedZ(MqlRates &rates[],
-                        const int index,
-                        const int window_minutes,
-                        const int lookback,
-                        const int direction,
-                        const double pip_size)
-{
-   if(index <= window_minutes || pip_size <= 0.0)
-      return 0.0;
-
-   int count = IntMin(lookback, index - window_minutes - 1);
-   if(count <= 10)
-      return 0.0;
-
-   double values[];
-   if(ArrayResize(values, count) != count)
-      return 0.0;
-   for(int i = 0; i < count; i++)
-   {
-      int end_index = index - 1 - i;
-      // Signed, so the baseline matches the signed measurement below.
-      values[i] = (rates[end_index].close - rates[end_index - window_minutes].close) / pip_size;
-   }
-
-   double current = DirectionalValue(rates[index].close - rates[index - window_minutes].close, direction) / pip_size;
-   double median = MedianOfArray(values, count);
-   double mad = MedianAbsDeviation(values, count, median);
-   return RobustZ(current, (double)direction * median, mad);
-}
-
-double HistoricalHoldScore(MqlRates &rates[],
-                           const int index,
-                           const int direction,
-                           const double boundary)
-{
-   int outside = 0;
-   for(int i = index; i >= 0 && i > index - 4; i--)
-   {
-      bool is_outside = (direction == DIR_UP ? rates[i].close > boundary : rates[i].close < boundary);
-      if(!is_outside)
-         break;
-      outside++;
-   }
-
-   if(outside <= 0)
-      return 0.0;
-   if(outside == 1)
-      return 0.50;
-   if(outside == 2)
-      return 0.75;
-   return 1.0;
-}
-
-double HistoricalLocalFlowScore(MqlRates &rates[], const int index, const int direction, const double atr)
-{
-   if(index < 60 || atr <= 0.0)
-      return 0.50;
-
-   double move30 = SafeDiv(DirectionalValue(rates[index].close - rates[index - 30].close, direction), atr, 0.0);
-   double move60 = SafeDiv(DirectionalValue(rates[index].close - rates[index - 60].close, direction), atr, 0.0);
-   double edge = move30 * 0.60 + move60 * 0.40;
-   return SmoothStep(-0.10, 0.70, edge);
-}
-
+// Outcome at the three horizons. Entry pays the spread: a long enters at the
+// ask (close + spread) and is measured against bid highs and lows; a short
+// enters at the bid and its target and stop are measured against the ask.
 void EvaluateHistoricalOutcome(MqlRates &rates[],
                                const int copied,
                                const int signal_index,
                                const int direction,
-                               const double entry,
+                               const double close,
+                               const double spread_price,
                                const double atr_price,
-                               const HistoricalParams &params,
                                HistoricalOutcome &outcome)
 {
    ResetHistoricalOutcome(outcome);
-   EvaluateHistoricalOutcomeAtHorizon(rates, copied, signal_index, direction, entry,
-                                      atr_price, params.outcome_target_atr,
-                                      params.outcome_stop_atr, OutcomeHorizonMinutes1,
-                                      outcome.result_5m_R, outcome.target_5m, outcome.stop_5m);
-   EvaluateHistoricalOutcomeAtHorizon(rates, copied, signal_index, direction, entry,
-                                      atr_price, params.outcome_target_atr,
-                                      params.outcome_stop_atr, OutcomeHorizonMinutes2,
-                                      outcome.result_15m_R, outcome.target_15m, outcome.stop_15m);
-   EvaluateHistoricalOutcomeAtHorizon(rates, copied, signal_index, direction, entry,
-                                      atr_price, params.outcome_target_atr,
-                                      params.outcome_stop_atr, OutcomeHorizonMinutes3,
-                                      outcome.result_30m_R, outcome.target_30m, outcome.stop_30m);
+   bool ok1 = EvaluateHistoricalOutcomeAtHorizon(rates, copied, signal_index, direction, close, spread_price,
+                                                 atr_price, OutcomeHorizonMinutes1,
+                                                 outcome.result_5m_R, outcome.target_5m, outcome.stop_5m);
+   bool ok2 = EvaluateHistoricalOutcomeAtHorizon(rates, copied, signal_index, direction, close, spread_price,
+                                                 atr_price, OutcomeHorizonMinutes2,
+                                                 outcome.result_15m_R, outcome.target_15m, outcome.stop_15m);
+   bool ok3 = EvaluateHistoricalOutcomeAtHorizon(rates, copied, signal_index, direction, close, spread_price,
+                                                 atr_price, OutcomeHorizonMinutes3,
+                                                 outcome.result_30m_R, outcome.target_30m, outcome.stop_30m);
+   outcome.evaluable = (ok1 && ok2 && ok3);
 }
 
 void ResetHistoricalOutcome(HistoricalOutcome &outcome)
 {
+   outcome.evaluable = false;
    outcome.result_5m_R = 0.0;
    outcome.target_5m = false;
    outcome.stop_5m = false;
@@ -2193,14 +2424,14 @@ void ResetHistoricalOutcome(HistoricalOutcome &outcome)
    outcome.stop_30m = false;
 }
 
-void EvaluateHistoricalOutcomeAtHorizon(MqlRates &rates[],
+// Returns false when the horizon window is missing too many minutes to judge.
+bool EvaluateHistoricalOutcomeAtHorizon(MqlRates &rates[],
                                         const int copied,
                                         const int signal_index,
                                         const int direction,
-                                        const double entry,
+                                        const double close,
+                                        const double spread_price,
                                         const double atr_price,
-                                        const double target_atr,
-                                        const double stop_atr,
                                         const int horizon_minutes,
                                         double &result_R,
                                         bool &target_hit,
@@ -2210,16 +2441,27 @@ void EvaluateHistoricalOutcomeAtHorizon(MqlRates &rates[],
    target_hit = false;
    stop_hit = false;
 
-   double target_price = atr_price * target_atr;
-   double stop_price = atr_price * stop_atr;
+   double target_price = atr_price * OutcomeTargetAtr;
+   double stop_price = atr_price * OutcomeStopAtr;
    if(target_price <= 0.0 || stop_price <= 0.0)
-      return;
+      return false;
 
-   int last_index = IntMin(copied - 1, signal_index + horizon_minutes);
-   if(last_index <= signal_index || !HasContinuousHistoricalMinutes(rates, signal_index, last_index))
-      return;
-   for(int i = signal_index + 1; i <= last_index; i++)
+   datetime horizon_end = rates[signal_index].time + (datetime)horizon_minutes * 60;
+   double entry = (direction == DIR_UP ? close + spread_price : close);
+
+   // Coverage is judged over the whole window before the walk, because the
+   // walk stops at the first target or stop and a decided outcome is always
+   // evaluable however few minutes it took.
+   int available_minutes = 0;
+   for(int i = signal_index + 1; i < copied && rates[i].time <= horizon_end; i++)
+      available_minutes++;
+   if(available_minutes < IntMax(1, (int)MathCeil(HISTORICAL_MIN_BAR_COVERAGE * horizon_minutes)))
+      return false;
+
+   int last_index = signal_index;
+   for(int i = signal_index + 1; i < copied && rates[i].time <= horizon_end; i++)
    {
+      last_index = i;
       double favorable = 0.0;
       double adverse = 0.0;
       if(direction == DIR_UP)
@@ -2229,24 +2471,20 @@ void EvaluateHistoricalOutcomeAtHorizon(MqlRates &rates[],
       }
       else
       {
-         favorable = entry - rates[i].low;
-         adverse = rates[i].high - entry;
+         favorable = entry - (rates[i].low + spread_price);
+         adverse = (rates[i].high + spread_price) - entry;
       }
 
       bool target_now = (favorable >= target_price);
       bool stop_now = (adverse >= stop_price);
-      if(!target_hit && !stop_hit)
-      {
-         if(target_now && stop_now)
-            stop_hit = true; // pessimistic for same-M1 ambiguity.
-         else if(target_now)
-            target_hit = true;
-         else if(stop_now)
-            stop_hit = true;
-
-         if(target_hit || stop_hit)
-            break;
-      }
+      if(target_now && stop_now)
+         stop_hit = true;   // pessimistic for same-minute ambiguity
+      else if(target_now)
+         target_hit = true;
+      else if(stop_now)
+         stop_hit = true;
+      if(target_hit || stop_hit)
+         break;
    }
 
    if(target_hit && !stop_hit)
@@ -2255,10 +2493,12 @@ void EvaluateHistoricalOutcomeAtHorizon(MqlRates &rates[],
       result_R = -1.0;
    else
    {
-      double close_move = DirectionalValue(rates[last_index].close - entry, direction);
+      double exit_price = (direction == DIR_UP ? rates[last_index].close : rates[last_index].close + spread_price);
+      double close_move = DirectionalValue(exit_price - entry, direction);
       result_R = Clamp(SafeDiv(close_move, stop_price, 0.0), -1.0,
                        SafeDiv(target_price, stop_price, 0.0));
    }
+   return true;
 }
 
 void AddHistoricalStats(HistoricalBacktestStats &stats,
@@ -2340,9 +2580,18 @@ void ResetHistoricalStats(HistoricalBacktestStats &stats)
    stats.to_time = 0;
    stats.symbols_requested = 0;
    stats.symbols_loaded = 0;
+   stats.bars_loaded = 0;
    stats.profiles_tested = 0;
+   stats.boundaries_total = 0;
+   stats.boundary_stride_max = 0;
+   stats.boundaries_rejected = 0;
    stats.bars_scanned = 0;
+   stats.spread_from_bar = 0;
+   stats.spread_from_median = 0;
+   stats.spread_from_symbol = 0;
+   stats.spread_unavailable = 0;
    stats.signals = 0;
+   stats.signals_unevaluable = 0;
    stats.target_5m = 0;
    stats.stop_5m = 0;
    stats.target_15m = 0;
@@ -2373,30 +2622,63 @@ void ResetHistoricalStats(HistoricalBacktestStats &stats)
    stats.bucket85_R = 0.0;
 }
 
+void AddHistoricalCoverageLines(const HistoricalBacktestStats &stats)
+{
+   double achieved_days = (stats.to_time > stats.from_time ? (double)(stats.to_time - stats.from_time) / 86400.0 : 0.0);
+   AddHistoricalReportLine(StringFormat("Window: %s -> %s (%.1f of %d days) | Symbols %d/%d | Profiles with data=%d | M1 bars=%d",
+                                        TimeToString(stats.from_time, TIME_DATE | TIME_MINUTES),
+                                        TimeToString(stats.to_time, TIME_DATE | TIME_MINUTES),
+                                        achieved_days,
+                                        HistoricalLookbackDays,
+                                        stats.symbols_loaded,
+                                        stats.symbols_requested,
+                                        stats.profiles_tested,
+                                        stats.bars_loaded));
+   AddHistoricalReportLine(StringFormat("Boundaries: evaluated %d of ~%d (up to 1 in %d) | rejected for gaps %d | signals unevaluable (gapped horizon) %d",
+                                        stats.bars_scanned,
+                                        stats.boundaries_total,
+                                        IntMax(1, stats.boundary_stride_max),
+                                        stats.boundaries_rejected,
+                                        stats.signals_unevaluable));
+   AddHistoricalReportLine(StringFormat("Spread source per boundary: bar column %d | window median %d | current symbol spread %d | none %d",
+                                        stats.spread_from_bar,
+                                        stats.spread_from_median,
+                                        stats.spread_from_symbol,
+                                        stats.spread_unavailable));
+}
+
+void AddHistoricalBucketLines(const string title, const HistoricalBacktestStats &stats)
+{
+   AddHistoricalReportLine(title);
+   AddHistoricalReportLine(FormatHistoricalBucketLine("<65 ", stats.bucket60_count, stats.bucket60_R));
+   AddHistoricalReportLine(FormatHistoricalBucketLine("65-69", stats.bucket65_count, stats.bucket65_R));
+   AddHistoricalReportLine(FormatHistoricalBucketLine("70-74", stats.bucket70_count, stats.bucket70_R));
+   AddHistoricalReportLine(FormatHistoricalBucketLine("75-79", stats.bucket75_count, stats.bucket75_R));
+   AddHistoricalReportLine(FormatHistoricalBucketLine("80-84", stats.bucket80_count, stats.bucket80_R));
+   AddHistoricalReportLine(FormatHistoricalBucketLine("85+  ", stats.bucket85_count, stats.bucket85_R));
+}
+
+string FormatHistoricalParams(const HistoricalParams &params)
+{
+   return StringFormat("range=%d bufferATR=%.2f minPips=%.1f minScore=%.1f spreadATR=%.2f overext=%.2f minuteImpulseZ=%.2f",
+                       params.range_lookback,
+                       params.breakout_buffer_atr,
+                       params.min_breakout_buffer_pips,
+                       params.min_confidence,
+                       params.max_spread_to_atr,
+                       params.max_overextension_atr,
+                       params.minute_impulse_z);
+}
+
 void BuildValidationReport(const HistoricalBacktestStats &stats, const HistoricalParams &params)
 {
    ClearHistoricalReport();
    AddHistoricalReportLine("FXNEWS VALIDATION REPORT | M1 HISTORY BACKTEST | NO FILE OUTPUT");
-   AddHistoricalReportLine(StringFormat("Window: %s -> %s | Lookback=%d days | Symbols %d/%d | Profiles=%d",
-                                        TimeToString(stats.from_time, TIME_DATE | TIME_MINUTES),
-                                        TimeToString(stats.to_time, TIME_DATE | TIME_MINUTES),
-                                        HistoricalLookbackDays,
-                                        stats.symbols_loaded,
-                                        stats.symbols_requested,
-                                        stats.profiles_tested));
-   AddHistoricalReportLine(StringFormat("Params: range=%d bufferATR=%.2f minPips=%.1f minScore=%.1f spreadATR=%.2f overext=%.2f impulseZ=%.2f target=%.2f stop=%.2f",
-                                        params.range_lookback,
-                                        params.breakout_buffer_atr,
-                                        params.min_breakout_buffer_pips,
-                                        params.min_confidence,
-                                        params.max_spread_to_atr,
-                                        params.max_overextension_atr,
-                                        params.min_impulse_z,
-                                        params.outcome_target_atr,
-                                        params.outcome_stop_atr));
-   AddHistoricalReportLine(StringFormat("Signals=%d | Bars scanned=%d | Avg score=%.1f | PF=%.2f | AvgR 5/15/30m = %.3f / %.3f / %.3f",
+   AddHistoricalCoverageLines(stats);
+   AddHistoricalReportLine("Params: " + FormatHistoricalParams(params) +
+                           StringFormat(" | outcome target=%.2f stop=%.2f ATR", OutcomeTargetAtr, OutcomeStopAtr));
+   AddHistoricalReportLine(StringFormat("Signals=%d | Avg score=%.1f | PF=%.2f | AvgR 5/15/30m = %.3f / %.3f / %.3f",
                                         stats.signals,
-                                        stats.bars_scanned,
                                         AverageScore(stats),
                                         ProfitFactorProxy(stats),
                                         AverageR5(stats),
@@ -2413,13 +2695,8 @@ void BuildValidationReport(const HistoricalBacktestStats &stats, const Historica
                                         AverageTargetScore(stats),
                                         AverageStopScore(stats),
                                         ScoreEdge(stats)));
-   AddHistoricalReportLine("Buckets by displayed score: count | avg 30m R");
-   AddHistoricalReportLine(FormatHistoricalBucketLine("60-64", stats.bucket60_count, stats.bucket60_R));
-   AddHistoricalReportLine(FormatHistoricalBucketLine("65-69", stats.bucket65_count, stats.bucket65_R));
-   AddHistoricalReportLine(FormatHistoricalBucketLine("70-74", stats.bucket70_count, stats.bucket70_R));
-   AddHistoricalReportLine(FormatHistoricalBucketLine("75-79", stats.bucket75_count, stats.bucket75_R));
-   AddHistoricalReportLine(FormatHistoricalBucketLine("80-84", stats.bucket80_count, stats.bucket80_R));
-   AddHistoricalReportLine(FormatHistoricalBucketLine("85+", stats.bucket85_count, stats.bucket85_R));
+   AddHistoricalBucketLines("Buckets by displayed score: count | avg 30m R", stats);
+   AddHistoricalReportLine("Model: the live composer over bar features; no basket, calendar or tick data, so scores are capped at 84 like a live instance without a basket reading. Minute-scale impulse windows use their own threshold.");
    AddHistoricalReportLine("Interpretation: score is a ranking metric. A useful score should show better R/PF in higher buckets.");
    PrintHistoricalReportToJournal();
    SetHistoricalReadyMessage("VALIDATION");
@@ -2432,13 +2709,8 @@ void BuildAutotuneReport(const HistoricalBacktestStats &default_stats,
 {
    ClearHistoricalReport();
    AddHistoricalReportLine("FXNEWS AUTOTUNE REPORT | M1 HISTORY BACKTEST | NO FILE OUTPUT");
-   AddHistoricalReportLine(StringFormat("Window: %s -> %s | Lookback=%d days | Symbols %d/%d | Profiles=%d",
-                                        TimeToString(default_stats.from_time, TIME_DATE | TIME_MINUTES),
-                                        TimeToString(default_stats.to_time, TIME_DATE | TIME_MINUTES),
-                                        HistoricalLookbackDays,
-                                        default_stats.symbols_loaded,
-                                        default_stats.symbols_requested,
-                                        default_stats.profiles_tested));
+   AddHistoricalCoverageLines(default_stats);
+   AddHistoricalReportLine(StringFormat("All candidates share outcome target=%.2f stop=%.2f ATR", OutcomeTargetAtr, OutcomeStopAtr));
    AddHistoricalReportLine(StringFormat("Current: signals=%d avgScore=%.1f PF=%.2f AvgR30=%.3f Hit30=%.1f%% Edge=%+.1f pts",
                                         default_stats.signals,
                                         AverageScore(default_stats),
@@ -2466,41 +2738,27 @@ void BuildAutotuneReport(const HistoricalBacktestStats &default_stats,
                                            "AutotuneMinSignals floor of %d.",
                                            best_stats.signals,
                                            AutotuneMinSignals));
-      AddHistoricalReportLine("Increase HistoricalLookbackDays, widen the basket, or lower MinDisplayConfidence "
-                              "until the sample clears the floor. Do not change settings on this run.");
+      AddHistoricalReportLine("Increase HistoricalLookbackDays or HistoricalMaxBoundariesPerProfile, widen the basket, "
+                              "or lower MinDisplayConfidence until the sample clears the floor. Do not change settings on this run.");
    }
    else
    {
-      AddHistoricalReportLine(StringFormat("Recommended effective settings: RangeLookbackM1=%d BreakoutBufferATR=%.2f MinBreakoutBufferPips=%.1f",
+      // Only parameters whose meaning is identical in the live scanner are
+      // offered as settings; the minute-scale impulse threshold is a proxy.
+      AddHistoricalReportLine(StringFormat("Recommended settings: RangeLookbackM1=%d BreakoutBufferATR=%.2f MinBreakoutBufferPips=%.1f",
                                            best_params.range_lookback,
                                            best_params.breakout_buffer_atr,
                                            best_params.min_breakout_buffer_pips));
-      AddHistoricalReportLine(StringFormat("Recommended effective settings: MinDisplayConfidence=%.1f MaxSpreadToAtrRatio=%.2f MaxOverextensionAtr=%.2f",
+      AddHistoricalReportLine(StringFormat("Recommended settings: MinDisplayConfidence=%.1f MaxSpreadToAtrRatio=%.2f MaxOverextensionAtr=%.2f",
                                            best_params.min_confidence,
                                            best_params.max_spread_to_atr,
                                            best_params.max_overextension_atr));
-      AddHistoricalReportLine(StringFormat("Recommended effective settings: MinImpulseZForSignal=%.2f OutcomeTargetAtr=%.2f OutcomeStopAtr=%.2f",
-                                           best_params.min_impulse_z,
-                                           best_params.outcome_target_atr,
-                                           best_params.outcome_stop_atr));
+      AddHistoricalReportLine(StringFormat("Historical-only proxy (not a live input): minute-scale impulse z=%.2f; "
+                                           "MinImpulseZForSignal is measured on second-scale windows and must be derived separately.",
+                                           best_params.minute_impulse_z));
    }
-   AddHistoricalReportLine(StringFormat("Current settings baseline: Range=%d BufferATR=%.2f MinPips=%.1f MinScore=%.1f SpreadATR=%.2f Overext=%.2f ImpulseZ=%.2f Target=%.2f Stop=%.2f",
-                                        default_params.range_lookback,
-                                        default_params.breakout_buffer_atr,
-                                        default_params.min_breakout_buffer_pips,
-                                        default_params.min_confidence,
-                                        default_params.max_spread_to_atr,
-                                        default_params.max_overextension_atr,
-                                        default_params.min_impulse_z,
-                                        default_params.outcome_target_atr,
-                                        default_params.outcome_stop_atr));
-   AddHistoricalReportLine("Best score buckets: count | avg 30m R");
-   AddHistoricalReportLine(FormatHistoricalBucketLine("60-64", best_stats.bucket60_count, best_stats.bucket60_R));
-   AddHistoricalReportLine(FormatHistoricalBucketLine("65-69", best_stats.bucket65_count, best_stats.bucket65_R));
-   AddHistoricalReportLine(FormatHistoricalBucketLine("70-74", best_stats.bucket70_count, best_stats.bucket70_R));
-   AddHistoricalReportLine(FormatHistoricalBucketLine("75-79", best_stats.bucket75_count, best_stats.bucket75_R));
-   AddHistoricalReportLine(FormatHistoricalBucketLine("80-84", best_stats.bucket80_count, best_stats.bucket80_R));
-   AddHistoricalReportLine(FormatHistoricalBucketLine("85+", best_stats.bucket85_count, best_stats.bucket85_R));
+   AddHistoricalReportLine("Current settings baseline: " + FormatHistoricalParams(default_params));
+   AddHistoricalBucketLines("Best score buckets: count | avg 30m R", best_stats);
    AddHistoricalReportLine(recommend ?
                            "Applied: no runtime change; review the recommendation with an external holdout before editing inputs." :
                            "Applied: no runtime change; no recommendation was produced.");
@@ -2589,28 +2847,15 @@ double ScoreEdge(const HistoricalBacktestStats &stats)
    return AverageTargetScore(stats) - AverageStopScore(stats);
 }
 
-double ApplyHistoricalCap(const double score, const double cap, string &caps, const string reason)
-{
-   if(score <= cap)
-      return score;
-   if(caps != "")
-      caps += "|";
-   caps += reason;
-   return cap;
-}
-
+// A boundary is the close of a scan-timeframe bar: the M1 close time falls on
+// the timeframe grid (server time, days on midnight). Integer arithmetic; the
+// previous TimeToStruct call ran once per M1 bar per profile.
 bool IsHistoricalEvaluationBoundary(const datetime close_time, const int tf_minutes)
 {
    if(tf_minutes <= 1)
       return true;
-
-   MqlDateTime parts;
-   TimeToStruct(close_time, parts);
-   int minute_of_day = parts.hour * 60 + parts.min;
-   if(tf_minutes >= 1440)
-      return (parts.hour == 0 && parts.min == 0);
-
-   return ((minute_of_day % tf_minutes) == 0);
+   long grid = (tf_minutes >= 1440 ? 86400 : (long)tf_minutes * 60);
+   return (((long)close_time % grid) == 0);
 }
 
 int TimeframeMinutes(const ENUM_TIMEFRAMES timeframe)
@@ -4252,6 +4497,34 @@ void BuildCompositeSignalScore(const int index,
       return;
    }
 
+   CompositeContext context;
+   context.direction = direction;
+   context.m5_move_directional = g_profiles[index].m5_move_atr * (double)direction;
+   context.m15_move_directional = g_profiles[index].m15_move_atr * (double)direction;
+   context.age_seconds = EventAgeSeconds(index, direction, now);
+   context.age_limit_seconds = EventAgeLimitSeconds(index);
+   context.max_spread_to_atr = MaxSpreadToAtrRatio;
+   ComposeSignalScore(score, context);
+
+   if(DebugScoreBreakdown && DebugPrintToJournal &&
+      MeetsThreshold(score.displayed_score, MinDisplayConfidence) &&
+      DebugLogAllowed(now))
+   {
+      PrintFormat("FXNews score %s %s %s %d%% raw=%.1f %s",
+                  g_profiles[index].symbol,
+                  g_profiles[index].timeframe_label,
+                  (direction == DIR_UP ? "UP" : "DOWN"),
+                  (int)MathRound(score.displayed_score),
+                  score.raw_score,
+                  score.reason_summary);
+   }
+}
+
+// Blends the measured components and applies the cap ladder. Pure over the
+// component structs and the context, so the live scanner and the historical
+// validator share one definition of the composite score.
+void ComposeSignalScore(CompositeSignalScore &score, const CompositeContext &context, const bool build_text = true)
+{
    // An unmeasured component contributes nothing and leaves the normaliser,
    // instead of being imputed at a neutral constant that compresses every
    // score toward that constant. This applies to every component alike.
@@ -4293,7 +4566,7 @@ void BuildCompositeSignalScore(const int index,
       capped = ApplyScoreCap(capped, 69.0, caps, "flow_conflict_cap");
 
    if(score.execution.score < 0.68 ||
-      score.execution.cost_to_atr > MaxSpreadToAtrRatio * 0.70 ||
+      score.execution.cost_to_atr > context.max_spread_to_atr * 0.70 ||
       (score.execution.median_available &&
        score.execution.spread_ratio > MathMax(1.30, MaxSpreadMedianMultiplier * 0.65)))
    {
@@ -4311,10 +4584,8 @@ void BuildCompositeSignalScore(const int index,
    // point on the context ramp that happened to sit elsewhere.
    if(UseMultiTimeframeContextCaps)
    {
-      bool m5_reject = (score.regime.m5_available &&
-                        g_profiles[index].m5_move_atr * (double)direction <= M5RejectAtr);
-      bool m15_reject = (score.regime.m15_available &&
-                         g_profiles[index].m15_move_atr * (double)direction <= M15RejectAtr);
+      bool m5_reject = (score.regime.m5_available && context.m5_move_directional <= M5RejectAtr);
+      bool m15_reject = (score.regime.m15_available && context.m15_move_directional <= M15RejectAtr);
       if(m5_reject || m15_reject)
          capped = ApplyScoreCap(capped, 69.0, caps, "mtf_reject_cap");
    }
@@ -4331,16 +4602,14 @@ void BuildCompositeSignalScore(const int index,
       capped = ApplyScoreCap(capped, 75.0, caps, "overextended_cap");
 
    score.age_free_score = Clamp(capped, 0.0, 100.0);
-   int age = EventAgeSeconds(index, direction, now);
-   int age_limit = EventAgeLimitSeconds(index);
-   if(age_limit > 0 && age > age_limit)
+   if(context.age_limit_seconds > 0 && context.age_seconds > context.age_limit_seconds)
    {
       capped = ApplyScoreCap(capped, 0.0, caps, "expired_event_cap");
       score.block_reason = BLOCK_EXPIRED;
    }
-   else if(age > LATE_EVENT_SECONDS)
+   else if(context.age_seconds > LATE_EVENT_SECONDS)
       capped = ApplyScoreCap(capped, 70.0, caps, "late_event_cap");
-   else if(age > AGING_EVENT_SECONDS)
+   else if(context.age_seconds > AGING_EVENT_SECONDS)
       capped = ApplyScoreCap(capped, 84.0, caps, "aging_event_cap");
 
    if(score.calendar.available && score.calendar.uncertainty_penalty >= 0.35)
@@ -4369,21 +4638,13 @@ void BuildCompositeSignalScore(const int index,
 
    score.displayed_score = Clamp(capped, 0.0, 100.0);
    score.valid = (score.displayed_score > 0.0);
-   score.reason_summary = BuildReasonSummary(score, caps);
-   score.compact_tags = BuildCompactTags(score);
-   score.human_reason = BuildHumanReadableReason(score);
-
-   if(DebugScoreBreakdown && DebugPrintToJournal &&
-      MeetsThreshold(score.displayed_score, MinDisplayConfidence) &&
-      DebugLogAllowed(now))
+   // The historical validator scores millions of boundaries and never shows
+   // them, so it skips the text.
+   if(build_text)
    {
-      PrintFormat("FXNews score %s %s %s %d%% raw=%.1f %s",
-                  g_profiles[index].symbol,
-                  g_profiles[index].timeframe_label,
-                  (direction == DIR_UP ? "UP" : "DOWN"),
-                  (int)MathRound(score.displayed_score),
-                  score.raw_score,
-                  score.reason_summary);
+      score.reason_summary = BuildReasonSummary(score, caps);
+      score.compact_tags = BuildCompactTags(score);
+      score.human_reason = BuildHumanReadableReason(score);
    }
 }
 
@@ -4496,32 +4757,39 @@ void EvaluateExecutionQuality(const int index, const datetime now, ExecutionQual
       }
    }
 
-   double spread_abs_score = 1.0 - SmoothStep(MaxSpreadPips * 0.45, MaxSpreadPips, execution.spread_pips);
-   double spread_rel_score = 1.0 - SmoothStep(1.0, MaxSpreadMedianMultiplier, execution.spread_ratio);
-   double cost_score = 1.0 - SmoothStep(MaxSpreadToAtrRatio * 0.45, MaxSpreadToAtrRatio, execution.cost_to_atr);
-   double spread_z_score = 1.0 - SmoothStep(1.25, MaxSpreadZScore, execution.spread_z);
-   double quote_fresh_score = 1.0 - SmoothStep((double)MaxQuoteAgeSeconds * 0.45,
-                                               (double)MaxQuoteAgeSeconds,
-                                               execution.quote_age_sec);
-   double tick_gap_score = 1.0 - SmoothStep(MaxTickGapSeconds * 0.45,
-                                            MaxTickGapSeconds,
-                                            execution.tick_gap_sec);
+   execution.score = BlendExecutionScore(execution, MaxSpreadToAtrRatio, true);
+   execution.pass = true;
+}
 
-   double weighted = spread_abs_score * 0.18 + cost_score * 0.24 +
-                     quote_fresh_score * 0.12 + tick_gap_score * 0.12;
-   double total_weight = 0.18 + 0.24 + 0.12 + 0.12;
+// Execution quality from the measured terms only. The quote-age and tick-gap
+// terms exist for live data; bar history has neither and leaves them out.
+double BlendExecutionScore(const ExecutionQuality &execution,
+                           const double max_spread_to_atr,
+                           const bool quote_terms_available)
+{
+   double spread_abs_score = 1.0 - SmoothStep(MaxSpreadPips * 0.45, MaxSpreadPips, execution.spread_pips);
+   double cost_score = 1.0 - SmoothStep(max_spread_to_atr * 0.45, max_spread_to_atr, execution.cost_to_atr);
+   double weighted = spread_abs_score * 0.18 + cost_score * 0.24;
+   double total_weight = 0.18 + 0.24;
    if(execution.median_available)
    {
-      weighted += spread_rel_score * 0.20;
+      weighted += (1.0 - SmoothStep(1.0, MaxSpreadMedianMultiplier, execution.spread_ratio)) * 0.20;
       total_weight += 0.20;
    }
    if(execution.spread_z_available)
    {
-      weighted += spread_z_score * 0.14;
+      weighted += (1.0 - SmoothStep(1.25, MaxSpreadZScore, execution.spread_z)) * 0.14;
       total_weight += 0.14;
    }
-   execution.score = Clamp01(weighted / total_weight);
-   execution.pass = true;
+   if(quote_terms_available)
+   {
+      weighted += (1.0 - SmoothStep((double)MaxQuoteAgeSeconds * 0.45, (double)MaxQuoteAgeSeconds,
+                                    execution.quote_age_sec)) * 0.12;
+      weighted += (1.0 - SmoothStep(MaxTickGapSeconds * 0.45, MaxTickGapSeconds,
+                                    execution.tick_gap_sec)) * 0.12;
+      total_weight += 0.24;
+   }
+   return Clamp01(weighted / total_weight);
 }
 
 void EvaluateBreakoutStructure(const int index,
@@ -4546,63 +4814,93 @@ void EvaluateBreakoutStructure(const int index,
    {
       return;
    }
+
+   datetime outside_since = (direction == DIR_UP ? g_profiles[index].outside_since_up :
+                             g_profiles[index].outside_since_down);
+   datetime reentered_since = (direction == DIR_UP ? g_profiles[index].reentered_since_up :
+                               g_profiles[index].reentered_since_down);
+   double outside_seconds = (outside_since > 0 ? (double)MathMax(0, (int)(now - outside_since)) : -1.0);
+   double reentered_seconds = (reentered_since > 0 ? (double)MathMax(0, (int)(now - reentered_since)) : -1.0);
+
+   ComputeBreakoutStructure(direction,
+                            g_profiles[index].atr_trigger,
+                            g_profiles[index].range_width,
+                            BreakoutDistance(index, direction),
+                            MathMax(BreakoutBufferPrice(index), g_profiles[index].point),
+                            MaxOverextensionAtr,
+                            g_profiles[index].current_trigger_open,
+                            g_profiles[index].current_trigger_high,
+                            g_profiles[index].current_trigger_low,
+                            g_profiles[index].current_trigger_close,
+                            outside_seconds,
+                            reentered_seconds,
+                            breakout);
+}
+
+// The breakout structure from its raw inputs: range and ATR, the excursion
+// beyond the buffered boundary, the trigger bar's shape, and how long the
+// price has held outside (negative = not outside) or since it re-entered
+// (negative = never). Shared by the live scanner and the historical validator.
+void ComputeBreakoutStructure(const int direction,
+                              const double atr,
+                              const double range_width,
+                              const double distance,
+                              const double buffer,
+                              const double max_overextension_atr,
+                              const double bar_open,
+                              const double bar_high,
+                              const double bar_low,
+                              const double bar_close,
+                              const double outside_seconds,
+                              const double reentered_seconds,
+                              BreakoutStructure &breakout)
+{
    breakout.measured = true;
 
-   double atr = g_profiles[index].atr_trigger;
-   double range_atr = g_profiles[index].range_width / atr;
+   double range_atr = range_width / atr;
    double not_dead = SmoothStep(0.65, 1.80, range_atr);
    double not_chaotic = 1.0 - SmoothStep(7.0, 16.0, range_atr);
    breakout.compression_score = Clamp01(0.10 + 0.90 * not_dead * not_chaotic);
 
-   double distance = BreakoutDistance(index, direction);
-   double buffer = MathMax(BreakoutBufferPrice(index), g_profiles[index].point);
    double distance_units = SafeDiv(distance, buffer, 0.0);
    double distance_atr = SafeDiv(distance, atr, 0.0);
-   double extension_penalty = SmoothStep(MaxOverextensionAtr, MaxOverextensionAtr * 1.80, distance_atr);
+   double extension_penalty = SmoothStep(max_overextension_atr, max_overextension_atr * 1.80, distance_atr);
    breakout.distance_score = Clamp01(SmoothStep(0.20, 1.60, distance_units) * (1.0 - extension_penalty * 0.45));
 
    // A bar that has barely moved has no shape to read: on the first ticks of
    // every new bar these ratios were noise that scored as a weak body.
-   double candle_range = g_profiles[index].current_trigger_high - g_profiles[index].current_trigger_low;
+   double candle_range = bar_high - bar_low;
    breakout.candle_measured = (candle_range >= CANDLE_MEASURE_MIN_ATR * atr);
    if(breakout.candle_measured)
    {
       if(direction == DIR_UP)
-         breakout.close_location_score = Clamp01((g_profiles[index].current_trigger_close - g_profiles[index].current_trigger_low) / candle_range);
+         breakout.close_location_score = Clamp01((bar_close - bar_low) / candle_range);
       else
-         breakout.close_location_score = Clamp01((g_profiles[index].current_trigger_high - g_profiles[index].current_trigger_close) / candle_range);
+         breakout.close_location_score = Clamp01((bar_high - bar_close) / candle_range);
 
-      double body = MathAbs(g_profiles[index].current_trigger_close - g_profiles[index].current_trigger_open);
+      double body = MathAbs(bar_close - bar_open);
       double body_ratio = body / candle_range;
-      double directional_body = DirectionalValue(g_profiles[index].current_trigger_close - g_profiles[index].current_trigger_open,
-                                                 direction) / candle_range;
+      double directional_body = DirectionalValue(bar_close - bar_open, direction) / candle_range;
       breakout.body_quality_score = Clamp01(SmoothStep(0.18, 0.62, body_ratio) * 0.65 +
                                             SmoothStep(0.03, 0.38, directional_body) * 0.35);
 
       double rejection_wick = 0.0;
       if(direction == DIR_UP)
-         rejection_wick = g_profiles[index].current_trigger_high -
-                          MathMax(g_profiles[index].current_trigger_open, g_profiles[index].current_trigger_close);
+         rejection_wick = bar_high - MathMax(bar_open, bar_close);
       else
-         rejection_wick = MathMin(g_profiles[index].current_trigger_open, g_profiles[index].current_trigger_close) -
-                          g_profiles[index].current_trigger_low;
+         rejection_wick = MathMin(bar_open, bar_close) - bar_low;
       breakout.wick_rejection_penalty = Clamp01(rejection_wick / candle_range);
    }
 
-   datetime outside_since = (direction == DIR_UP ? g_profiles[index].outside_since_up :
-                             g_profiles[index].outside_since_down);
-   if(outside_since > 0)
+   if(outside_seconds >= 0.0)
    {
-      double seconds = (double)MathMax(0, (int)(now - outside_since));
       breakout.hold_score = SmoothStep((double)MinHoldSecondsForHighScore,
                                        (double)FullHoldScoreSeconds,
-                                       seconds);
+                                       outside_seconds);
    }
 
-   datetime reentered_since = (direction == DIR_UP ? g_profiles[index].reentered_since_up :
-                               g_profiles[index].reentered_since_down);
-   if(reentered_since > 0 && now - reentered_since <= 30)
-      breakout.fakeout_penalty = 1.0 - SmoothStep(0.0, 30.0, (double)(now - reentered_since));
+   if(reentered_seconds >= 0.0 && reentered_seconds <= 30.0)
+      breakout.fakeout_penalty = 1.0 - SmoothStep(0.0, 30.0, reentered_seconds);
 
    // The snapback (fakeout) penalty acts once, through range_snapback_cap in
    // the composite, rather than being subtracted here as well.
@@ -4700,10 +4998,23 @@ void EvaluateImpulseQuality(const int index, const int direction, ImpulseQuality
    double extended_atr = DirectionalValue(g_profiles[index].movement_5m_pips, direction) / atr_pips;
    impulse.exhaustion_penalty = SmoothStep(MaxExhaustionAtr, MaxExhaustionAtr * 1.70, extended_atr);
 
-   // Components that could not be measured are dropped from the blend and from
-   // its normaliser, rather than being imputed with a constant that would drag
-   // every score toward that constant. Exhaustion acts once, through
-   // overextended_cap in the composite.
+   BlendImpulseScore(impulse, speed_score, acceleration_available, continuation_available, continuation);
+   // Sample quality scales the reading only when it was actually measured.
+   if(UseCopyTicksForImpulse && impulse.tick_quality_available)
+      impulse.score = Clamp01(impulse.score * (0.75 + impulse.tick_sample_quality_score * 0.25));
+   impulse.pass = (speed_max >= MinImpulseZForSignal || impulse.atr_expansion_score >= 0.45);
+}
+
+// Impulse blend from the measured terms only. Components that could not be
+// measured are dropped from the blend and from its normaliser, rather than
+// being imputed with a constant that would drag every score toward that
+// constant. Exhaustion acts once, through overextended_cap in the composite.
+void BlendImpulseScore(ImpulseQuality &impulse,
+                       const double speed_score,
+                       const bool acceleration_available,
+                       const bool continuation_available,
+                       const double continuation01)
+{
    double impulse_weighted = speed_score * 0.25 + impulse.atr_expansion_score * 0.20;
    double impulse_weight_total = 0.25 + 0.20;
    if(impulse.tick_volume_available)
@@ -4723,15 +5034,10 @@ void EvaluateImpulseQuality(const int index, const int direction, ImpulseQuality
    }
    if(continuation_available)
    {
-      impulse_weighted += continuation * 0.15;
+      impulse_weighted += continuation01 * 0.15;
       impulse_weight_total += 0.15;
    }
-
    impulse.score = Clamp01(impulse_weighted / impulse_weight_total);
-   // Sample quality scales the reading only when it was actually measured.
-   if(UseCopyTicksForImpulse && impulse.tick_quality_available)
-      impulse.score = Clamp01(impulse.score * (0.75 + impulse.tick_sample_quality_score * 0.25));
-   impulse.pass = (speed_max >= MinImpulseZForSignal || impulse.atr_expansion_score >= 0.45);
 }
 
 void EvaluateCurrencyFlowQuality(const int index,
@@ -4811,15 +5117,33 @@ void EvaluateRegimeContext(const int index,
                            const datetime now,
                            RegimeContext &regime)
 {
-   regime.session_score = SessionQualityScore(now);
-   regime.m5_available = g_profiles[index].has_m5_move;
-   regime.m15_available = g_profiles[index].has_m15_move;
-   regime.m5_context_score = (regime.m5_available ?
-                              SmoothStep(M5RejectAtr, M5_CONTEXT_FULL_ATR,
-                                         g_profiles[index].m5_move_atr * (double)direction) : 0.0);
-   regime.m15_context_score = (regime.m15_available ?
-                               SmoothStep(M15RejectAtr, M15_CONTEXT_FULL_ATR,
-                                          g_profiles[index].m15_move_atr * (double)direction) : 0.0);
+   ComposeRegimeScore(regime,
+                      SessionQualityScore(now),
+                      g_profiles[index].has_m5_move,
+                      g_profiles[index].m5_move_atr * (double)direction,
+                      g_profiles[index].has_m15_move,
+                      g_profiles[index].m15_move_atr * (double)direction,
+                      SafeDiv(g_profiles[index].range_width, g_profiles[index].atr_trigger, 0.0));
+}
+
+// Regime context from its raw inputs: the session, the closed-bar context
+// moves (signed by direction, each with its availability) and the range in
+// ATR units. Shared by the live scanner and the historical validator.
+void ComposeRegimeScore(RegimeContext &regime,
+                        const double session_score,
+                        const bool m5_available,
+                        const double m5_move_directional,
+                        const bool m15_available,
+                        const double m15_move_directional,
+                        const double range_atr)
+{
+   regime.session_score = session_score;
+   regime.m5_available = m5_available;
+   regime.m15_available = m15_available;
+   regime.m5_context_score = (m5_available ?
+                              SmoothStep(M5RejectAtr, M5_CONTEXT_FULL_ATR, m5_move_directional) : 0.0);
+   regime.m15_context_score = (m15_available ?
+                               SmoothStep(M15RejectAtr, M15_CONTEXT_FULL_ATR, m15_move_directional) : 0.0);
 
    double mtf_weighted = 0.0;
    double mtf_weight = 0.0;
@@ -4836,7 +5160,6 @@ void EvaluateRegimeContext(const int index,
    bool mtf_available = (mtf_weight > 0.0);
    regime.mtf_alignment_score = (mtf_available ? Clamp01(mtf_weighted / mtf_weight) : 0.0);
 
-   double range_atr = SafeDiv(g_profiles[index].range_width, g_profiles[index].atr_trigger, 0.0);
    double active_enough = SmoothStep(0.70, 2.20, range_atr);
    double not_chaotic = 1.0 - SmoothStep(14.0, 24.0, range_atr);
    regime.volatility_regime_score = Clamp01(active_enough * not_chaotic);

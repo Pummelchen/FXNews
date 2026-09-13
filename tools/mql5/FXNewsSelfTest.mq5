@@ -1,18 +1,23 @@
-// FXNewsSelfTest - harness script that attaches FXNews in SELFTEST mode to the
-// current chart, waits for the verdict label, prints it to the Journal and
+// FXNewsSelfTest - harness script that attaches FXNews to the current chart in
+// a non-scanning mode (SELFTEST by default, or VALIDATION / AUTOTUNE over a
+// small basket), waits for the verdict label, prints it to the Journal and
 // removes the indicator again. Driven by tools/selftest-macos.sh; it is not a
 // product component and is never distributed with the indicator.
 //
 // The indicator is loaded from MQL5/Indicators/FXNews-selftest/FXNews.ex5 so a
 // harness build never overwrites the copy the terminal uses for live charts.
 #property strict
-#property version   "1.000"
-#property description "Runs the FXNews self-test headlessly and reports to the Journal."
+#property version   "1.100"
+#property description "Runs the FXNews self-test or a short historical run headlessly and reports to the Journal."
 
 #define HARNESS_INDICATOR_PATH "FXNews-selftest\\FXNews"
-#define HARNESS_MODE_SELFTEST 3          // FXNEWS_MODE_SELFTEST in FXNews.mq5
-#define HARNESS_TIMEOUT_MS 90000
 #define HARNESS_POLL_MS 500
+
+// FXNewsOperatingMode values: 1 VALIDATION, 2 AUTOTUNE, 3 SELFTEST.
+input int HarnessMode = 3;
+input string HarnessSymbols = "";      // empty: the indicator's default basket
+input string HarnessTimeframes = "";   // empty: the indicator's default list
+input int HarnessTimeoutSeconds = 90;
 
 string FindVerdictLabel()
 {
@@ -23,9 +28,13 @@ string FindVerdictLabel()
       if(StringFind(name, "COBR_") != 0)
          continue;
       const string text = ObjectGetString(0, name, OBJPROP_TEXT);
-      // The report header reads "SELFTEST | waiting" until the run completes.
-      if(StringFind(text, "SELFTEST PASSED") >= 0 || StringFind(text, "SELFTEST FAILED") >= 0)
+      // The report header reads "... | waiting" or "... | running" until done.
+      if(StringFind(text, "SELFTEST PASSED") >= 0 || StringFind(text, "SELFTEST FAILED") >= 0 ||
+         StringFind(text, "VALIDATION ready") >= 0 || StringFind(text, "AUTOTUNE ready") >= 0 ||
+         StringFind(text, "ABORTED") >= 0)
+      {
          return text;
+      }
    }
    return "";
 }
@@ -44,7 +53,11 @@ void RemoveIndicators(const string short_name_fragment)
 void OnStart()
 {
    ResetLastError();
-   const int handle = iCustom(_Symbol, _Period, HARNESS_INDICATOR_PATH, HARNESS_MODE_SELFTEST);
+   int handle = INVALID_HANDLE;
+   if(HarnessSymbols == "" && HarnessTimeframes == "")
+      handle = iCustom(_Symbol, _Period, HARNESS_INDICATOR_PATH, HarnessMode);
+   else
+      handle = iCustom(_Symbol, _Period, HARNESS_INDICATOR_PATH, HarnessMode, HarnessSymbols, HarnessTimeframes);
    if(handle == INVALID_HANDLE)
    {
       PrintFormat("FXNEWS_HARNESS: iCustom failed, error %d", GetLastError());
@@ -58,7 +71,8 @@ void OnStart()
    }
 
    string verdict = "";
-   for(int waited = 0; waited < HARNESS_TIMEOUT_MS && !IsStopped(); waited += HARNESS_POLL_MS)
+   const int timeout_ms = HarnessTimeoutSeconds * 1000;
+   for(int waited = 0; waited < timeout_ms && !IsStopped(); waited += HARNESS_POLL_MS)
    {
       Sleep(HARNESS_POLL_MS);
       verdict = FindVerdictLabel();
@@ -66,7 +80,7 @@ void OnStart()
          break;
    }
 
-   PrintFormat("FXNEWS_HARNESS: %s", (verdict == "" ? "TIMEOUT waiting for the self-test verdict" : verdict));
+   PrintFormat("FXNEWS_HARNESS: %s", (verdict == "" ? "TIMEOUT waiting for the verdict" : verdict));
    RemoveIndicators("FXNews");
    IndicatorRelease(handle);
 }

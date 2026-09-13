@@ -31,7 +31,19 @@ Compile `FXNews.mq5` in MetaEditor. On macOS, `tools/build-macos.sh` drives Meta
 ./tools/build-macos.sh
 ```
 
-A clean compile is a syntax gate only. The MQL5 compiler warns about a variable only when it is never touched at all — an initialised-but-unread local, a dead struct copy, a struct field written but never read, and unreachable code all compile silently. Run the dead-code census in [Testing and Validation](https://github.com/Pummelchen/FXNews/wiki/Testing-and-Validation) alongside it.
+A clean compile is a syntax gate only. The MQL5 compiler warns about a variable only when it is never touched at all — an initialised-but-unread local, a dead struct copy, a struct field written but never read, and unreachable code all compile silently. Two more gates cover that gap:
+
+```bash
+tools/census.py
+```
+
+runs the dead-code and placeholder census (Python 3.14) and exits non-zero on any finding, and
+
+```bash
+./tools/selftest-macos.sh
+```
+
+compiles the indicator, runs its built-in self-test headlessly in the terminal and exits non-zero unless every assertion passes. See [Testing and Validation](https://github.com/Pummelchen/FXNews/wiki/Testing-and-Validation).
 
 ## Documentation
 
@@ -49,3 +61,4 @@ The [GitHub Wiki](https://github.com/Pummelchen/FXNews/wiki) is the complete pro
 - [Release Checklist](https://github.com/Pummelchen/FXNews/wiki/Release-Checklist)
 - [Known Limitations](https://github.com/Pummelchen/FXNews/wiki/Known-Limitations)
 - [Changelog](https://github.com/Pummelchen/FXNews/wiki/Changelog)
+- [Project Tracker](https://github.com/Pummelchen/FXNews/wiki/Project-Tracker)

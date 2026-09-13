@@ -401,9 +401,25 @@ struct CompositeSignalScore
    RegimeContext regime;
    CalendarContext calendar;
    SignalBlockReason block_reason;
+   string cap_reasons;        // '|'-separated caps applied by the composer
    string reason_summary;
    string human_reason;
    string compact_tags;
+};
+
+// Readings that do not depend on the direction, evaluated once per profile
+// per scan and shared by the UP and DOWN composites.
+struct SharedComponents
+{
+   ExecutionQuality execution;
+   CalendarContext calendar;
+   double session_score;
+   bool agreement_available;
+   double basket_agreement_up;    // DOWN is exactly 1 - this
+   bool tick_rate_available;
+   double tick_rate_z;
+   bool tick_volume_available;
+   double tick_volume_z;
 };
 
 // Direction-dependent context the composer needs beyond the component structs.
@@ -1144,7 +1160,10 @@ void SelfTestCheck(const bool condition, const string name)
 
 void SelfTestNear(const double actual, const double expected, const string name)
 {
-   if(MathAbs(actual - expected) <= 0.0001)
+   // Relative tolerance: an absolute 0.0001 equalled some expected values
+   // (PipSize on a 5-digit symbol) and let a zero pass as correct.
+   double tolerance = 0.000001 + 0.00001 * MathAbs(expected);
+   if(MathAbs(actual - expected) <= tolerance)
    {
       g_selftest_passed++;
       return;
@@ -1291,7 +1310,8 @@ void SelfTestSymbolsAndTimeframes()
 
    SelfTestCheck(UpperAscii("eurusd") == "EURUSD", "UpperAscii");
    SelfTestCheck(ObjectNamespaceToken("ab-1") == "ab_1", "ObjectNamespaceToken sanitises");
-   SelfTestCheck(StringLen(ObjectNamespaceToken("")) > 0, "ObjectNamespaceToken fills an empty id");
+   SelfTestCheck(SelfTestTokenSafe(ObjectNamespaceToken("")) && SelfTestTokenSafe(ObjectNamespaceToken("a b/c:d")),
+                 "ObjectNamespaceToken yields only object-name-safe characters");
 
    SelfTestGroup("symbols and timeframes", before);
 }
@@ -1319,9 +1339,366 @@ void SelfTestScoringHelpers()
    SelfTestNear(Max3(1.0, 5.0, 3.0), 5.0, "Max3");
    SelfTestCheck(IntMax(3, 7) == 7 && IntMin(3, 7) == 3 && IntAbs(-4) == 4, "integer helpers");
 
-   SelfTestCheck(BaselineHorizonMinutes() >= 1, "BaselineHorizonMinutes is positive");
+   SelfTestCheck(MeetsThreshold(69.6, 70.0) && !MeetsThreshold(69.4, 70.0) && DisplayPercent(94.5) == 95,
+                 "MeetsThreshold rounds like the displayed percentage");
 
    SelfTestGroup("scoring helpers", before);
+}
+
+bool SelfTestTokenSafe(const string token)
+{
+   if(StringLen(token) <= 0)
+      return false;
+   for(int i = 0; i < StringLen(token); i++)
+   {
+      ushort ch = StringGetCharacter(token, i);
+      bool allowed = ((ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) ||
+                      (ch >= 48 && ch <= 57) || ch == 95);
+      if(!allowed)
+         return false;
+   }
+   return true;
+}
+
+void SelfTestResetExecution(ExecutionQuality &execution)
+{
+   execution.pass = false;
+   execution.score = 0.0;
+   execution.spread_pips = 1.0;
+   execution.median_available = false;
+   execution.median_spread_pips = 0.0;
+   execution.spread_ratio = 0.0;
+   execution.spread_z_available = false;
+   execution.spread_z = 0.0;
+   execution.quote_age_sec = 0.0;
+   execution.tick_gap_sec = 0.0;
+   execution.cost_to_atr = 0.05;
+   execution.block_reason = BLOCK_NONE;
+}
+
+void SelfTestResetBreakout(BreakoutStructure &breakout)
+{
+   breakout.pass = false;
+   breakout.measured = false;
+   breakout.candle_measured = false;
+   breakout.score = 0.0;
+   breakout.compression_score = 0.0;
+   breakout.distance_score = 0.0;
+   breakout.close_location_score = 0.0;
+   breakout.hold_score = 0.0;
+   breakout.body_quality_score = 0.0;
+   breakout.wick_rejection_penalty = 0.0;
+   breakout.fakeout_penalty = 0.0;
+}
+
+// The exclude-don't-impute rule and the shared composer: an unmeasured term
+// must not move a score, a measured one must, and the cap ladder must hold.
+void SelfTestAvailabilityAndComposer()
+{
+   int before = g_selftest_failed;
+
+   ExecutionQuality execution;
+   SelfTestResetExecution(execution);
+   execution.spread_ratio = 999.0;
+   execution.spread_z = 99.0;
+   double without_terms = BlendExecutionScore(execution, 0.45, true);
+   execution.spread_ratio = 0.0;
+   execution.spread_z = 0.0;
+   SelfTestNear(BlendExecutionScore(execution, 0.45, true), without_terms,
+                "BlendExecutionScore ignores unmeasured spread terms");
+   execution.median_available = true;
+   execution.spread_ratio = 5.0;
+   SelfTestCheck(BlendExecutionScore(execution, 0.45, true) < without_terms,
+                 "BlendExecutionScore counts a measured wide spread ratio");
+   execution.spread_ratio = 1.0;
+   execution.quote_age_sec = 9999.0;
+   SelfTestCheck(BlendExecutionScore(execution, 0.45, false) > BlendExecutionScore(execution, 0.45, true),
+                 "BlendExecutionScore drops the quote terms when they are unavailable");
+
+   RegimeContext regime_none;
+   RegimeContext regime_garbage;
+   RegimeContext regime_adverse;
+   ComposeRegimeScore(regime_none, 0.92, false, 0.0, false, 0.0, 1.5);
+   ComposeRegimeScore(regime_garbage, 0.92, false, -5.0, false, -5.0, 1.5);
+   ComposeRegimeScore(regime_adverse, 0.92, true, -5.0, true, -5.0, 1.5);
+   SelfTestNear(regime_none.score, regime_garbage.score, "ComposeRegimeScore ignores unmeasured context moves");
+   SelfTestCheck(regime_adverse.score < regime_none.score, "ComposeRegimeScore counts measured adverse context");
+
+   CompositeSignalScore score;
+   ResetCompositeSignalScore(score);
+   score.execution.pass = true;
+   score.execution.score = 1.0;
+   score.execution.median_available = true;
+   score.execution.spread_ratio = 1.0;
+   score.execution.cost_to_atr = 0.05;
+   score.breakout.measured = true;
+   score.breakout.pass = true;
+   score.breakout.score = 1.0;
+   score.breakout.hold_score = 1.0;
+   score.breakout.candle_measured = true;
+   score.breakout.body_quality_score = 1.0;
+   score.impulse.measured = true;
+   score.impulse.pass = true;
+   score.impulse.score = 1.0;
+   score.regime.score = 1.0;
+   CompositeContext context;
+   context.direction = DIR_UP;
+   context.m5_move_directional = 0.0;
+   context.m15_move_directional = 0.0;
+   context.age_seconds = 0;
+   context.age_limit_seconds = 0;
+   context.max_spread_to_atr = 0.45;
+   ComposeSignalScore(score, context, false);
+   SelfTestCheck(score.valid && score.displayed_score > 0.0 && score.displayed_score <= 84.0,
+                 "ComposeSignalScore caps a basket-less score at 84");
+   double full_score = score.displayed_score;
+   score.impulse.measured = false;
+   score.impulse.pass = false;
+   score.impulse.score = 0.0;
+   ComposeSignalScore(score, context, false);
+   SelfTestNear(score.displayed_score, full_score, "ComposeSignalScore excludes an unmeasured impulse from the normaliser");
+   context.age_seconds = 400;
+   context.age_limit_seconds = 300;
+   ComposeSignalScore(score, context, false);
+   SelfTestCheck(!score.valid && score.block_reason == BLOCK_EXPIRED && score.age_free_score > 0.0,
+                 "ComposeSignalScore expires at the age limit and keeps the age-free score");
+   context.age_limit_seconds = 0;
+   ComposeSignalScore(score, context, false);
+   SelfTestCheck(score.valid && score.displayed_score <= 70.0,
+                 "ComposeSignalScore applies late_event_cap without an age limit");
+   score.regime.m5_available = true;
+   context.age_seconds = 0;
+   context.m5_move_directional = M5RejectAtr - 0.01;
+   ComposeSignalScore(score, context, false);
+   SelfTestCheck(score.displayed_score <= 69.0, "ComposeSignalScore mtf_reject_cap uses the raw reject level");
+
+   BreakoutStructure breakout;
+   SelfTestResetBreakout(breakout);
+   ComputeBreakoutStructure(DIR_UP, 0.0010, 0.0015, 0.0002, 0.0001, 1.8,
+                            1.1000, 1.10002, 1.1000, 1.10001, 60.0, -1.0, breakout);
+   SelfTestCheck(breakout.measured && !breakout.candle_measured && breakout.hold_score > 0.99 && breakout.pass,
+                 "ComputeBreakoutStructure: tiny candle unmeasured, full hold after 60 s");
+   SelfTestResetBreakout(breakout);
+   ComputeBreakoutStructure(DIR_UP, 0.0010, 0.0015, 0.0002, 0.0001, 1.8,
+                            1.1000, 1.1008, 1.1000, 1.1007, -1.0, 5.0, breakout);
+   SelfTestCheck(breakout.candle_measured && breakout.close_location_score > 0.8 &&
+                 breakout.hold_score == 0.0 && breakout.fakeout_penalty > 0.5,
+                 "ComputeBreakoutStructure reads a strong candle, no hold, a fresh snapback");
+
+   SelfTestNear(RobustZ(1.0, 0.0, 0.0, 0.5), 2.0, "RobustZ uses the sigma floor on zero dispersion");
+   SelfTestNear(RobustZ(1.0, 0.0, 0.0), 0.0, "RobustZ without a floor returns 0 on zero dispersion");
+
+   SelfTestCheck(PadRight("ab", 4) == "ab  " && PadRight("abcdef", 4) == "abcdef", "PadRight pads and never truncates");
+   SelfTestCheck(FormatLocalTimestamp(D'2026.09.13 08:05:09') == "2026-09-13 08:05:09", "FormatLocalTimestamp");
+   string long_text = "";
+   for(int i = 0; i < 26; i++)
+      long_text += "word" + IntegerToString(i) + " ";
+   string pieces[];
+   int piece_count = WrapLabelText(long_text, pieces);
+   bool pieces_fit = (piece_count >= 3);
+   for(int i = 0; i < piece_count; i++)
+      pieces_fit = pieces_fit && (StringLen(pieces[i]) <= DASHBOARD_MAX_TEXT_CHARS);
+   SelfTestCheck(pieces_fit && StringFind(pieces[1], "  ") == 0,
+                 "WrapLabelText splits at the label limit and indents continuations");
+
+   SelfTestGroup("availability and composer", before);
+}
+
+// The historical engine on a synthetic minute series with a known shape and
+// a deliberate ten-minute gap after bar 250.
+void SelfTestHistoricalEngine()
+{
+   int before = g_selftest_failed;
+
+   int total = 400;
+   MqlRates rates[];
+   if(ArrayResize(rates, total) != total)
+   {
+      SelfTestCheck(false, "historical engine: synthetic series allocation");
+      SelfTestGroup("historical engine", before);
+      return;
+   }
+   datetime t = D'2026.01.05 00:00';
+   for(int i = 0; i < total; i++)
+   {
+      if(i == 250)
+         t += 600;
+      rates[i].time = t;
+      rates[i].open = 1.1000 + (double)i * 0.0001;
+      rates[i].high = rates[i].open + 0.0002;
+      rates[i].low = rates[i].open - 0.0001;
+      rates[i].close = rates[i].open + 0.0001;
+      rates[i].tick_volume = 10 + (i % 3);
+      rates[i].spread = ((i % 2) == 0 ? 10 : 0);
+      rates[i].real_volume = 0;
+      t += 60;
+   }
+
+   SelfTestCheck(IsHistoricalEvaluationBoundary(D'2026.01.05 00:05', 5) &&
+                 !IsHistoricalEvaluationBoundary(D'2026.01.05 00:06', 5),
+                 "IsHistoricalEvaluationBoundary on the M5 grid");
+   SelfTestCheck(IsHistoricalEvaluationBoundary(D'2026.01.06 00:00', 1440) &&
+                 !IsHistoricalEvaluationBoundary(D'2026.01.05 12:00', 1440),
+                 "IsHistoricalEvaluationBoundary on the D1 grid");
+   SelfTestCheck(HistoricalIndexAtOrBefore(rates, total, rates[100].time) == 100 &&
+                 HistoricalIndexAtOrBefore(rates, total, rates[100].time + 30) == 100 &&
+                 HistoricalIndexAtOrBefore(rates, total, rates[0].time - 60) == -1,
+                 "HistoricalIndexAtOrBefore");
+
+   HistoricalBar bar;
+   double volume_95_99 = 0.0;
+   for(int i = 95; i <= 99; i++)
+      volume_95_99 += (double)rates[i].tick_volume;
+   SelfTestCheck(AggregateHistoricalBarAt(rates, total, rates[99].time + 60, 300, 0, bar) && bar.valid &&
+                 MathAbs(bar.open - rates[95].open) < 0.0000001 &&
+                 MathAbs(bar.close - rates[99].close) < 0.0000001 &&
+                 MathAbs(bar.high - rates[99].high) < 0.0000001 &&
+                 MathAbs(bar.low - rates[95].low) < 0.0000001 &&
+                 MathAbs(bar.volume - volume_95_99) < 0.0000001,
+                 "AggregateHistoricalBarAt aggregates the five minutes ending at the boundary");
+   SelfTestCheck(AggregateHistoricalBarAt(rates, total, rates[99].time + 60, 300, 1, bar) &&
+                 MathAbs(bar.open - rates[90].open) < 0.0000001,
+                 "AggregateHistoricalBarAt steps back whole bars");
+   SelfTestCheck(!AggregateHistoricalBarAt(rates, total, rates[252].time + 60, 900, 0, bar) && !bar.valid,
+                 "AggregateHistoricalBarAt rejects a bar missing most of its minutes");
+
+   HistoricalBar bars[];
+   if(ArrayResize(bars, 20) == 20)
+   {
+      for(int k = 0; k < 20; k++)
+         AggregateHistoricalBarAt(rates, total, rates[199].time + 60, 300, k, bars[k]);
+      SelfTestNear(HistoricalATRFromBars(bars, 20, 14), 0.0007, "HistoricalATRFromBars on the synthetic bars");
+      double range_high = 0.0;
+      double range_low = 0.0;
+      SelfTestCheck(HistoricalRangeBox(bars, 10, range_high, range_low) &&
+                    MathAbs(range_high - bars[1].high) < 0.0000001 &&
+                    MathAbs(range_low - bars[10].low) < 0.0000001,
+                    "HistoricalRangeBox spans bars 1..lookback");
+      double volume_z = 0.0;
+      SelfTestCheck(HistoricalTickVolumeZ(bars, 20, volume_z) && MathAbs(volume_z) < 3.0,
+                    "HistoricalTickVolumeZ measures against the previous bars");
+   }
+   else
+      SelfTestCheck(false, "historical engine: bar allocation");
+
+   SelfTestNear(HistoricalSpreadPips(rates[0], 0.00001, 0.0001), 1.0, "HistoricalSpreadPips converts points to pips");
+   SelfTestNear(HistoricalSpreadPips(rates[1], 0.00001, 0.0001), 0.0, "HistoricalSpreadPips reports a missing spread as 0");
+
+   double result_R = 0.0;
+   bool target_hit = false;
+   bool stop_hit = false;
+   // The excursion reaches the target in the fifth minute up to floating-point
+   // rounding, so the window is six minutes to keep the assertion exact.
+   SelfTestCheck(EvaluateHistoricalOutcomeAtHorizon(rates, total, 100, DIR_UP, rates[100].close, 0.0001, 0.0010, 6,
+                                                    result_R, target_hit, stop_hit) &&
+                 target_hit && !stop_hit && MathAbs(result_R - 0.0005 / 0.00035) < 0.000001,
+                 "outcome: a rising series hits the target first, paying the spread");
+   SelfTestCheck(EvaluateHistoricalOutcomeAtHorizon(rates, total, 100, DIR_DOWN, rates[100].close, 0.0001, 0.0010, 5,
+                                                    result_R, target_hit, stop_hit) &&
+                 stop_hit && !target_hit && MathAbs(result_R + 1.0) < 0.000001,
+                 "outcome: a short against a rising series stops out at -1 R");
+   SelfTestCheck(EvaluateHistoricalOutcomeAtHorizon(rates, total, 100, DIR_UP, rates[100].close, 0.0001, 0.0010, 1,
+                                                    result_R, target_hit, stop_hit) &&
+                 !target_hit && !stop_hit && MathAbs(result_R) < 0.000001,
+                 "outcome: an undecided window closes at the exit price");
+   SelfTestCheck(!EvaluateHistoricalOutcomeAtHorizon(rates, total, 249, DIR_UP, rates[249].close, 0.0001, 0.0010, 5,
+                                                     result_R, target_hit, stop_hit),
+                 "outcome: a gapped horizon is unevaluable");
+   double saved_high = rates[300].high;
+   double saved_low = rates[300].low;
+   rates[300].high = rates[299].close + 0.0100;
+   rates[300].low = rates[299].close - 0.0100;
+   SelfTestCheck(EvaluateHistoricalOutcomeAtHorizon(rates, total, 299, DIR_UP, rates[299].close, 0.0001, 0.0010, 5,
+                                                    result_R, target_hit, stop_hit) &&
+                 stop_hit && !target_hit,
+                 "outcome: target and stop in one minute resolve as a stop");
+   rates[300].high = saved_high;
+   rates[300].low = saved_low;
+
+   HistoricalBacktestStats stats;
+   ResetHistoricalStats(stats);
+   AddHistoricalBucketStats(stats, 60, 1.0);
+   AddHistoricalBucketStats(stats, 85, -1.0);
+   AddHistoricalBucketStats(stats, 75, 0.5);
+   SelfTestCheck(stats.bucket60_count == 1 && stats.bucket85_count == 1 && stats.bucket75_count == 1 &&
+                 MathAbs(stats.bucket75_R - 0.5) < 0.000001,
+                 "AddHistoricalBucketStats routes by bucket floor");
+   stats.gross_win_R = 3.0;
+   stats.gross_loss_R = 1.0;
+   SelfTestNear(ProfitFactorProxy(stats), 1.5, "ProfitFactorProxy with the unit prior");
+   stats.target_score_sum = 160.0;
+   stats.target_score_count = 2;
+   stats.stop_score_sum = 70.0;
+   stats.stop_score_count = 1;
+   SelfTestNear(ScoreEdge(stats), 10.0, "ScoreEdge");
+   stats.signals = AutotuneMinSignals - 1;
+   SelfTestCheck(AutotuneObjective(stats) < -99999.0, "AutotuneObjective floors an under-sampled candidate");
+   SelfTestCheck(TimeframeMinutes(PERIOD_M5) == 5 && TimeframeMinutes(PERIOD_M30) == 30 &&
+                 TimeframeMinutes(PERIOD_H1) == 60 && TimeframeMinutes(PERIOD_H8) == 480 &&
+                 TimeframeMinutes(PERIOD_H12) == 720 && TimeframeMinutes(PERIOD_W1) == 0,
+                 "TimeframeMinutes covers the remaining branches");
+
+   SelfTestGroup("historical engine", before);
+}
+
+// The recent-signal list on synthetic profiles: insert, update in place,
+// sub-threshold rejection, capacity eviction with the minimum dwell.
+void SelfTestSignalHistory()
+{
+   int before = g_selftest_failed;
+   int profile_count = SIGNAL_HISTORY_SIZE + 2;
+   if(ArrayResize(g_profiles, profile_count) != profile_count)
+   {
+      SelfTestCheck(false, "signal history: profile allocation");
+      SelfTestGroup("signal history", before);
+      return;
+   }
+   for(int i = 0; i < profile_count; i++)
+   {
+      ResetProfile(g_profiles[i], StringFormat("S%02d", i), PERIOD_M5, "M5");
+      g_profiles[i].composite_up.human_reason = "test";
+      g_profiles[i].composite_up.compact_tags = "BRK+";
+   }
+   ClearSignalHistory();
+
+   datetime base = D'2026.09.13 10:00:00';
+   PushSignalHistory(0, DIR_UP, 80.0, base);
+   SelfTestCheck(g_signal_history_count == 1 && g_signal_history[0].used &&
+                 StringFind(g_signal_history[0].text, "S00") >= 0 &&
+                 g_signal_history[0].reason == "test | BRK+",
+                 "PushSignalHistory inserts a displayable entry with its reason");
+   PushSignalHistory(0, DIR_UP, 50.0, base + 5);
+   SelfTestCheck(g_signal_history_count == 1 && MathAbs(g_signal_history[0].score - 80.0) < 0.000001,
+                 "PushSignalHistory ignores a sub-threshold score");
+   PushSignalHistory(0, DIR_UP, 90.0, base + 5);
+   SelfTestCheck(g_signal_history_count == 1 && MathAbs(g_signal_history[0].score - 90.0) < 0.000001,
+                 "PushSignalHistory updates the same signal in place");
+
+   for(int i = 1; i < SIGNAL_HISTORY_SIZE; i++)
+      PushSignalHistory(i, DIR_UP, 80.0, base + i);
+   SelfTestCheck(g_signal_history_count == SIGNAL_HISTORY_SIZE &&
+                 g_signal_history[0].symbol == StringFormat("S%02d", SIGNAL_HISTORY_SIZE - 1) &&
+                 g_signal_history[SIGNAL_HISTORY_SIZE - 1].symbol == "S00",
+                 "PushSignalHistory keeps newest-first order at capacity");
+   // Every slot is inside its dwell: the tail goes.
+   PushSignalHistory(SIGNAL_HISTORY_SIZE, DIR_UP, 80.0, base + SIGNAL_HISTORY_SIZE);
+   SelfTestCheck(g_signal_history_count == SIGNAL_HISTORY_SIZE &&
+                 g_signal_history[0].symbol == StringFormat("S%02d", SIGNAL_HISTORY_SIZE) &&
+                 g_signal_history[SIGNAL_HISTORY_SIZE - 1].symbol == "S01",
+                 "PushSignalHistory evicts the tail when every slot is within its dwell");
+   // Now every slot is past its dwell: the oldest past-dwell slot goes.
+   PushSignalHistory(SIGNAL_HISTORY_SIZE + 1, DIR_UP, 80.0, base + 1000);
+   SelfTestCheck(g_signal_history_count == SIGNAL_HISTORY_SIZE &&
+                 g_signal_history[0].symbol == StringFormat("S%02d", SIGNAL_HISTORY_SIZE + 1) &&
+                 g_signal_history[SIGNAL_HISTORY_SIZE - 1].symbol == "S02",
+                 "PushSignalHistory evicts the oldest slot past its dwell");
+   SelfTestCheck(!IsSignalMessageDisplayable(RecentListMinScore - 0.6) &&
+                 IsSignalMessageDisplayable(RecentListMinScore - 0.4),
+                 "IsSignalMessageDisplayable rounds against RecentListMinScore");
+
+   ClearSignalHistory();
+   ArrayResize(g_profiles, 0);
+   SelfTestGroup("signal history", before);
 }
 
 void RunSelfTest()
@@ -1341,9 +1718,13 @@ void RunSelfTest()
    SelfTestTimeAndSession();
    SelfTestSymbolsAndTimeframes();
    SelfTestScoringHelpers();
+   SelfTestAvailabilityAndComposer();
+   SelfTestHistoricalEngine();
+   SelfTestSignalHistory();
 
-   AddHistoricalReportLine(StringFormat("RESULT: %d passed, %d failed",
-                                        g_selftest_passed, g_selftest_failed));
+   AddHistoricalReportLine(StringFormat("RESULT: %d passed, %d failed of %d assertions",
+                                        g_selftest_passed, g_selftest_failed,
+                                        g_selftest_passed + g_selftest_failed));
    if(g_selftest_failed > 0)
       AddHistoricalReportLine("Failures are listed individually above in the Journal.");
 
@@ -4353,8 +4734,10 @@ void CalculateScoresAndUpdateState(const int index, const datetime now)
    g_profiles[index].final_score_up = 0.0;
    g_profiles[index].final_score_down = 0.0;
 
-   BuildCompositeSignalScore(index, DIR_UP, now, g_profiles[index].composite_up);
-   BuildCompositeSignalScore(index, DIR_DOWN, now, g_profiles[index].composite_down);
+   SharedComponents shared;
+   EvaluateSharedComponents(index, now, shared);
+   BuildCompositeSignalScore(index, DIR_UP, now, shared, g_profiles[index].composite_up);
+   BuildCompositeSignalScore(index, DIR_DOWN, now, shared, g_profiles[index].composite_down);
 
    if(g_profiles[index].composite_up.valid)
       g_profiles[index].final_score_up = g_profiles[index].composite_up.displayed_score;
@@ -4371,6 +4754,7 @@ void ResetCompositeSignalScore(CompositeSignalScore &score)
    score.displayed_score = 0.0;
    score.age_free_score = 0.0;
    score.block_reason = BLOCK_NONE;
+   score.cap_reasons = "";
    score.reason_summary = "";
    score.human_reason = "";
    score.compact_tags = "";
@@ -4444,14 +4828,33 @@ void ResetCompositeSignalScore(CompositeSignalScore &score)
    score.calendar.state_tag = "NEWS_UNAVAILABLE";
 }
 
+// Execution, calendar, session, basket agreement and the tick deviations do
+// not depend on the direction; evaluating them per direction did every one of
+// them twice per profile per scan.
+void EvaluateSharedComponents(const int index, const datetime now, SharedComponents &shared)
+{
+   EvaluateExecutionQuality(index, now, shared.execution);
+   EvaluateCalendarContext(index, now, shared.calendar);
+   shared.session_score = SessionQualityScore(now);
+   shared.agreement_available = false;
+   shared.basket_agreement_up = 0.0;
+   if(UseCurrencyStrength && shared.execution.pass)
+      shared.basket_agreement_up = CalculateBasketAgreement(index, DIR_UP, shared.agreement_available);
+   shared.tick_rate_available = false;
+   shared.tick_rate_z = TickRateZ(index, shared.tick_rate_available);
+   shared.tick_volume_available = false;
+   shared.tick_volume_z = TickVolumeDeviation(index, shared.tick_volume_available);
+}
+
 void BuildCompositeSignalScore(const int index,
                                const int direction,
                                const datetime now,
+                               const SharedComponents &shared,
                                CompositeSignalScore &score)
 {
    ResetCompositeSignalScore(score);
 
-   EvaluateExecutionQuality(index, now, score.execution);
+   score.execution = shared.execution;
    if(!score.execution.pass)
    {
       FinishBlockedScore(score, score.execution.block_reason, "");
@@ -4459,10 +4862,10 @@ void BuildCompositeSignalScore(const int index,
    }
 
    EvaluateBreakoutStructure(index, direction, now, score.breakout);
-   EvaluateImpulseQuality(index, direction, score.impulse);
-   EvaluateCurrencyFlowQuality(index, direction, score.flow);
-   EvaluateRegimeContext(index, direction, now, score.regime);
-   EvaluateCalendarContext(index, now, score.calendar);
+   EvaluateImpulseQuality(index, direction, shared, score.impulse);
+   EvaluateCurrencyFlowQuality(index, direction, shared, score.flow);
+   EvaluateRegimeContext(index, direction, shared.session_score, score.regime);
+   score.calendar = shared.calendar;
 
    if(CalendarPreNewsBlock(score.calendar))
    {
@@ -4504,7 +4907,12 @@ void BuildCompositeSignalScore(const int index,
    context.age_seconds = EventAgeSeconds(index, direction, now);
    context.age_limit_seconds = EventAgeLimitSeconds(index);
    context.max_spread_to_atr = MaxSpreadToAtrRatio;
-   ComposeSignalScore(score, context);
+   ComposeSignalScore(score, context, false);
+   // Text is only consumed by displayed rows, alerts, the history and the
+   // debug output; building it for every sub-threshold profile was the most
+   // expensive string work of the scan.
+   if(ShowBlockedSignalsDebug || DebugScoreBreakdown || MeetsThreshold(score.displayed_score, MinDisplayConfidence))
+      BuildScoreText(score);
 
    if(DebugScoreBreakdown && DebugPrintToJournal &&
       MeetsThreshold(score.displayed_score, MinDisplayConfidence) &&
@@ -4638,24 +5046,31 @@ void ComposeSignalScore(CompositeSignalScore &score, const CompositeContext &con
 
    score.displayed_score = Clamp(capped, 0.0, 100.0);
    score.valid = (score.displayed_score > 0.0);
-   // The historical validator scores millions of boundaries and never shows
-   // them, so it skips the text.
+   score.cap_reasons = caps;
    if(build_text)
-   {
-      score.reason_summary = BuildReasonSummary(score, caps);
-      score.compact_tags = BuildCompactTags(score);
-      score.human_reason = BuildHumanReadableReason(score);
-   }
+      BuildScoreText(score);
 }
 
-// Every block path leaves the same three fields filled so a blocked row's
-// tooltip reads like an active one.
+// The three text fields of a composed score, from its components and caps.
+void BuildScoreText(CompositeSignalScore &score)
+{
+   score.reason_summary = BuildReasonSummary(score, score.cap_reasons);
+   score.compact_tags = BuildCompactTags(score);
+   score.human_reason = BuildHumanReadableReason(score);
+}
+
+// Every block path leaves the same fields filled so a blocked row's tooltip
+// reads like an active one; the tags and human text exist only when blocked
+// rows or debug output can show them.
 void FinishBlockedScore(CompositeSignalScore &score, const SignalBlockReason reason, const string detail)
 {
    score.block_reason = reason;
    score.reason_summary = "blocked=" + (detail == "" ? BlockReasonText(reason) : detail);
-   score.compact_tags = BuildCompactTags(score);
-   score.human_reason = BuildHumanReadableReason(score);
+   if(ShowBlockedSignalsDebug || DebugScoreBreakdown)
+   {
+      score.compact_tags = BuildCompactTags(score);
+      score.human_reason = BuildHumanReadableReason(score);
+   }
 }
 
 // The dashboard prints a rounded percentage, so every threshold comparison
@@ -4919,7 +5334,10 @@ void ComputeBreakoutStructure(const int direction,
    breakout.pass = (distance > 0.0 && breakout.score > 0.06);
 }
 
-void EvaluateImpulseQuality(const int index, const int direction, ImpulseQuality &impulse)
+void EvaluateImpulseQuality(const int index,
+                            const int direction,
+                            const SharedComponents &shared,
+                            ImpulseQuality &impulse)
 {
    impulse.pass = false;
    impulse.measured = false;
@@ -4990,8 +5408,10 @@ void EvaluateImpulseQuality(const int index, const int direction, ImpulseQuality
                                                                g_profiles[index].atr_trigger,
                                                                0.0));
 
-   impulse.tick_rate_z = TickRateZ(index, impulse.tick_rate_available);
-   impulse.tick_volume_z = TickVolumeDeviation(index, impulse.tick_volume_available);
+   impulse.tick_rate_available = shared.tick_rate_available;
+   impulse.tick_rate_z = shared.tick_rate_z;
+   impulse.tick_volume_available = shared.tick_volume_available;
+   impulse.tick_volume_z = shared.tick_volume_z;
    bool continuation_available = false;
    double continuation = ContinuationScore(index, direction, continuation_available) / 100.0;
 
@@ -5042,6 +5462,7 @@ void BlendImpulseScore(ImpulseQuality &impulse,
 
 void EvaluateCurrencyFlowQuality(const int index,
                                  const int direction,
+                                 const SharedComponents &shared,
                                  CurrencyFlowQuality &flow)
 {
    flow.available = false;
@@ -5082,8 +5503,12 @@ void EvaluateCurrencyFlowQuality(const int index,
    flow.base_strength = (g_currency_sum[base] - own_contribution) / base_weight;
    flow.quote_strength = (g_currency_sum[quote] + own_contribution) / quote_weight;
    flow.directional_edge = (flow.base_strength - flow.quote_strength) * (double)direction;
-   bool agreement_available = false;
-   flow.basket_agreement = CalculateBasketAgreement(index, direction, agreement_available);
+   // Every peer contributes to exactly one side, or half to both, so the DOWN
+   // agreement is exactly one minus the UP agreement.
+   bool agreement_available = shared.agreement_available;
+   flow.basket_agreement = (agreement_available ?
+                            (direction == DIR_UP ? shared.basket_agreement_up : 1.0 - shared.basket_agreement_up) :
+                            0.0);
 
    double edge_score = SmoothStep(MinDirectionalEdgeForHighScore * 0.20,
                                   MinDirectionalEdgeForHighScore,
@@ -5114,11 +5539,11 @@ void EvaluateCurrencyFlowQuality(const int index,
 
 void EvaluateRegimeContext(const int index,
                            const int direction,
-                           const datetime now,
+                           const double session_score,
                            RegimeContext &regime)
 {
    ComposeRegimeScore(regime,
-                      SessionQualityScore(now),
+                      session_score,
                       g_profiles[index].has_m5_move,
                       g_profiles[index].m5_move_atr * (double)direction,
                       g_profiles[index].has_m15_move,

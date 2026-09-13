@@ -181,6 +181,8 @@ double g_outcome_stop_atr = 0.0;
 #define STATUS_ROW_INDEX 1
 #define SIGNAL_FIRST_ROW_INDEX 3
 #define CALENDAR_REFRESH_SECONDS 60
+// Score of a currency whose calendar was read and holds nothing in the window.
+#define CALENDAR_QUIET_SCORE 0.65
 #define SESSION_COUNT 6
 #define MAX_SYMBOL_TOKEN_LENGTH 32
 #define MAX_UNIQUE_SYMBOLS 32
@@ -203,6 +205,26 @@ double g_outcome_stop_atr = 0.0;
 // There is deliberately no neutral placeholder to mistake for a measurement.
 #define FLOW_CONFIRM_THRESHOLD 0.62
 #define REGIME_CONFIRM_THRESHOLD 0.62
+// An engine reading at or above this level is shown as confirmed (BRK+ / IMP+)
+// and lets the row lead with that engine; the single-feature cap uses the same
+// level so a tag and the cap can never disagree.
+#define ENGINE_CONFIRM_THRESHOLD 0.60
+// Candle-shape metrics are meaningless on a bar that has barely moved; below
+// this fraction of the ATR they are treated as unmeasured, not as zero.
+#define CANDLE_MEASURE_MIN_ATR 0.05
+// Spread median and robust z need this many ring samples before they count.
+#define MIN_SPREAD_SAMPLES 5
+// Acceleration ramp: difference between the 5 s and 30 s rates, in ATR per second.
+#define ACCELERATION_FULL_ATR_PER_SECOND 0.012
+// The forming bar's tick count is projected to a full bar once this fraction of
+// the bar has elapsed; before that the last completed bar stands in.
+#define TICK_VOLUME_PROJECTION_MIN_FRACTION 0.20
+// Speed z-scores are measured over these windows, each against its own baseline
+// of same-length window rates; a 30 s average has far less dispersion than the
+// 2 s interval rates the single baseline used to be built from.
+#define SPEED_WINDOW_COUNT 3
+// Scale from a median absolute deviation to a normal-equivalent sigma.
+#define MAD_TO_SIGMA 1.4826
 // Upper edges of the multi-timeframe and basket ramps. Declared here so the
 // bounds enforced in ValidateInputs() stay tied to the values actually used.
 #define M5_CONTEXT_FULL_ATR 0.35
@@ -210,6 +232,13 @@ double g_outcome_stop_atr = 0.0;
 #define BASKET_AGREEMENT_SCORE_FLOOR 0.45
 // Baseline plus the eight fixed candidate profiles evaluated by Autotune.
 #define AUTOTUNE_CANDIDATE_COUNT 9
+// Freshness caps on a running event and the age at which a decayed signal ends.
+#define AGING_EVENT_SECONDS 60
+#define LATE_EVENT_SECONDS 180
+#define SIGNAL_DECAY_GRACE_SECONDS 5
+// A confirmed signal that collapses within this many seconds is treated like a
+// failed candidate and takes the shorter cooldown.
+#define SIGNAL_EARLY_COLLAPSE_SECONDS 30
 #define MIN_ALERT_INTERVAL_SECONDS 30
 #define MAX_ALERTS_PER_MINUTE 12
 #define MAX_DEBUG_LINES_PER_MINUTE 30
@@ -242,7 +271,10 @@ enum SignalBlockReason
    BLOCK_NO_ATR = 4,
    BLOCK_NO_RANGE = 5,
    BLOCK_NO_MOVEMENT_DATA = 6,
-   BLOCK_CONTEXT_CONFLICT = 7
+   BLOCK_CONTEXT_CONFLICT = 7,
+   BLOCK_NO_SETUP = 8,              // data present, no breakout or impulse in this direction
+   BLOCK_SPREAD_ONLY_BREAKOUT = 9,  // the excursion beyond the range is smaller than the spread
+   BLOCK_EXPIRED = 10               // the event outlived its age limit
 };
 
 struct ExecutionQuality
@@ -250,8 +282,10 @@ struct ExecutionQuality
    bool pass;
    double score;              // 0..1
    double spread_pips;
+   bool median_available;     // false until the spread ring holds MIN_SPREAD_SAMPLES
    double median_spread_pips;
    double spread_ratio;
+   bool spread_z_available;
    double spread_z;
    double quote_age_sec;
    double tick_gap_sec;
@@ -262,6 +296,8 @@ struct ExecutionQuality
 struct BreakoutStructure
 {
    bool pass;
+   bool measured;             // engine enabled and range/ATR data present
+   bool candle_measured;      // trigger bar has moved enough for shape metrics
    double score;              // 0..1
    double compression_score;
    double distance_score;
@@ -275,23 +311,25 @@ struct BreakoutStructure
 struct ImpulseQuality
 {
    bool pass;
+   bool measured;             // engine enabled and at least one speed window ready
    double score;              // 0..1
    double speed_5s_z;
    double speed_10s_z;
    double speed_30s_z;
    double acceleration_score;
    double atr_expansion_score;
+   bool tick_rate_available;
    double tick_rate_z;
+   bool tick_volume_available;
    double tick_volume_z;
    double exhaustion_penalty;
+   bool tick_quality_available;
    double tick_sample_quality_score;
-   int valid_ticks_used;
    string tick_state;
 };
 
 struct CurrencyFlowQuality
 {
-   bool pass;
    bool available;            // false when the basket produced no usable reading
    double score;              // 0..1
    double base_strength;
@@ -305,24 +343,22 @@ struct RegimeContext
 {
    double score;              // 0..1
    double session_score;
+   bool m5_available;
+   bool m15_available;
    double mtf_alignment_score;
    double m5_context_score;
    double m15_context_score;
    double volatility_regime_score;
-   double rollover_penalty;
 };
 
 struct CalendarContext
 {
    bool available;
-   bool relevant_event_nearby;
    bool high_impact_nearby;
    bool just_released;
    bool future_high_impact_nearby;
    double score;              // 0..1
-   double proximity_minutes;
    double future_high_impact_minutes;
-   double importance_score;
    double uncertainty_penalty;
    string state_tag;
 };
@@ -330,9 +366,9 @@ struct CalendarContext
 struct CompositeSignalScore
 {
    bool valid;
-   int direction;
    double raw_score;          // 0..100 before final caps
    double displayed_score;    // rounded dashboard score source
+   double age_free_score;     // displayed score before the event-age caps
    ExecutionQuality execution;
    BreakoutStructure breakout;
    ImpulseQuality impulse;
@@ -449,9 +485,7 @@ struct CurrencyCalendarCache
    bool just_released;
    bool future_high_impact_nearby;
    double score;
-   double proximity_minutes;
    double future_high_impact_minutes;
-   double importance_score;
    double uncertainty_penalty;
 };
 
@@ -487,7 +521,10 @@ struct SymbolProfile
    double pip_size;
    string symbol_upper;              // interned once; avoids UpperAscii in hot loops
    bool is_first_profile_for_symbol; // recomputed only when a symbol is resolved
+   int symbol_leader_index;          // the first profile of this symbol
    double m1_atr_pips;               // true M1 ATR, basket strength only
+   double basket_contribution;       // this symbol's weighted strength in the basket
+   double basket_weight;             // and the weight it carried (leader profile only)
 
    bool quote_fresh;
    datetime quote_time;
@@ -498,7 +535,11 @@ struct SymbolProfile
    double spread_pips;
    double median_spread_pips;
    double spread_z;
-   double tick_gap_sec;
+   double tick_gap_sec;              // max(last tick interval, current quote age)
+   double last_tick_interval_sec;    // seconds between the two most recent distinct ticks
+   double quote_age_sec;             // wall-clock age of the last quote
+   bool spread_stats_ready;          // ring holds MIN_SPREAD_SAMPLES samples
+   bool tick_rate_available;
    double tick_rate_per_sec;
    double session_spread_z;
    double session_tick_rate_z;
@@ -506,6 +547,7 @@ struct SymbolProfile
    bool session_baseline_ready;
    SessionBucket session_index;
    string session_name;
+   bool tick_quality_available;      // measured from CopyTicks this scan
    double tick_sample_quality_score;
    int valid_ticks_used;
    string tick_state;
@@ -520,25 +562,29 @@ struct SymbolProfile
    double range_high;
    double range_low;
    double range_width;
+   datetime range_anchor_bar_time;   // trigger bar the box was last built on
 
    double current_trigger_open;
    double current_trigger_high;
    double current_trigger_low;
    double current_trigger_close;
    datetime trigger_bar_time;
-   double current_trigger_tick_volume;
-   double last_completed_trigger_tick_volume;
+   double active_trigger_tick_volume;    // forming bar projected to a full bar
    double average_trigger_tick_volume;
 
-   double snapshot_median_rate;      // per-scan cache, direction independent
-   double snapshot_mad_rate;
+   // Per-scan speed baselines, one per window, direction independent.
+   bool speed_baseline_ready[SPEED_WINDOW_COUNT];
+   double speed_median_rate[SPEED_WINDOW_COUNT];
+   double speed_mad_rate[SPEED_WINDOW_COUNT];
+   int snapshot_coverage_sec;            // span of the snapshot ring
 
    double speed_5s_pips;
    double speed_10s_pips;
    double speed_30s_pips;
    double speed_60s_pips;
    double movement_5m_pips;
-   double movement_15m_pips;
+   bool has_m5_move;
+   bool has_m15_move;
    double m5_move_atr;
    double m15_move_atr;
 
@@ -590,9 +636,10 @@ int g_signal_history_count = 0;
 int g_visible_signal_history_count = 0;
 ENUM_TIMEFRAMES g_scan_timeframes[];
 string g_scan_timeframe_labels[];
-double g_currency_strength[CURRENCY_COUNT];
+double g_currency_sum[CURRENCY_COUNT];       // weighted strength sum per currency
 int g_currency_samples[CURRENCY_COUNT];
 double g_currency_weight[CURRENCY_COUNT];
+const int g_speed_window_seconds[SPEED_WINDOW_COUNT] = {5, 10, 30};
 string g_currency_codes[CURRENCY_COUNT] = {"EUR","USD","GBP","JPY","CHF","AUD","NZD","CAD"};
 SessionBaseline g_session_baselines[];
 CurrencyCalendarCache g_calendar_cache[CURRENCY_COUNT];
@@ -639,8 +686,59 @@ void InitializeRuntimeSettings()
    g_outcome_stop_atr = OutcomeStopAtr;
 }
 
+// Globals survive a re-initialisation that keeps the program instance
+// (parameter change, timeframe change, template load), so every piece of run
+// state is reset explicitly; otherwise a second SELFTEST or backtest never
+// runs and the previous parameter set's signal rows stay on the chart.
+void ResetRuntimeState()
+{
+   g_selftest_done = false;
+   g_selftest_passed = 0;
+   g_selftest_failed = 0;
+   g_historical_run_started = false;
+   g_historical_run_finished = false;
+   ClearHistoricalReport();
+   ClearSignalHistory();
+
+   g_calendar_available = false;
+   g_last_diagnostics_print = 0;
+   g_average_scan_ms = 0.0;
+   g_max_scan_ms = 0.0;
+   g_scan_count = 0;
+   g_last_valid_symbols = 0;
+   g_last_invalid_symbols = 0;
+   g_last_active_profiles = 0;
+   g_last_tick_history_ok = 0;
+   g_alert_window_started = 0;
+   g_alerts_in_window = 0;
+   g_debug_window_started = 0;
+   g_debug_lines_in_window = 0;
+   g_last_dashboard_update = 0;
+   g_last_signal_message_refresh = 0;
+   g_symbol_identity_dirty = true;
+
+   for(int i = 0; i < CURRENCY_COUNT; i++)
+   {
+      g_currency_sum[i] = 0.0;
+      g_currency_samples[i] = 0;
+      g_currency_weight[i] = 0.0;
+   }
+}
+
+void ClearSignalHistory()
+{
+   for(int i = 0; i < SIGNAL_HISTORY_SIZE; i++)
+   {
+      ResetSignalHistoryEntry(g_signal_history[i]);
+      ResetSignalHistoryEntry(g_visible_signal_history[i]);
+   }
+   g_signal_history_count = 0;
+   g_visible_signal_history_count = 0;
+}
+
 int OnInit()
 {
+   ResetRuntimeState();
    InitializeRuntimeSettings();
 
    if(!ValidateInputs())
@@ -860,7 +958,7 @@ bool ValidateInputs()
       SignalTTLSeconds < 30 || SignalTTLSeconds > 3600 ||
       DisplayUpdateSeconds > 3600 || ScanIntervalSeconds > 3600 ||
       CopyTicksLookbackSeconds < 5 || CopyTicksLookbackSeconds > MAX_TICK_LOOKBACK_SECONDS ||
-      MinCopyTicksForGoodQuality < 1)
+      MinCopyTicksForGoodQuality < 1 || MinCopyTicksForGoodQuality > MAX_COPY_TICKS)
    {
       Print("FXNews: dashboard, lifecycle, or tick-quality inputs are inconsistent.");
       return false;
@@ -1148,6 +1246,11 @@ void RunHistoricalOperatingMode()
       return;
 
    g_historical_run_started = true;
+   // The backtest runs synchronously inside this timer call, so the chart
+   // label below is rarely painted before the run ends; the Journal line is
+   // the reliable sign that the run has started.
+   PrintFormat("FXNews: %s run started over %d days of M1 history; the chart updates when it completes.",
+               OperatingModeText(), HistoricalLookbackDays);
    SetHistoricalReportHeader("FXNews - " + OperatingModeText() + " | running M1 backtest");
 
    HistoricalParams base_params;
@@ -1322,9 +1425,10 @@ void RunAutotuneBacktest(const HistoricalParams &base_params)
    }
 
    // Historical results are advisory only: the source has no holdout or walk-forward control.
+   // The instance stays parked in AUTOTUNE afterwards, exactly like VALIDATION:
+   // switching to LIVE here wiped the report off the chart on the next scan
+   // and let alerts fire from a run the user started as an analysis.
    BuildAutotuneReport(results[0], results[best], base_params, candidates[best]);
-
-   g_runtime_operating_mode = FXNEWS_MODE_LIVE;
 }
 
 bool HasSufficientAutotuneSample(const HistoricalBacktestStats &stats)
@@ -2458,11 +2562,11 @@ void ClearHistoricalReport()
       Print("FXNews: unable to clear historical report buffer.");
 }
 
+// The buffer is unbounded so the Journal always receives the full report; only
+// the chart rendering is limited to the dashboard row budget.
 void AddHistoricalReportLine(const string line)
 {
    int next = ArraySize(g_historical_report_lines);
-   if(next >= DASHBOARD_MAX_OBJECTS)
-      return;
    if(ArrayResize(g_historical_report_lines, next + 1) != next + 1)
       return;
    g_historical_report_lines[next] = line;
@@ -2475,22 +2579,33 @@ void PrintHistoricalReportToJournal()
       PrintFormat("FXNews: %s", g_historical_report_lines[row]);
 }
 
+// Prepends the ready line and keeps the report itself on the chart below it;
+// clearing the buffer here used to leave only a one-line pointer to the Journal.
 void SetHistoricalReadyMessage(const string mode)
 {
-   ClearHistoricalReport();
-   AddHistoricalReportLine("FXNews - " + mode + " ready | see MT5 Journal");
+   int rows = ArraySize(g_historical_report_lines);
+   if(ArrayResize(g_historical_report_lines, rows + 1) == rows + 1)
+   {
+      for(int row = rows; row > 0; row--)
+         g_historical_report_lines[row] = g_historical_report_lines[row - 1];
+      g_historical_report_lines[0] = "FXNews - " + mode + " ready | full report in MT5 Journal";
+   }
    UpdateHistoricalReportDashboard();
 }
 
+// Report rows start at STATUS_ROW_INDEX like the live dashboard; row 0 stays
+// empty as spacing in every mode.
 void UpdateHistoricalReportDashboard()
 {
    int rows = ArraySize(g_historical_report_lines);
-   for(int row = 0; row < rows && row < DASHBOARD_MAX_OBJECTS; row++)
+   int drawn = 0;
+   for(int row = 0; row < rows && STATUS_ROW_INDEX + row < DASHBOARD_MAX_OBJECTS; row++)
    {
       string text = g_historical_report_lines[row];
-      SetDashboardRow(row, text, text, (row == 0 ? StatusLineColor() : clrWhite));
+      SetDashboardRow(STATUS_ROW_INDEX + row, text, text, (row == 0 ? StatusLineColor() : clrWhite));
+      drawn++;
    }
-   DeleteDashboardRowsFrom(rows);
+   DeleteDashboardRowsFrom(STATUS_ROW_INDEX + drawn);
    ChartRedraw(0);
 }
 
@@ -2731,7 +2846,10 @@ void ResetProfile(SymbolProfile &profile,
    profile.pip_size = 0.0;
    profile.symbol_upper = UpperAscii(symbol);
    profile.is_first_profile_for_symbol = false;
+   profile.symbol_leader_index = -1;
    profile.m1_atr_pips = 0.0;
+   profile.basket_contribution = 0.0;
+   profile.basket_weight = 0.0;
 
    profile.quote_fresh = false;
    profile.quote_time = 0;
@@ -2743,6 +2861,10 @@ void ResetProfile(SymbolProfile &profile,
    profile.median_spread_pips = 0.0;
    profile.spread_z = 0.0;
    profile.tick_gap_sec = 0.0;
+   profile.last_tick_interval_sec = 0.0;
+   profile.quote_age_sec = 0.0;
+   profile.spread_stats_ready = false;
+   profile.tick_rate_available = false;
    profile.tick_rate_per_sec = 0.0;
    profile.session_spread_z = 0.0;
    profile.session_tick_rate_z = 0.0;
@@ -2750,6 +2872,7 @@ void ResetProfile(SymbolProfile &profile,
    profile.session_baseline_ready = false;
    profile.session_index = SESSION_OTHER;
    profile.session_name = "OTHER";
+   profile.tick_quality_available = false;
    profile.tick_sample_quality_score = 0.0;
    profile.valid_ticks_used = 0;
    profile.tick_state = "TICK_SYNCING";
@@ -2762,32 +2885,38 @@ void ResetProfile(SymbolProfile &profile,
    profile.range_high = 0.0;
    profile.range_low = 0.0;
    profile.range_width = 0.0;
+   profile.range_anchor_bar_time = 0;
 
    profile.current_trigger_open = 0.0;
    profile.current_trigger_high = 0.0;
    profile.current_trigger_low = 0.0;
    profile.current_trigger_close = 0.0;
    profile.trigger_bar_time = 0;
-   profile.current_trigger_tick_volume = 0.0;
-   profile.last_completed_trigger_tick_volume = 0.0;
+   profile.active_trigger_tick_volume = 0.0;
    profile.average_trigger_tick_volume = 0.0;
 
-   profile.snapshot_median_rate = 0.0;
-   profile.snapshot_mad_rate = 0.0;
+   for(int window = 0; window < SPEED_WINDOW_COUNT; window++)
+   {
+      profile.speed_baseline_ready[window] = false;
+      profile.speed_median_rate[window] = 0.0;
+      profile.speed_mad_rate[window] = 0.0;
+   }
+   profile.snapshot_coverage_sec = 0;
 
    profile.speed_5s_pips = 0.0;
    profile.speed_10s_pips = 0.0;
    profile.speed_30s_pips = 0.0;
    profile.speed_60s_pips = 0.0;
    profile.movement_5m_pips = 0.0;
-   profile.movement_15m_pips = 0.0;
+   profile.has_m5_move = false;
+   profile.has_m15_move = false;
    profile.m5_move_atr = 0.0;
    profile.m15_move_atr = 0.0;
 
    profile.final_score_up = 0.0;
    profile.final_score_down = 0.0;
-   ResetCompositeSignalScore(profile.composite_up, DIR_UP);
-   ResetCompositeSignalScore(profile.composite_down, DIR_DOWN);
+   ResetCompositeSignalScore(profile.composite_up);
+   ResetCompositeSignalScore(profile.composite_down);
 
    profile.active_direction = DIR_NONE;
    profile.event_state = STATE_IDLE;
@@ -2862,6 +2991,8 @@ void ScanAll(const bool force_dashboard)
 {
    uint scan_start = GetTickCount();
    datetime now = TimeCurrent();
+   datetime wall_clock = ScanWallClock(now);
+   bool connected = (TerminalInfoInteger(TERMINAL_CONNECTED) != 0);
    if(g_symbol_identity_dirty)
       RefreshSymbolIdentityCache();
    g_last_valid_symbols = 0;
@@ -2874,7 +3005,7 @@ void ScanAll(const bool force_dashboard)
    {
       if(IsStopped())
          return;
-      if(UpdateMarketData(i, now))
+      if(UpdateMarketData(i, now, wall_clock, connected))
       {
          g_last_valid_symbols++;
          if(g_profiles[i].valid_ticks_used >= MinCopyTicksForGoodQuality)
@@ -3074,6 +3205,7 @@ void RefreshSymbolIdentityCache()
    {
       g_profiles[i].symbol_upper = UpperAscii(g_profiles[i].symbol);
       g_profiles[i].is_first_profile_for_symbol = true;
+      g_profiles[i].symbol_leader_index = i;
    }
 
    for(int i = 0; i < total; i++)
@@ -3083,7 +3215,10 @@ void RefreshSymbolIdentityCache()
       for(int j = i + 1; j < total; j++)
       {
          if(g_profiles[j].symbol_upper == g_profiles[i].symbol_upper)
+         {
             g_profiles[j].is_first_profile_for_symbol = false;
+            g_profiles[j].symbol_leader_index = i;
+         }
       }
    }
 
@@ -3109,7 +3244,16 @@ void ClearProfileHistory(const int index)
    g_profiles[index].median_spread_pips = 0.0;
 }
 
-bool UpdateMarketData(const int index, const datetime now)
+// TimeCurrent() is the time of the last tick received on any symbol and stops
+// with the feed, so quote freshness is judged against the trade-server clock,
+// which keeps advancing, and against the connection state.
+datetime ScanWallClock(const datetime now)
+{
+   datetime server_clock = TimeTradeServer();
+   return (server_clock > now ? server_clock : now);
+}
+
+bool UpdateMarketData(const int index, const datetime now, const datetime wall_clock, const bool connected)
 {
    if(!EnsureSymbolReady(index))
    {
@@ -3140,9 +3284,18 @@ bool UpdateMarketData(const int index, const datetime now)
    if(g_profiles[index].quote_time_msc <= 0)
       g_profiles[index].quote_time_msc = (long)tick.time * 1000;
 
-   g_profiles[index].tick_gap_sec = TickGapSeconds(index, g_profiles[index].quote_time_msc);
+   // TickGapSeconds is positive only when this tick is newer than the last
+   // stored snapshot; on a scan without a new tick it reads zero, which used to
+   // make a stalled feed look perfectly gap-free. Keep the last real interval
+   // and let the current quote age dominate while nothing arrives.
+   double tick_interval = TickGapSeconds(index, g_profiles[index].quote_time_msc);
+   if(tick_interval > 0.0)
+      g_profiles[index].last_tick_interval_sec = tick_interval;
+   g_profiles[index].quote_age_sec = (double)MathMax(0, (int)(wall_clock - tick.time));
+   g_profiles[index].tick_gap_sec = MathMax(g_profiles[index].last_tick_interval_sec,
+                                            g_profiles[index].quote_age_sec);
 
-   g_profiles[index].quote_fresh = (now - tick.time <= MaxQuoteAgeSeconds);
+   g_profiles[index].quote_fresh = (connected && g_profiles[index].quote_age_sec <= MaxQuoteAgeSeconds);
    g_profiles[index].session_index = SessionIndex(now);
    g_profiles[index].session_name = SessionNameFromIndex(g_profiles[index].session_index);
    g_profiles[index].bid = tick.bid;
@@ -3154,7 +3307,14 @@ bool UpdateMarketData(const int index, const datetime now)
    if(new_quote_sample)
       AddSpreadSample(index, g_profiles[index].spread_pips);
    UpdateSpreadStatistics(index);
-   g_profiles[index].tick_rate_per_sec = TickRateFromSnapshots(index, 30);
+   g_profiles[index].snapshot_coverage_sec = SnapshotCoverageSeconds(index);
+
+   // The snapshot-derived rate counts scan samples and is a coarse fallback;
+   // UpdateTickQuality replaces it with the true tick rate when CopyTicks
+   // delivers a usable window.
+   double snapshot_rate = 0.0;
+   g_profiles[index].tick_rate_available = TickRateFromSnapshots(index, 30, snapshot_rate);
+   g_profiles[index].tick_rate_per_sec = (g_profiles[index].tick_rate_available ? snapshot_rate : 0.0);
    UpdateSnapshotRateStats(index);
    UpdateTickQuality(index);
 
@@ -3210,7 +3370,9 @@ void ClearRuntimeMarketFlags(const int index)
    g_profiles[index].has_m5 = false;
    g_profiles[index].has_m15 = false;
    g_profiles[index].tick_gap_sec = 0.0;
+   g_profiles[index].tick_rate_available = false;
    g_profiles[index].tick_rate_per_sec = 0.0;
+   g_profiles[index].tick_quality_available = false;
    g_profiles[index].tick_sample_quality_score = 0.0;
    g_profiles[index].valid_ticks_used = 0;
    g_profiles[index].tick_state = "TICK_STALE";
@@ -3237,9 +3399,18 @@ void UpdateRatesData(const int index)
       g_profiles[index].current_trigger_low = trigger_rates[0].low;
       g_profiles[index].current_trigger_close = trigger_rates[0].close;
       g_profiles[index].trigger_bar_time = trigger_rates[0].time;
-      g_profiles[index].current_trigger_tick_volume = (double)trigger_rates[0].tick_volume;
-      g_profiles[index].last_completed_trigger_tick_volume = (double)trigger_rates[1].tick_volume;
       g_profiles[index].average_trigger_tick_volume = AverageTickVolume(trigger_rates, copied_trigger);
+
+      // The forming bar's count is projected to a full bar once enough of it
+      // has elapsed; earlier the last completed bar stands in. Comparing the
+      // raw partial count with completed bars sagged at every bar open.
+      double current_volume = (double)trigger_rates[0].tick_volume;
+      double completed_volume = (double)trigger_rates[1].tick_volume;
+      double bar_seconds = (double)TimeframeMinutes(g_profiles[index].scan_timeframe) * 60.0;
+      double elapsed = (double)(g_profiles[index].quote_time - trigger_rates[0].time);
+      double fraction = (bar_seconds > 0.0 ? Clamp(elapsed / bar_seconds, 0.0, 1.0) : 0.0);
+      g_profiles[index].active_trigger_tick_volume = (fraction >= TICK_VOLUME_PROJECTION_MIN_FRACTION ?
+                                                     current_volume / fraction : completed_volume);
    }
    else
    {
@@ -3247,6 +3418,7 @@ void UpdateRatesData(const int index)
       g_profiles[index].range_high = 0.0;
       g_profiles[index].range_low = 0.0;
       g_profiles[index].range_width = 0.0;
+      g_profiles[index].range_anchor_bar_time = 0;
       g_profiles[index].trigger_bar_time = 0;
    }
 
@@ -3268,30 +3440,27 @@ void UpdateRatesData(const int index)
    else
       g_profiles[index].movement_5m_pips = 0.0;
 
-   if(copied_short_m1 > 15)
-      g_profiles[index].movement_15m_pips = (g_profiles[index].mid - short_m1[15].close) / g_profiles[index].pip_size;
-   else
-      g_profiles[index].movement_15m_pips = g_profiles[index].movement_5m_pips;
-
+   // Context is the last CLOSED bar's move against that timeframe's ATR. The
+   // forming bar's move reset to zero at every bar open and sawtoothed the
+   // regime score on a five/fifteen-minute cycle. A zero ATR leaves the reading
+   // unmeasured instead of scoring as a neutral constant.
    MqlRates m5[];
    ArraySetAsSeries(m5, true);
    int need_m5 = IntMax(ATRPeriod + 10, 40);
    ResetLastError();
    int copied_m5 = CopyRates(symbol, PERIOD_M5, 0, need_m5, m5);
    g_profiles[index].has_m5 = (copied_m5 >= ATRPeriod + 3);
-
+   g_profiles[index].atr_m5 = 0.0;
+   g_profiles[index].has_m5_move = false;
+   g_profiles[index].m5_move_atr = 0.0;
    if(g_profiles[index].has_m5)
    {
       g_profiles[index].atr_m5 = CalculateATRFromRates(m5, copied_m5, ATRPeriod);
       if(g_profiles[index].atr_m5 > 0.0)
-         g_profiles[index].m5_move_atr = (m5[0].close - m5[1].close) / g_profiles[index].atr_m5;
-      else
-         g_profiles[index].m5_move_atr = 0.0;
-   }
-   else
-   {
-      g_profiles[index].atr_m5 = 0.0;
-      g_profiles[index].m5_move_atr = 0.0;
+      {
+         g_profiles[index].has_m5_move = true;
+         g_profiles[index].m5_move_atr = (m5[1].close - m5[2].close) / g_profiles[index].atr_m5;
+      }
    }
 
    MqlRates m15[];
@@ -3300,17 +3469,17 @@ void UpdateRatesData(const int index)
    ResetLastError();
    int copied_m15 = CopyRates(symbol, PERIOD_M15, 0, need_m15, m15);
    g_profiles[index].has_m15 = (copied_m15 >= ATRPeriod + 3);
-
+   g_profiles[index].has_m15_move = false;
+   g_profiles[index].m15_move_atr = 0.0;
    if(g_profiles[index].has_m15)
    {
       double atr_m15 = CalculateATRFromRates(m15, copied_m15, ATRPeriod);
       if(atr_m15 > 0.0)
-         g_profiles[index].m15_move_atr = (m15[0].close - m15[1].close) / atr_m15;
-      else
-         g_profiles[index].m15_move_atr = 0.0;
+      {
+         g_profiles[index].has_m15_move = true;
+         g_profiles[index].m15_move_atr = (m15[1].close - m15[2].close) / atr_m15;
+      }
    }
-   else
-      g_profiles[index].m15_move_atr = 0.0;
 }
 
 // The basket normalises wall-clock moves (30s, 60s, 5m), so it needs an ATR on a
@@ -3376,11 +3545,12 @@ int FindFreshContextProfile(const int index)
 void CopyContextRatesData(const int target_index, const int source_index)
 {
    g_profiles[target_index].movement_5m_pips = g_profiles[source_index].movement_5m_pips;
-   g_profiles[target_index].movement_15m_pips = g_profiles[source_index].movement_15m_pips;
    g_profiles[target_index].has_m5 = g_profiles[source_index].has_m5;
    g_profiles[target_index].atr_m5 = g_profiles[source_index].atr_m5;
+   g_profiles[target_index].has_m5_move = g_profiles[source_index].has_m5_move;
    g_profiles[target_index].m5_move_atr = g_profiles[source_index].m5_move_atr;
    g_profiles[target_index].has_m15 = g_profiles[source_index].has_m15;
+   g_profiles[target_index].has_m15_move = g_profiles[source_index].has_m15_move;
    g_profiles[target_index].m15_move_atr = g_profiles[source_index].m15_move_atr;
 }
 
@@ -3390,8 +3560,21 @@ void BuildRangeBox(const int index, MqlRates &rates[], const int copied)
    if(usable < g_range_lookback_m1)
    {
       g_profiles[index].has_trigger = false;
+      g_profiles[index].range_high = 0.0;
+      g_profiles[index].range_low = 0.0;
+      g_profiles[index].range_width = 0.0;
+      g_profiles[index].range_anchor_bar_time = 0;
       return;
    }
+
+   // While a candidate or confirmed event is live the box stays anchored on the
+   // bars that preceded it. Rebuilding it every scan absorbed the breakout bar
+   // as soon as that bar closed, which moved the boundary past the price,
+   // reset the hold timers and invalidated the very event being tracked.
+   bool event_live = (g_profiles[index].event_state == STATE_CANDIDATE ||
+                      IsActiveState(g_profiles[index].event_state));
+   if(event_live && g_profiles[index].range_anchor_bar_time > 0 && g_profiles[index].range_width > 0.0)
+      return;
 
    double high = rates[1].high;
    double low = rates[1].low;
@@ -3404,6 +3587,7 @@ void BuildRangeBox(const int index, MqlRates &rates[], const int copied)
    g_profiles[index].range_high = high;
    g_profiles[index].range_low = low;
    g_profiles[index].range_width = high - low;
+   g_profiles[index].range_anchor_bar_time = rates[0].time;
 }
 
 double CalculateATRFromRates(MqlRates &rates[], const int copied, const int period)
@@ -3473,8 +3657,8 @@ void UpdateSessionBaseline(const int index)
       return;
 
    SessionBaseline baseline = g_session_baselines[baseline_index];
-   double tick_volume = MathMax(g_profiles[index].current_trigger_tick_volume,
-                                g_profiles[index].last_completed_trigger_tick_volume);
+   double tick_volume = g_profiles[index].active_trigger_tick_volume;
+   bool tick_rate_known = g_profiles[index].tick_rate_available;
 
    // Readiness is taken from the baseline the z-scores are actually measured
    // against, and assigned once. Reading it from the post-update count meant that
@@ -3494,16 +3678,19 @@ void UpdateSessionBaseline(const int index)
       g_profiles[index].session_spread_z = BaselineZ(g_profiles[index].spread_pips,
                                                       baseline.spread_mean,
                                                       baseline.spread_var);
-      g_profiles[index].session_tick_rate_z = BaselineZ(g_profiles[index].tick_rate_per_sec,
+      g_profiles[index].session_tick_rate_z = (tick_rate_known ?
+                                               BaselineZ(g_profiles[index].tick_rate_per_sec,
                                                          baseline.tick_rate_mean,
-                                                         baseline.tick_rate_var);
+                                                         baseline.tick_rate_var) : 0.0);
       g_profiles[index].session_tick_volume_z = BaselineZ(tick_volume,
                                                            baseline.tick_volume_mean,
                                                            baseline.tick_volume_var);
    }
 
    UpdateRollingMeanVar(baseline.spread_mean, baseline.spread_var, baseline.sample_count, g_profiles[index].spread_pips);
-   UpdateRollingMeanVar(baseline.tick_rate_mean, baseline.tick_rate_var, baseline.sample_count, g_profiles[index].tick_rate_per_sec);
+   // An unmeasured tick rate must not be folded into the baseline as zero.
+   if(tick_rate_known)
+      UpdateRollingMeanVar(baseline.tick_rate_mean, baseline.tick_rate_var, baseline.sample_count, g_profiles[index].tick_rate_per_sec);
    UpdateRollingMeanVar(baseline.tick_volume_mean, baseline.tick_volume_var, baseline.sample_count, tick_volume);
    if(baseline.sample_count < BaselineLookbackSamples)
       baseline.sample_count++;
@@ -3634,24 +3821,21 @@ void AddSpreadSample(const int index, const double spread_pips)
 void UpdateSpreadStatistics(const int index)
 {
    int count = g_profiles[index].spread_count;
-   if(!PrepareScratch(g_spread_scratch, count, SPREAD_HISTORY_CAPACITY))
-   {
-      g_profiles[index].median_spread_pips = g_profiles[index].spread_pips;
-      g_profiles[index].spread_z = 0.0;
+   // Until the ring holds enough samples neither the median nor the robust z
+   // exists; the previous fallback of median = current spread scored every
+   // fresh profile as trading at exactly its normal spread.
+   g_profiles[index].spread_stats_ready = false;
+   g_profiles[index].median_spread_pips = 0.0;
+   g_profiles[index].spread_z = 0.0;
+   if(count < MIN_SPREAD_SAMPLES || !PrepareScratch(g_spread_scratch, count, SPREAD_HISTORY_CAPACITY))
       return;
-   }
 
    for(int i = 0; i < count; i++)
       g_spread_scratch[i] = g_spread_history[SpreadIndex(index, LogicalSpreadPosition(index, i))];
 
    double median = MedianOfArray(g_spread_scratch, count);
    g_profiles[index].median_spread_pips = median;
-
-   if(count < 5)
-   {
-      g_profiles[index].spread_z = 0.0;
-      return;
-   }
+   g_profiles[index].spread_stats_ready = true;
 
    // MedianOfArray sorted the scratch in place; deviations come from that.
    double mad = MedianAbsDeviationInto(g_mad_scratch, g_spread_scratch, count, median,
@@ -3663,9 +3847,15 @@ void CalculateCurrencyStrength()
 {
    for(int i = 0; i < CURRENCY_COUNT; i++)
    {
-      g_currency_strength[i] = 0.0;
+      g_currency_sum[i] = 0.0;
       g_currency_samples[i] = 0;
       g_currency_weight[i] = 0.0;
+   }
+
+   for(int i = 0; i < ArraySize(g_profiles); i++)
+   {
+      g_profiles[i].basket_contribution = 0.0;
+      g_profiles[i].basket_weight = 0.0;
    }
 
    if(!UseCurrencyStrength)
@@ -3677,13 +3867,14 @@ void CalculateCurrencyStrength()
          continue;
       if(!g_profiles[i].valid || !g_profiles[i].quote_fresh ||
          g_profiles[i].base_index < 0 || g_profiles[i].quote_index < 0 ||
-         g_profiles[i].m1_atr_pips <= 0.0 || g_profiles[i].pip_size <= 0.0)
+         g_profiles[i].m1_atr_pips <= 0.0 || g_profiles[i].pip_size <= 0.0 ||
+         g_profiles[i].snapshot_coverage_sec < 60)
       {
-         continue;
+         continue;   // the 30 s and 60 s speeds need a full minute of snapshots
       }
 
       if(g_profiles[i].spread_pips <= 0.0 || g_profiles[i].spread_pips > MaxSpreadPips ||
-         (g_profiles[i].median_spread_pips > 0.0 &&
+         (g_profiles[i].spread_stats_ready &&
           g_profiles[i].spread_pips > g_profiles[i].median_spread_pips * MaxSpreadMedianMultiplier))
       {
          continue;
@@ -3697,27 +3888,26 @@ void CalculateCurrencyStrength()
       double weight = 1.0;
       if(UseRobustCurrencyStrength)
       {
-         double spread_penalty = 1.0 / MathMax(1.0, g_profiles[i].spread_pips / MathMax(g_profiles[i].median_spread_pips, 0.1));
+         double spread_penalty = 1.0;
+         if(g_profiles[i].spread_stats_ready)
+            spread_penalty = 1.0 / MathMax(1.0, g_profiles[i].spread_pips / MathMax(g_profiles[i].median_spread_pips, 0.1));
          weight = spread_penalty / MathMax(atr_pips, 0.5);
          weight = Clamp(weight, 0.05, 2.0);
       }
 
+      // The symbol's own contribution is kept so the pair can be scored against
+      // the rest of the basket without confirming itself.
+      g_profiles[i].basket_contribution = pair_strength * weight;
+      g_profiles[i].basket_weight = weight;
+
       int base = g_profiles[i].base_index;
       int quote = g_profiles[i].quote_index;
-      g_currency_strength[base] += pair_strength * weight;
-      g_currency_strength[quote] -= pair_strength * weight;
+      g_currency_sum[base] += pair_strength * weight;
+      g_currency_sum[quote] -= pair_strength * weight;
       g_currency_weight[base] += weight;
       g_currency_weight[quote] += weight;
       g_currency_samples[base]++;
       g_currency_samples[quote]++;
-   }
-
-   for(int i = 0; i < CURRENCY_COUNT; i++)
-   {
-      if(g_currency_weight[i] > 0.0)
-         g_currency_strength[i] /= g_currency_weight[i];
-      else if(g_currency_samples[i] > 0)
-         g_currency_strength[i] /= (double)g_currency_samples[i];
    }
 }
 
@@ -3725,8 +3915,6 @@ void CalculateScoresAndUpdateState(const int index, const datetime now)
 {
    g_profiles[index].final_score_up = 0.0;
    g_profiles[index].final_score_down = 0.0;
-   ResetCompositeSignalScore(g_profiles[index].composite_up, DIR_UP);
-   ResetCompositeSignalScore(g_profiles[index].composite_down, DIR_DOWN);
 
    BuildCompositeSignalScore(index, DIR_UP, now, g_profiles[index].composite_up);
    BuildCompositeSignalScore(index, DIR_DOWN, now, g_profiles[index].composite_down);
@@ -3739,12 +3927,12 @@ void CalculateScoresAndUpdateState(const int index, const datetime now)
    UpdateSignalState(index, now);
 }
 
-void ResetCompositeSignalScore(CompositeSignalScore &score, const int direction)
+void ResetCompositeSignalScore(CompositeSignalScore &score)
 {
    score.valid = false;
-   score.direction = direction;
    score.raw_score = 0.0;
    score.displayed_score = 0.0;
+   score.age_free_score = 0.0;
    score.block_reason = BLOCK_NONE;
    score.reason_summary = "";
    score.human_reason = "";
@@ -3753,8 +3941,10 @@ void ResetCompositeSignalScore(CompositeSignalScore &score, const int direction)
    score.execution.pass = false;
    score.execution.score = 0.0;
    score.execution.spread_pips = 0.0;
+   score.execution.median_available = false;
    score.execution.median_spread_pips = 0.0;
    score.execution.spread_ratio = 0.0;
+   score.execution.spread_z_available = false;
    score.execution.spread_z = 0.0;
    score.execution.quote_age_sec = 0.0;
    score.execution.tick_gap_sec = 0.0;
@@ -3762,6 +3952,8 @@ void ResetCompositeSignalScore(CompositeSignalScore &score, const int direction)
    score.execution.block_reason = BLOCK_NONE;
 
    score.breakout.pass = false;
+   score.breakout.measured = false;
+   score.breakout.candle_measured = false;
    score.breakout.score = 0.0;
    score.breakout.compression_score = 0.0;
    score.breakout.distance_score = 0.0;
@@ -3772,20 +3964,22 @@ void ResetCompositeSignalScore(CompositeSignalScore &score, const int direction)
    score.breakout.fakeout_penalty = 0.0;
 
    score.impulse.pass = false;
+   score.impulse.measured = false;
    score.impulse.score = 0.0;
    score.impulse.speed_5s_z = 0.0;
    score.impulse.speed_10s_z = 0.0;
    score.impulse.speed_30s_z = 0.0;
    score.impulse.acceleration_score = 0.0;
    score.impulse.atr_expansion_score = 0.0;
+   score.impulse.tick_rate_available = false;
    score.impulse.tick_rate_z = 0.0;
+   score.impulse.tick_volume_available = false;
    score.impulse.tick_volume_z = 0.0;
    score.impulse.exhaustion_penalty = 0.0;
+   score.impulse.tick_quality_available = false;
    score.impulse.tick_sample_quality_score = 0.0;
-   score.impulse.valid_ticks_used = 0;
    score.impulse.tick_state = "TICK_SYNCING";
 
-   score.flow.pass = false;
    score.flow.available = false;
    score.flow.score = 0.0;
    score.flow.base_strength = 0.0;
@@ -3796,21 +3990,19 @@ void ResetCompositeSignalScore(CompositeSignalScore &score, const int direction)
 
    score.regime.score = 0.0;
    score.regime.session_score = 0.0;
+   score.regime.m5_available = false;
+   score.regime.m15_available = false;
    score.regime.mtf_alignment_score = 0.0;
    score.regime.m5_context_score = 0.0;
    score.regime.m15_context_score = 0.0;
    score.regime.volatility_regime_score = 0.0;
-   score.regime.rollover_penalty = 0.0;
 
    score.calendar.available = false;
-   score.calendar.relevant_event_nearby = false;
    score.calendar.high_impact_nearby = false;
    score.calendar.just_released = false;
    score.calendar.future_high_impact_nearby = false;
    score.calendar.score = 0.0;
-   score.calendar.proximity_minutes = 0.0;
    score.calendar.future_high_impact_minutes = 0.0;
-   score.calendar.importance_score = 0.0;
    score.calendar.uncertainty_penalty = 0.0;
    score.calendar.state_tag = "NEWS_UNAVAILABLE";
 }
@@ -3820,13 +4012,12 @@ void BuildCompositeSignalScore(const int index,
                                const datetime now,
                                CompositeSignalScore &score)
 {
-   ResetCompositeSignalScore(score, direction);
+   ResetCompositeSignalScore(score);
 
    EvaluateExecutionQuality(index, now, score.execution);
    if(!score.execution.pass)
    {
-      score.block_reason = score.execution.block_reason;
-      score.reason_summary = "blocked=" + BlockReasonText(score.block_reason);
+      FinishBlockedScore(score, score.execution.block_reason, "");
       return;
    }
 
@@ -3838,8 +4029,14 @@ void BuildCompositeSignalScore(const int index,
 
    if(CalendarPreNewsBlock(score.calendar))
    {
-      score.block_reason = BLOCK_CONTEXT_CONFLICT;
-      score.reason_summary = "blocked=calendar_pre_news";
+      FinishBlockedScore(score, BLOCK_CONTEXT_CONFLICT, "calendar_pre_news");
+      return;
+   }
+
+   // An engine that could not measure is not an engine that found nothing.
+   if(!score.breakout.measured && !score.impulse.measured)
+   {
+      FinishBlockedScore(score, BLOCK_NO_MOVEMENT_DATA, "");
       return;
    }
 
@@ -3847,31 +4044,28 @@ void BuildCompositeSignalScore(const int index,
                        (UseImpulseBreakoutEngine && score.impulse.pass));
    if(!engine_pass)
    {
-      score.block_reason = BLOCK_NO_MOVEMENT_DATA;
-      score.reason_summary = "blocked=no_breakout_or_impulse";
+      FinishBlockedScore(score, BLOCK_NO_SETUP, "");
       return;
    }
 
    if(SpreadOnlyBreakout(index, direction))
    {
-      score.block_reason = BLOCK_BAD_SPREAD;
-      score.reason_summary = "blocked=spread_only_breakout";
+      FinishBlockedScore(score, BLOCK_SPREAD_ONLY_BREAKOUT, "");
       return;
    }
 
    if(UseStrictExecutionGate && score.flow.conflict_penalty >= 0.80)
    {
-      score.block_reason = BLOCK_CONTEXT_CONFLICT;
-      score.reason_summary = "blocked=currency_flow_conflict";
+      FinishBlockedScore(score, BLOCK_CONTEXT_CONFLICT, "currency_flow_conflict");
       return;
    }
 
-   double breakout_weight = (UseTechnicalBreakoutEngine ? 0.22 : 0.0);
-   double impulse_weight = (UseImpulseBreakoutEngine ? 0.22 : 0.0);
+   // An unmeasured component contributes nothing and leaves the normaliser,
+   // instead of being imputed at a neutral constant that compresses every
+   // score toward that constant. This applies to every component alike.
+   double breakout_weight = (UseTechnicalBreakoutEngine && score.breakout.measured ? 0.22 : 0.0);
+   double impulse_weight = (UseImpulseBreakoutEngine && score.impulse.measured ? 0.22 : 0.0);
    double execution_weight = 0.18;
-   // Mirrors the calendar handling below: an unmeasured component contributes
-   // nothing and is removed from the normaliser, instead of being imputed at a
-   // neutral constant that compresses every score toward that constant.
    double flow_weight = (UseCurrencyStrength && score.flow.available ? 0.16 : 0.0);
    double regime_weight = 0.14;
    double calendar_weight = (UseEconomicCalendarContext && score.calendar.available ? 0.08 : 0.0);
@@ -3909,28 +4103,35 @@ void BuildCompositeSignalScore(const int index,
 
    if(score.execution.score < 0.68 ||
       score.execution.cost_to_atr > g_max_spread_to_atr * 0.70 ||
-      score.execution.spread_ratio > MathMax(1.30, MaxSpreadMedianMultiplier * 0.65))
+      (score.execution.median_available &&
+       score.execution.spread_ratio > MathMax(1.30, MaxSpreadMedianMultiplier * 0.65)))
    {
       capped = ApplyScoreCap(capped, 69.0, caps, "execution_mediocre_cap");
    }
 
    if(score.breakout.pass && score.breakout.hold_score < 0.35)
       capped = ApplyScoreCap(capped, 74.0, caps, "weak_hold_cap");
-   if(score.breakout.pass && score.breakout.body_quality_score < 0.35)
+   if(score.breakout.pass && score.breakout.candle_measured && score.breakout.body_quality_score < 0.35)
       capped = ApplyScoreCap(capped, 79.0, caps, "weak_body_cap");
    if(score.breakout.fakeout_penalty >= 0.45)
       capped = ApplyScoreCap(capped, 64.0, caps, "range_snapback_cap");
 
+   // The reject levels are the raw closed-bar moves the inputs describe, not a
+   // point on the context ramp that happened to sit elsewhere.
    if(UseMultiTimeframeContextCaps)
    {
-      if(score.regime.m5_context_score <= 0.20 || score.regime.m15_context_score <= 0.20)
+      bool m5_reject = (score.regime.m5_available &&
+                        g_profiles[index].m5_move_atr * (double)direction <= M5RejectAtr);
+      bool m15_reject = (score.regime.m15_available &&
+                         g_profiles[index].m15_move_atr * (double)direction <= M15RejectAtr);
+      if(m5_reject || m15_reject)
          capped = ApplyScoreCap(capped, 69.0, caps, "mtf_reject_cap");
    }
 
-   if(score.impulse.score >= 0.60 &&
+   if(score.impulse.measured && score.impulse.score >= ENGINE_CONFIRM_THRESHOLD &&
       UseTickRateScoring &&
-      score.impulse.tick_rate_z < 0.0 &&
-      score.impulse.tick_volume_z < 0.0)
+      score.impulse.tick_rate_available && score.impulse.tick_rate_z < 0.0 &&
+      score.impulse.tick_volume_available && score.impulse.tick_volume_z < 0.0)
    {
       capped = ApplyScoreCap(capped, 72.0, caps, "unsupported_impulse_cap");
    }
@@ -3938,26 +4139,35 @@ void BuildCompositeSignalScore(const int index,
    if(score.impulse.exhaustion_penalty >= 0.45)
       capped = ApplyScoreCap(capped, 75.0, caps, "overextended_cap");
 
+   score.age_free_score = Clamp(capped, 0.0, 100.0);
    int age = EventAgeSeconds(index, direction, now);
-   if(age > 300)
-      capped = 0.0;
-   else if(age > 180)
+   int age_limit = EventAgeLimitSeconds(index);
+   if(age_limit > 0 && age > age_limit)
+   {
+      capped = ApplyScoreCap(capped, 0.0, caps, "expired_event_cap");
+      score.block_reason = BLOCK_EXPIRED;
+   }
+   else if(age > LATE_EVENT_SECONDS)
       capped = ApplyScoreCap(capped, 70.0, caps, "late_event_cap");
-   else if(age > 60)
+   else if(age > AGING_EVENT_SECONDS)
       capped = ApplyScoreCap(capped, 84.0, caps, "aging_event_cap");
 
    if(score.calendar.available && score.calendar.uncertainty_penalty >= 0.35)
       capped = ApplyScoreCap(capped, 88.0, caps, "calendar_uncertainty_cap");
 
    if(capped > 80.0 &&
-      (score.execution.score < 0.78 || MathMax(score.breakout.score, score.impulse.score) < 0.58))
+      (score.execution.score < 0.78 ||
+       MathMax(score.breakout.score, score.impulse.score) < ENGINE_CONFIRM_THRESHOLD))
    {
       capped = ApplyScoreCap(capped, 79.0, caps, "single_feature_cap");
    }
 
+   // Each elite term is judged only where it was measured; a disabled
+   // technical engine has no hold to veto with.
+   bool weak_hold = (UseTechnicalBreakoutEngine && score.breakout.pass && score.breakout.hold_score < 0.75);
+   bool weak_flow = (UseCurrencyStrength && score.flow.available && score.flow.score < 0.70);
    if(capped > 90.0 &&
-      (score.execution.score < 0.88 || score.breakout.hold_score < 0.75 ||
-       score.flow.score < 0.70 || score.regime.score < 0.65 ||
+      (score.execution.score < 0.88 || weak_hold || weak_flow || score.regime.score < 0.65 ||
        score.calendar.uncertainty_penalty > 0.20))
    {
       capped = ApplyScoreCap(capped, 89.0, caps, "elite_score_cap");
@@ -3970,9 +4180,10 @@ void BuildCompositeSignalScore(const int index,
    score.valid = (score.displayed_score > 0.0);
    score.reason_summary = BuildReasonSummary(score, caps);
    score.compact_tags = BuildCompactTags(score);
-   score.human_reason = BuildHumanReadableReason(score, g_profiles[index]);
+   score.human_reason = BuildHumanReadableReason(score);
 
-   if(DebugScoreBreakdown && DebugPrintToJournal && score.displayed_score >= g_min_display_confidence &&
+   if(DebugScoreBreakdown && DebugPrintToJournal &&
+      MeetsThreshold(score.displayed_score, g_min_display_confidence) &&
       DebugLogAllowed(now))
    {
       PrintFormat("FXNews score %s %s %s %d%% raw=%.1f %s",
@@ -3983,6 +4194,28 @@ void BuildCompositeSignalScore(const int index,
                   score.raw_score,
                   score.reason_summary);
    }
+}
+
+// Every block path leaves the same three fields filled so a blocked row's
+// tooltip reads like an active one.
+void FinishBlockedScore(CompositeSignalScore &score, const SignalBlockReason reason, const string detail)
+{
+   score.block_reason = reason;
+   score.reason_summary = "blocked=" + (detail == "" ? BlockReasonText(reason) : detail);
+   score.compact_tags = BuildCompactTags(score);
+   score.human_reason = BuildHumanReadableReason(score);
+}
+
+// The dashboard prints a rounded percentage, so every threshold comparison
+// rounds the same way: a 69.6 that reads "70%" meets a threshold of 70.
+int DisplayPercent(const double score)
+{
+   return (int)MathRound(Clamp(score, 0.0, 100.0));
+}
+
+bool MeetsThreshold(const double score, const double threshold)
+{
+   return (DisplayPercent(score) >= (int)MathRound(threshold));
 }
 
 bool DebugLogAllowed(const datetime now)
@@ -4003,14 +4236,18 @@ void EvaluateExecutionQuality(const int index, const datetime now, ExecutionQual
    execution.pass = false;
    execution.score = 0.0;
    execution.spread_pips = g_profiles[index].spread_pips;
-   execution.median_spread_pips = (g_profiles[index].median_spread_pips > 0.0 ?
-                                   g_profiles[index].median_spread_pips :
-                                   g_profiles[index].spread_pips);
-   execution.spread_ratio = SafeDiv(execution.spread_pips, execution.median_spread_pips, 1.0);
-   execution.spread_z = (UseSessionAwareBaselines && g_profiles[index].session_baseline_ready ?
-                         g_profiles[index].session_spread_z :
-                         g_profiles[index].spread_z);
-   execution.quote_age_sec = (g_profiles[index].quote_time > 0 ? (double)(now - g_profiles[index].quote_time) : 9999.0);
+   // Spread statistics exist only once the ring has enough samples. Before
+   // that the ratio and the robust z are unmeasured: they leave the gates and
+   // the blend rather than scoring the profile as trading at its normal spread.
+   execution.median_available = g_profiles[index].spread_stats_ready;
+   execution.median_spread_pips = (execution.median_available ? g_profiles[index].median_spread_pips : 0.0);
+   execution.spread_ratio = (execution.median_available && execution.median_spread_pips > 0.0 ?
+                             execution.spread_pips / execution.median_spread_pips : 0.0);
+   bool session_z_ready = (UseSessionAwareBaselines && g_profiles[index].session_baseline_ready);
+   execution.spread_z_available = (session_z_ready || execution.median_available);
+   execution.spread_z = (session_z_ready ? g_profiles[index].session_spread_z :
+                         (execution.median_available ? g_profiles[index].spread_z : 0.0));
+   execution.quote_age_sec = (g_profiles[index].quote_time > 0 ? g_profiles[index].quote_age_sec : 9999.0);
    execution.tick_gap_sec = g_profiles[index].tick_gap_sec;
    execution.cost_to_atr = SafeDiv(MathMax(g_profiles[index].ask - g_profiles[index].bid, 0.0),
                                    g_profiles[index].atr_trigger,
@@ -4046,7 +4283,7 @@ void EvaluateExecutionQuality(const int index, const datetime now, ExecutionQual
    }
 
    if(execution.spread_pips <= 0.0 || execution.spread_pips > MaxSpreadPips ||
-      execution.spread_ratio > MaxSpreadMedianMultiplier)
+      (execution.median_available && execution.spread_ratio > MaxSpreadMedianMultiplier))
    {
       execution.block_reason = BLOCK_BAD_SPREAD;
       return;
@@ -4055,7 +4292,7 @@ void EvaluateExecutionQuality(const int index, const datetime now, ExecutionQual
    if(UseStrictExecutionGate)
    {
       if(execution.cost_to_atr > g_max_spread_to_atr ||
-         execution.spread_z > MaxSpreadZScore)
+         (execution.spread_z_available && execution.spread_z > MaxSpreadZScore))
       {
          execution.block_reason = BLOCK_BAD_SPREAD;
          return;
@@ -4079,12 +4316,20 @@ void EvaluateExecutionQuality(const int index, const datetime now, ExecutionQual
                                             MaxTickGapSeconds,
                                             execution.tick_gap_sec);
 
-   execution.score = Clamp01(spread_abs_score * 0.18 +
-                             spread_rel_score * 0.20 +
-                             cost_score * 0.24 +
-                             spread_z_score * 0.14 +
-                             quote_fresh_score * 0.12 +
-                             tick_gap_score * 0.12);
+   double weighted = spread_abs_score * 0.18 + cost_score * 0.24 +
+                     quote_fresh_score * 0.12 + tick_gap_score * 0.12;
+   double total_weight = 0.18 + 0.24 + 0.12 + 0.12;
+   if(execution.median_available)
+   {
+      weighted += spread_rel_score * 0.20;
+      total_weight += 0.20;
+   }
+   if(execution.spread_z_available)
+   {
+      weighted += spread_z_score * 0.14;
+      total_weight += 0.14;
+   }
+   execution.score = Clamp01(weighted / total_weight);
    execution.pass = true;
 }
 
@@ -4094,6 +4339,8 @@ void EvaluateBreakoutStructure(const int index,
                                BreakoutStructure &breakout)
 {
    breakout.pass = false;
+   breakout.measured = false;
+   breakout.candle_measured = false;
    breakout.score = 0.0;
    breakout.compression_score = 0.0;
    breakout.distance_score = 0.0;
@@ -4108,6 +4355,7 @@ void EvaluateBreakoutStructure(const int index,
    {
       return;
    }
+   breakout.measured = true;
 
    double atr = g_profiles[index].atr_trigger;
    double range_atr = g_profiles[index].range_width / atr;
@@ -4117,13 +4365,16 @@ void EvaluateBreakoutStructure(const int index,
 
    double distance = BreakoutDistance(index, direction);
    double buffer = MathMax(BreakoutBufferPrice(index), g_profiles[index].point);
-   double distance_units = distance / buffer;
+   double distance_units = SafeDiv(distance, buffer, 0.0);
    double distance_atr = SafeDiv(distance, atr, 0.0);
    double extension_penalty = SmoothStep(g_max_overextension_atr, g_max_overextension_atr * 1.80, distance_atr);
    breakout.distance_score = Clamp01(SmoothStep(0.20, 1.60, distance_units) * (1.0 - extension_penalty * 0.45));
 
+   // A bar that has barely moved has no shape to read: on the first ticks of
+   // every new bar these ratios were noise that scored as a weak body.
    double candle_range = g_profiles[index].current_trigger_high - g_profiles[index].current_trigger_low;
-   if(candle_range > 0.0)
+   breakout.candle_measured = (candle_range >= CANDLE_MEASURE_MIN_ATR * atr);
+   if(breakout.candle_measured)
    {
       if(direction == DIR_UP)
          breakout.close_location_score = Clamp01((g_profiles[index].current_trigger_close - g_profiles[index].current_trigger_low) / candle_range);
@@ -4162,28 +4413,44 @@ void EvaluateBreakoutStructure(const int index,
    if(reentered_since > 0 && now - reentered_since <= 30)
       breakout.fakeout_penalty = 1.0 - SmoothStep(0.0, 30.0, (double)(now - reentered_since));
 
-   breakout.score = Clamp01(breakout.compression_score * 0.17 +
-                            breakout.distance_score * 0.24 +
-                            breakout.close_location_score * 0.17 +
-                            breakout.hold_score * 0.20 +
-                            breakout.body_quality_score * 0.17 -
-                            breakout.wick_rejection_penalty * 0.15 -
-                            breakout.fakeout_penalty * 0.25);
+   // The snapback (fakeout) penalty acts once, through range_snapback_cap in
+   // the composite, rather than being subtracted here as well.
+   double weighted = breakout.compression_score * 0.17 +
+                     breakout.distance_score * 0.24 +
+                     breakout.hold_score * 0.20;
+   double total_weight = 0.17 + 0.24 + 0.20;
+   if(breakout.candle_measured)
+   {
+      weighted += breakout.close_location_score * 0.17 +
+                  breakout.body_quality_score * 0.17 -
+                  breakout.wick_rejection_penalty * 0.15;
+      total_weight += 0.17 + 0.17;
+   }
+   breakout.score = Clamp01(weighted / total_weight);
    breakout.pass = (distance > 0.0 && breakout.score > 0.06);
 }
 
 void EvaluateImpulseQuality(const int index, const int direction, ImpulseQuality &impulse)
 {
    impulse.pass = false;
+   impulse.measured = false;
    impulse.score = 0.0;
    impulse.speed_5s_z = 0.0;
    impulse.speed_10s_z = 0.0;
    impulse.speed_30s_z = 0.0;
    impulse.acceleration_score = 0.0;
    impulse.atr_expansion_score = 0.0;
+   impulse.tick_rate_available = false;
    impulse.tick_rate_z = 0.0;
+   impulse.tick_volume_available = false;
    impulse.tick_volume_z = 0.0;
    impulse.exhaustion_penalty = 0.0;
+
+   // The tick state is a profile-level reading and stays visible on the row
+   // even when the impulse engine is off or cannot measure yet.
+   impulse.tick_quality_available = g_profiles[index].tick_quality_available;
+   impulse.tick_sample_quality_score = g_profiles[index].tick_sample_quality_score;
+   impulse.tick_state = g_profiles[index].tick_state;
 
    if(!UseImpulseBreakoutEngine || g_profiles[index].atr_trigger <= 0.0 ||
       g_profiles[index].pip_size <= 0.0 || g_profiles[index].snapshot_count < 3)
@@ -4191,18 +4458,39 @@ void EvaluateImpulseQuality(const int index, const int direction, ImpulseQuality
       return;
    }
 
-   impulse.speed_5s_z = SpeedRobustZ(index, direction, 5);
-   impulse.speed_10s_z = SpeedRobustZ(index, direction, 10);
-   impulse.speed_30s_z = SpeedRobustZ(index, direction, 30);
+   bool z5_ready = SpeedWindowReady(index, 5);
+   bool z10_ready = SpeedWindowReady(index, 10);
+   bool z30_ready = SpeedWindowReady(index, 30);
+   if(!z5_ready && !z10_ready && !z30_ready)
+      return;   // no window has a baseline yet: unmeasured, not zero
+   impulse.measured = true;
 
-   double speed_score = Clamp01(ScoreFromZ(Max3(impulse.speed_5s_z,
-                                               impulse.speed_10s_z,
-                                               impulse.speed_30s_z),
+   impulse.speed_5s_z = (z5_ready ? SpeedRobustZ(index, direction, 5) : 0.0);
+   impulse.speed_10s_z = (z10_ready ? SpeedRobustZ(index, direction, 10) : 0.0);
+   impulse.speed_30s_z = (z30_ready ? SpeedRobustZ(index, direction, 30) : 0.0);
+   double speed_max = -999.0;
+   if(z5_ready)
+      speed_max = MathMax(speed_max, impulse.speed_5s_z);
+   if(z10_ready)
+      speed_max = MathMax(speed_max, impulse.speed_10s_z);
+   if(z30_ready)
+      speed_max = MathMax(speed_max, impulse.speed_30s_z);
+
+   double speed_score = Clamp01(ScoreFromZ(speed_max,
                                            g_min_impulse_z_for_signal,
                                            g_min_impulse_z_for_signal + 2.75));
-   double short_rate = SafeDiv(DirectionalValue(g_profiles[index].speed_5s_pips, direction), 5.0, 0.0);
-   double long_rate = SafeDiv(DirectionalValue(g_profiles[index].speed_30s_pips, direction), 30.0, 0.0);
-   impulse.acceleration_score = SmoothStep(0.0, 0.10, short_rate - long_rate);
+
+   double atr_pips = MathMax(g_profiles[index].atr_trigger / g_profiles[index].pip_size, 0.1);
+   // Acceleration compares the 5 s and 30 s rates in ATR per second so the
+   // ramp means the same thing on a 6-pip and a 20-pip ATR.
+   bool acceleration_available = SnapshotWindowCovered(index, 30);
+   if(acceleration_available)
+   {
+      double short_rate = DirectionalValue(g_profiles[index].speed_5s_pips, direction) / 5.0;
+      double long_rate = DirectionalValue(g_profiles[index].speed_30s_pips, direction) / 30.0;
+      impulse.acceleration_score = SmoothStep(0.0, ACCELERATION_FULL_ATR_PER_SECOND,
+                                              (short_rate - long_rate) / atr_pips);
+   }
 
    double candle_directional_range = 0.0;
    if(direction == DIR_UP)
@@ -4213,29 +4501,31 @@ void EvaluateImpulseQuality(const int index, const int direction, ImpulseQuality
                                                                g_profiles[index].atr_trigger,
                                                                0.0));
 
-   impulse.tick_rate_z = TickRateZ(index);
-   impulse.tick_volume_z = TickVolumeRobustZ(index);
-   impulse.tick_sample_quality_score = g_profiles[index].tick_sample_quality_score;
-   impulse.valid_ticks_used = g_profiles[index].valid_ticks_used;
-   impulse.tick_state = g_profiles[index].tick_state;
-   double volume_score = ScoreFromZ(impulse.tick_volume_z, 0.50, 2.80);
+   impulse.tick_rate_z = TickRateZ(index, impulse.tick_rate_available);
+   impulse.tick_volume_z = TickVolumeDeviation(index, impulse.tick_volume_available);
    bool continuation_available = false;
    double continuation = ContinuationScore(index, direction, continuation_available) / 100.0;
 
-   double atr_pips = MathMax(g_profiles[index].atr_trigger / g_profiles[index].pip_size, 0.1);
    double extended_atr = DirectionalValue(g_profiles[index].movement_5m_pips, direction) / atr_pips;
    impulse.exhaustion_penalty = SmoothStep(MaxExhaustionAtr, MaxExhaustionAtr * 1.70, extended_atr);
 
    // Components that could not be measured are dropped from the blend and from
    // its normaliser, rather than being imputed with a constant that would drag
-   // every score toward that constant.
-   double impulse_weighted = speed_score * 0.25 +
-                             impulse.atr_expansion_score * 0.20 +
-                             volume_score * 0.15 +
-                             impulse.acceleration_score * 0.15;
-   double impulse_weight_total = 0.25 + 0.20 + 0.15 + 0.15;
-
-   if(UseTickRateScoring)
+   // every score toward that constant. Exhaustion acts once, through
+   // overextended_cap in the composite.
+   double impulse_weighted = speed_score * 0.25 + impulse.atr_expansion_score * 0.20;
+   double impulse_weight_total = 0.25 + 0.20;
+   if(impulse.tick_volume_available)
+   {
+      impulse_weighted += ScoreFromZ(impulse.tick_volume_z, 0.50, 2.80) * 0.15;
+      impulse_weight_total += 0.15;
+   }
+   if(acceleration_available)
+   {
+      impulse_weighted += impulse.acceleration_score * 0.15;
+      impulse_weight_total += 0.15;
+   }
+   if(UseTickRateScoring && impulse.tick_rate_available)
    {
       impulse_weighted += ScoreFromZ(impulse.tick_rate_z, 0.50, 2.50) * 0.10;
       impulse_weight_total += 0.10;
@@ -4246,25 +4536,23 @@ void EvaluateImpulseQuality(const int index, const int direction, ImpulseQuality
       impulse_weight_total += 0.15;
    }
 
-   impulse.score = Clamp01(impulse_weighted / impulse_weight_total -
-                           impulse.exhaustion_penalty * 0.22);
-   if(UseCopyTicksForImpulse)
+   impulse.score = Clamp01(impulse_weighted / impulse_weight_total);
+   // Sample quality scales the reading only when it was actually measured.
+   if(UseCopyTicksForImpulse && impulse.tick_quality_available)
       impulse.score = Clamp01(impulse.score * (0.75 + impulse.tick_sample_quality_score * 0.25));
-   impulse.pass = (Max3(impulse.speed_5s_z, impulse.speed_10s_z, impulse.speed_30s_z) >= g_min_impulse_z_for_signal ||
-                   impulse.atr_expansion_score >= 0.45);
+   impulse.pass = (speed_max >= g_min_impulse_z_for_signal || impulse.atr_expansion_score >= 0.45);
 }
 
 void EvaluateCurrencyFlowQuality(const int index,
                                  const int direction,
                                  CurrencyFlowQuality &flow)
 {
-   flow.pass = false;
    flow.available = false;
    flow.score = 0.0;
    flow.base_strength = 0.0;
    flow.quote_strength = 0.0;
    flow.directional_edge = 0.0;
-   flow.basket_agreement = 0.50;
+   flow.basket_agreement = 0.0;
    flow.conflict_penalty = 0.0;
 
    if(!UseCurrencyStrength)
@@ -4277,15 +4565,25 @@ void EvaluateCurrencyFlowQuality(const int index,
       return;   // unknown pair: no basket reading exists
    }
 
-   if(g_currency_samples[base] <= 0 || g_currency_samples[quote] <= 0)
+   // Leave-one-out: the pair's own move is removed from both of its currencies
+   // before the edge is formed, otherwise a lone mover confirmed itself with
+   // every peer flat. With nothing left after removal there is no reading.
+   double own_contribution = 0.0;
+   double own_weight = 0.0;
+   int leader = g_profiles[index].symbol_leader_index;
+   if(leader >= 0 && leader < ArraySize(g_profiles))
    {
-      flow.basket_agreement = 0.50;
-      return;   // no samples for these currencies this scan
+      own_contribution = g_profiles[leader].basket_contribution;
+      own_weight = g_profiles[leader].basket_weight;
    }
+   double base_weight = g_currency_weight[base] - own_weight;
+   double quote_weight = g_currency_weight[quote] - own_weight;
+   if(base_weight <= 0.000001 || quote_weight <= 0.000001)
+      return;   // no peer sample for one of the currencies this scan
 
    flow.available = true;
-   flow.base_strength = g_currency_strength[base];
-   flow.quote_strength = g_currency_strength[quote];
+   flow.base_strength = (g_currency_sum[base] - own_contribution) / base_weight;
+   flow.quote_strength = (g_currency_sum[quote] + own_contribution) / quote_weight;
    flow.directional_edge = (flow.base_strength - flow.quote_strength) * (double)direction;
    bool agreement_available = false;
    flow.basket_agreement = CalculateBasketAgreement(index, direction, agreement_available);
@@ -4312,8 +4610,9 @@ void EvaluateCurrencyFlowQuality(const int index,
       flow_weight_total += 0.45;
    }
 
-   flow.score = Clamp01(flow_weighted / flow_weight_total - flow.conflict_penalty * 0.35);
-   flow.pass = (flow.conflict_penalty < 0.55);
+   // The conflict penalty acts through flow_conflict_cap and the strict-gate
+   // block in the composite, not a third time inside the blend.
+   flow.score = Clamp01(flow_weighted / flow_weight_total);
 }
 
 void EvaluateRegimeContext(const int index,
@@ -4322,21 +4621,45 @@ void EvaluateRegimeContext(const int index,
                            RegimeContext &regime)
 {
    regime.session_score = SessionQualityScore(now);
-   regime.m5_context_score = SmoothStep(M5RejectAtr, M5_CONTEXT_FULL_ATR,
-                                        g_profiles[index].m5_move_atr * (double)direction);
-   regime.m15_context_score = SmoothStep(M15RejectAtr, M15_CONTEXT_FULL_ATR,
-                                         g_profiles[index].m15_move_atr * (double)direction);
-   regime.mtf_alignment_score = Clamp01(regime.m5_context_score * 0.55 + regime.m15_context_score * 0.45);
+   regime.m5_available = g_profiles[index].has_m5_move;
+   regime.m15_available = g_profiles[index].has_m15_move;
+   regime.m5_context_score = (regime.m5_available ?
+                              SmoothStep(M5RejectAtr, M5_CONTEXT_FULL_ATR,
+                                         g_profiles[index].m5_move_atr * (double)direction) : 0.0);
+   regime.m15_context_score = (regime.m15_available ?
+                               SmoothStep(M15RejectAtr, M15_CONTEXT_FULL_ATR,
+                                          g_profiles[index].m15_move_atr * (double)direction) : 0.0);
+
+   double mtf_weighted = 0.0;
+   double mtf_weight = 0.0;
+   if(regime.m5_available)
+   {
+      mtf_weighted += regime.m5_context_score * 0.55;
+      mtf_weight += 0.55;
+   }
+   if(regime.m15_available)
+   {
+      mtf_weighted += regime.m15_context_score * 0.45;
+      mtf_weight += 0.45;
+   }
+   bool mtf_available = (mtf_weight > 0.0);
+   regime.mtf_alignment_score = (mtf_available ? Clamp01(mtf_weighted / mtf_weight) : 0.0);
 
    double range_atr = SafeDiv(g_profiles[index].range_width, g_profiles[index].atr_trigger, 0.0);
    double active_enough = SmoothStep(0.70, 2.20, range_atr);
    double not_chaotic = 1.0 - SmoothStep(14.0, 24.0, range_atr);
    regime.volatility_regime_score = Clamp01(active_enough * not_chaotic);
-   regime.rollover_penalty = (IgnoreRolloverTime && IsRolloverTime(now) ? 1.0 : 0.0);
-   regime.score = Clamp01(regime.session_score * 0.25 +
-                          regime.mtf_alignment_score * 0.42 +
-                          regime.volatility_regime_score * 0.33 -
-                          regime.rollover_penalty);
+
+   // Rollover is a hard execution gate that runs before this evaluator, so a
+   // penalty here could never apply. Unmeasured context leaves the blend.
+   double weighted = regime.session_score * 0.25 + regime.volatility_regime_score * 0.33;
+   double total_weight = 0.25 + 0.33;
+   if(mtf_available)
+   {
+      weighted += regime.mtf_alignment_score * 0.42;
+      total_weight += 0.42;
+   }
+   regime.score = Clamp01(weighted / total_weight);
 }
 
 void EvaluateCalendarContext(const int index,
@@ -4344,14 +4667,11 @@ void EvaluateCalendarContext(const int index,
                              CalendarContext &calendar)
 {
    calendar.available = false;
-   calendar.relevant_event_nearby = false;
    calendar.high_impact_nearby = false;
    calendar.just_released = false;
    calendar.future_high_impact_nearby = false;
-   calendar.score = 0.65;
-   calendar.proximity_minutes = 0.0;
+   calendar.score = 0.0;
    calendar.future_high_impact_minutes = 0.0;
-   calendar.importance_score = 0.0;
    calendar.uncertainty_penalty = 0.0;
    calendar.state_tag = "NEWS_UNAVAILABLE";
 
@@ -4379,30 +4699,10 @@ void EvaluateCalendarContext(const int index,
       return;
    }
 
-   calendar.relevant_event_nearby = (base_cache.relevant_event_nearby || quote_cache.relevant_event_nearby);
    calendar.high_impact_nearby = (base_cache.high_impact_nearby || quote_cache.high_impact_nearby);
    calendar.just_released = (base_cache.just_released || quote_cache.just_released);
    calendar.future_high_impact_nearby = (base_cache.future_high_impact_nearby || quote_cache.future_high_impact_nearby);
-   calendar.importance_score = MathMax(base_cache.importance_score, quote_cache.importance_score);
    calendar.uncertainty_penalty = MathMax(base_cache.uncertainty_penalty, quote_cache.uncertainty_penalty);
-
-   // proximity_minutes is signed: negative means the event has already been
-   // released. Selecting on the raw value discarded every past event and picked
-   // the furthest one when both were past, so compare on absolute distance and
-   // use the per-currency relevance flags to decide which side has a reading.
-   bool base_has_event = base_cache.relevant_event_nearby;
-   bool quote_has_event = quote_cache.relevant_event_nearby;
-   if(base_has_event && quote_has_event)
-   {
-      calendar.proximity_minutes = (MathAbs(base_cache.proximity_minutes) <=
-                                    MathAbs(quote_cache.proximity_minutes) ?
-                                    base_cache.proximity_minutes :
-                                    quote_cache.proximity_minutes);
-   }
-   else if(base_has_event)
-      calendar.proximity_minutes = base_cache.proximity_minutes;
-   else if(quote_has_event)
-      calendar.proximity_minutes = quote_cache.proximity_minutes;
 
    // future_high_impact_minutes is non-negative by construction, so the nearest
    // upcoming event is the smaller value on whichever sides reported one.
@@ -4465,12 +4765,18 @@ string BuildReasonSummary(const CompositeSignalScore &score, const string caps)
    names[count] = "exec";
    values[count] = score.execution.score;
    count++;
-   names[count] = "breakout";
-   values[count] = score.breakout.score;
-   count++;
-   names[count] = "impulse";
-   values[count] = score.impulse.score;
-   count++;
+   if(UseTechnicalBreakoutEngine && score.breakout.measured)
+   {
+      names[count] = "breakout";
+      values[count] = score.breakout.score;
+      count++;
+   }
+   if(UseImpulseBreakoutEngine && score.impulse.measured)
+   {
+      names[count] = "impulse";
+      values[count] = score.impulse.score;
+      count++;
+   }
    if(score.flow.available)
    {
       names[count] = "flow";
@@ -4554,16 +4860,23 @@ string FirstDelimitedItems(const string text, const int max_items)
 string BuildCompactTags(const CompositeSignalScore &score)
 {
    string tags = "";
-   AddTag(tags, score.breakout.score >= 0.60, "BRK+");
-   AddTag(tags, score.impulse.score >= 0.60, "IMP+");
+   // Engine tags assert a passed engine, never a blend that drifted high on
+   // secondary terms; every "not available" tag is gated on the component
+   // having been enabled, so a switched-off basket reads FLOW_OFF not FLOW?.
+   AddTag(tags, score.breakout.pass && score.breakout.score >= ENGINE_CONFIRM_THRESHOLD, "BRK+");
+   AddTag(tags, score.impulse.pass && score.impulse.score >= ENGINE_CONFIRM_THRESHOLD, "IMP+");
    AddTag(tags, score.flow.available && score.flow.score >= FLOW_CONFIRM_THRESHOLD, "FLOW+");
-   AddTag(tags, !score.flow.available, "FLOW?");
+   AddTag(tags, UseCurrencyStrength && !score.flow.available, "FLOW?");
+   AddTag(tags, !UseCurrencyStrength, "FLOW_OFF");
    AddTag(tags, score.execution.score >= 0.75, "EXEC+");
    AddTag(tags, score.regime.score >= REGIME_CONFIRM_THRESHOLD, "REG+");
-   AddTag(tags, score.regime.mtf_alignment_score < 0.35, "MTF-");
+   AddTag(tags, (score.regime.m5_available || score.regime.m15_available) &&
+                score.regime.mtf_alignment_score < 0.35, "MTF-");
    AddTag(tags, score.calendar.high_impact_nearby || score.calendar.just_released, "NEWS!");
-   AddTag(tags, score.execution.block_reason == BLOCK_BAD_SPREAD || score.execution.cost_to_atr > g_max_spread_to_atr * 0.70, "SPREAD!");
-   AddTag(tags, score.execution.block_reason == BLOCK_STALE_QUOTE || score.impulse.tick_state == "TICK_STALE", "STALE!");
+   AddTag(tags, score.execution.block_reason == BLOCK_BAD_SPREAD ||
+                score.execution.cost_to_atr > g_max_spread_to_atr * 0.70, "SPREAD!");
+   AddTag(tags, score.execution.block_reason == BLOCK_STALE_QUOTE ||
+                score.impulse.tick_state == "TICK_STALE", "STALE!");
    AddTag(tags, score.impulse.tick_state == "TICK_OK", "TICK_OK");
    AddTag(tags, score.impulse.tick_state == "TICK_THIN", "TICK_THIN");
    if(tags == "")
@@ -4580,20 +4893,27 @@ void AddTag(string &tags, const bool condition, const string tag)
    tags += tag;
 }
 
-string BuildHumanReadableReason(const CompositeSignalScore &score, const SymbolProfile &profile)
+string BuildHumanReadableReason(const CompositeSignalScore &score)
 {
    if(score.block_reason != BLOCK_NONE)
       return "Blocked: " + BlockReasonText(score.block_reason) + " | " + score.reason_summary;
 
+   // The lead names the engine that passed and reached the same level the
+   // BRK+/IMP+ tags use, so the text and the tags always agree.
    string lead = "Alert quality: ";
-   if(score.breakout.score >= score.impulse.score && score.breakout.score >= 0.55)
+   bool breakout_confirmed = (score.breakout.pass && score.breakout.score >= ENGINE_CONFIRM_THRESHOLD);
+   bool impulse_confirmed = (score.impulse.pass && score.impulse.score >= ENGINE_CONFIRM_THRESHOLD);
+   if(breakout_confirmed && score.breakout.score >= score.impulse.score)
       lead = "Clean directional breakout: ";
-   else if(score.impulse.score >= 0.55)
+   else if(impulse_confirmed)
       lead = "News-like impulse: ";
 
    string details = "";
-   if(score.impulse.speed_10s_z > 1.0 || score.impulse.speed_30s_z > 1.0)
-      details += "strong 10s/30s impulse, ";
+   if(score.impulse.measured &&
+      Max3(score.impulse.speed_5s_z, score.impulse.speed_10s_z, score.impulse.speed_30s_z) >= g_min_impulse_z_for_signal)
+   {
+      details += "impulse above the signal threshold, ";
+   }
 
    // Never assert a basket verdict that was not computed.
    if(!score.flow.available)
@@ -4629,14 +4949,19 @@ double CalculateBasketAgreement(const int index, const int direction, bool &avai
    int base = g_profiles[index].base_index;
    int quote = g_profiles[index].quote_index;
    if(base < 0 || quote < 0)
-      return 0.50;
+      return 0.0;
 
    double agreeing_weight = 0.0;
    double total_weight = 0.0;
 
    for(int i = 0; i < ArraySize(g_profiles); i++)
    {
-      if(i == index || !g_profiles[i].is_first_profile_for_symbol || !g_profiles[i].valid || !g_profiles[i].quote_fresh ||
+      // Other timeframes of the same symbol carry the same move and would let
+      // the pair agree with itself; peers without spread statistics have no
+      // weight yet.
+      if(!g_profiles[i].is_first_profile_for_symbol || !g_profiles[i].valid || !g_profiles[i].quote_fresh ||
+         g_profiles[i].symbol_upper == g_profiles[index].symbol_upper ||
+         !g_profiles[i].spread_stats_ready ||
          g_profiles[i].m1_atr_pips <= 0.0 || g_profiles[i].pip_size <= 0.0 ||
          g_profiles[i].base_index < 0 || g_profiles[i].quote_index < 0 ||
          g_profiles[i].spread_pips <= 0.0 || g_profiles[i].spread_pips > MaxSpreadPips)
@@ -4662,12 +4987,8 @@ double CalculateBasketAgreement(const int index, const int direction, bool &avai
       if(g_profiles[i].quote_index == quote)
          expected += (double)direction;
 
-      if(expected == 0.0)
-         continue;
-
-      double spread_weight = 1.0 / MathMax(1.0, SafeDiv(g_profiles[i].spread_pips,
-                                                        g_profiles[i].median_spread_pips,
-                                                        1.0));
+      double spread_weight = 1.0 / MathMax(1.0, g_profiles[i].spread_pips /
+                                                MathMax(g_profiles[i].median_spread_pips, 0.1));
       double weight = Clamp(spread_weight / MathMax(atr_pips, 0.5), 0.05, 1.50);
       total_weight += weight;
 
@@ -4678,7 +4999,7 @@ double CalculateBasketAgreement(const int index, const int direction, bool &avai
    }
 
    if(total_weight <= 0.0)
-      return 0.50;   // no peer pairs; the caller drops the component instead of using this
+      return 0.0;   // no peer pairs; the caller drops the component
 
    available = true;
    return Clamp01(agreeing_weight / total_weight);
@@ -4687,7 +5008,9 @@ double CalculateBasketAgreement(const int index, const int direction, bool &avai
 bool SpreadOnlyBreakout(const int index, const int direction)
 {
    double breakout_distance = BreakoutDistance(index, direction);
-   if(breakout_distance <= 0.0)
+   // Without a 30 s snapshot window the speeds read zero and every breakout
+   // would look spread-only; the check needs the measurement to exist.
+   if(breakout_distance <= 0.0 || !SnapshotWindowCovered(index, 30))
       return false;
 
    double spread_price = MathMax(g_profiles[index].ask - g_profiles[index].bid, 0.0);
@@ -4726,10 +5049,8 @@ void InitializeCalendarCache()
       g_calendar_cache[i].high_impact_nearby = false;
       g_calendar_cache[i].just_released = false;
       g_calendar_cache[i].future_high_impact_nearby = false;
-      g_calendar_cache[i].score = 0.65;
-      g_calendar_cache[i].proximity_minutes = 0.0;
+      g_calendar_cache[i].score = 0.0;
       g_calendar_cache[i].future_high_impact_minutes = 0.0;
-      g_calendar_cache[i].importance_score = 0.0;
       g_calendar_cache[i].uncertainty_penalty = 0.0;
    }
 }
@@ -4756,10 +5077,8 @@ void RefreshCalendarCache(const int currency_index, const datetime now)
    cache.high_impact_nearby = false;
    cache.just_released = false;
    cache.future_high_impact_nearby = false;
-   cache.score = 0.65;
-   cache.proximity_minutes = 0.0;
+   cache.score = 0.0;
    cache.future_high_impact_minutes = 0.0;
-   cache.importance_score = 0.0;
    cache.uncertainty_penalty = 0.0;
 
    // Session and rollover classification run off TimeCurrent(); using a different
@@ -4771,21 +5090,29 @@ void RefreshCalendarCache(const int currency_index, const datetime now)
    datetime to_time = server_now + CalendarLookaheadMinutes * 60;
    MqlCalendarValue values[];
    ResetLastError();
-   int count = CalendarValueHistory(values, from_time, to_time, NULL, cache.currency);
-   if(count <= 0)
+   // CalendarValueHistory returns a success flag, not a count. A successful
+   // call with an empty result means the calendar was read and nothing is
+   // scheduled in the window; only a failed call means it is unavailable.
+   if(!CalendarValueHistory(values, from_time, to_time, NULL, cache.currency))
    {
       cache.available = false;
+      cache.score = 0.0;
       g_calendar_cache[currency_index] = cache;
       return;
    }
 
+   int count = ArraySize(values);
    cache.available = true;
+   cache.score = CALENDAR_QUIET_SCORE;
    g_calendar_available = true;
-   double nearest_abs_minutes = 999999.0;
    for(int i = 0; i < count; i++)
    {
       MqlCalendarEvent calendar_event;
       if(!CalendarEventById(values[i].event_id, calendar_event))
+         continue;
+      // Date-only, tentative and undated entries carry a midnight timestamp
+      // that says nothing about the release minute.
+      if(calendar_event.time_mode != CALENDAR_TIMEMODE_DATETIME)
          continue;
 
       int importance = (int)calendar_event.importance;
@@ -4795,11 +5122,6 @@ void RefreshCalendarCache(const int currency_index, const datetime now)
 
       double minutes_signed = (double)(values[i].time - server_now) / 60.0;
       double abs_minutes = MathAbs(minutes_signed);
-      if(abs_minutes < nearest_abs_minutes)
-      {
-         nearest_abs_minutes = abs_minutes;
-         cache.proximity_minutes = minutes_signed;
-      }
 
       cache.relevant_event_nearby = true;
       cache.high_impact_nearby = (cache.high_impact_nearby || high_impact);
@@ -4813,7 +5135,6 @@ void RefreshCalendarCache(const int currency_index, const datetime now)
             cache.future_high_impact_minutes = minutes_signed;
          cache.future_high_impact_nearby = true;
       }
-      cache.importance_score = MathMax(cache.importance_score, Clamp01((double)importance / 3.0));
       if(minutes_signed >= 0.0 && abs_minutes <= (double)CalendarLookaheadMinutes)
          cache.uncertainty_penalty = MathMax(cache.uncertainty_penalty, high_impact ? 0.55 : 0.25);
    }
@@ -4888,6 +5209,12 @@ string SessionNameFromIndex(const int session_index)
 
 string BlockReasonText(const SignalBlockReason reason)
 {
+   if(reason == BLOCK_NO_SETUP)
+      return "no_breakout_or_impulse";
+   if(reason == BLOCK_SPREAD_ONLY_BREAKOUT)
+      return "spread_only_breakout";
+   if(reason == BLOCK_EXPIRED)
+      return "event_expired";
    if(reason == BLOCK_STALE_QUOTE)
       return "stale_quote";
    if(reason == BLOCK_BAD_SPREAD)
@@ -4921,19 +5248,49 @@ bool IsConfirmedSignal(const int index,
    {
       return (g_profiles[index].candidate_bar_time > 0 &&
               g_profiles[index].trigger_bar_time > g_profiles[index].candidate_bar_time &&
-              score >= g_min_display_confidence);
+              MeetsThreshold(score, g_min_display_confidence));
    }
 
    double hold = (direction == DIR_UP ?
                   g_profiles[index].composite_up.breakout.hold_score :
                   g_profiles[index].composite_down.breakout.hold_score);
 
+   // The hold-time clause needs a candidate start; without one it was
+   // trivially true and silently turned HYBRID into LIVE_TICK.
    return (hold >= 0.35 ||
-           score >= g_strong_alert_confidence ||
-           now - g_profiles[index].candidate_start_time >= MinHoldSecondsForHighScore);
+           MeetsThreshold(score, g_strong_alert_confidence) ||
+           (g_profiles[index].candidate_start_time > 0 &&
+            now - g_profiles[index].candidate_start_time >= MinHoldSecondsForHighScore));
 }
 
-bool SignalExpiredByContext(const int index, const int direction, const datetime now)
+// Age after which an event's score is zeroed. A candidate waiting for a bar
+// close must outlive that bar; an active signal follows SignalTTLSeconds, or has
+// no age limit at all when ExpireOldSignals is off (returned as 0).
+int EventAgeLimitSeconds(const int index)
+{
+   if(g_profiles[index].event_state == STATE_CANDIDATE)
+   {
+      int limit = SignalTTLSeconds;
+      if(SignalConfirmationMode == CONFIRM_BAR_CLOSE)
+      {
+         int bar_seconds = TimeframeMinutes(g_profiles[index].scan_timeframe) * 60;
+         limit = IntMax(limit, bar_seconds + 2 * ScanIntervalSeconds);
+      }
+      return limit;
+   }
+   return (ExpireOldSignals ? SignalTTLSeconds : 0);
+}
+
+double AgeFreeScore(const int index, const int direction)
+{
+   if(direction == DIR_UP)
+      return g_profiles[index].composite_up.age_free_score;
+   if(direction == DIR_DOWN)
+      return g_profiles[index].composite_down.age_free_score;
+   return 0.0;
+}
+
+bool SignalExpiredByContext(const int index, const int direction)
 {
    if(g_profiles[index].spread_pips > MaxSpreadPips ||
       g_profiles[index].tick_gap_sec > MaxTickGapSeconds * 1.50)
@@ -5050,10 +5407,6 @@ string DominantCurrencyFlow(const int index, const int direction)
 
 void UpdateSignalState(const int index, const datetime now)
 {
-   int best_direction = DIR_NONE;
-   double best_score = 0.0;
-   PickBestDirection(index, now, best_direction, best_score);
-
    if(IsActiveState(g_profiles[index].event_state) &&
       g_profiles[index].active_direction != DIR_NONE)
    {
@@ -5062,26 +5415,30 @@ void UpdateSignalState(const int index, const datetime now)
       int opposite_direction = -current_direction;
       double opposite_score = DirectionScore(index, opposite_direction);
       int current_age = EventAgeSeconds(index, current_direction, now);
+      bool context_expired = SignalExpiredByContext(index, current_direction);
 
       bool opposite_allowed = (opposite_direction == DIR_UP ?
                                now >= g_profiles[index].cooldown_end_up :
                                now >= g_profiles[index].cooldown_end_down);
-      if(opposite_allowed && opposite_score >= g_strong_alert_confidence && opposite_score > current_score + 8.0 &&
-         IsConfirmedSignal(index, opposite_direction, opposite_score, now))
+      // A reversal is judged against the running direction's age-free score so
+      // the freshness caps on the current event cannot manufacture a flip, and
+      // it enters through the normal candidate path so every confirmation mode
+      // applies its own rule to it.
+      if(opposite_allowed && MeetsThreshold(opposite_score, g_strong_alert_confidence) &&
+         opposite_score > AgeFreeScore(index, current_direction) + 8.0)
       {
-         StartCooldown(index, current_direction, now, ValidSignalCooldownSeconds);
-         ActivateSignal(index, opposite_direction, opposite_score, now);
+         EndActiveSignal(index, current_direction, now, ValidSignalCooldownSeconds);
+         StartCandidate(index, opposite_direction, opposite_score, now);
          return;
       }
 
       if(ExpireOldSignals && current_age > SignalTTLSeconds)
       {
-         EndActiveSignal(index, current_direction, now);
+         EndActiveSignal(index, current_direction, now, ValidSignalCooldownSeconds);
          return;
       }
 
-      if(current_score >= g_min_display_confidence && current_age <= 300 &&
-         !SignalExpiredByContext(index, current_direction, now))
+      if(MeetsThreshold(current_score, g_min_display_confidence) && !context_expired)
       {
          g_profiles[index].confidence_below_since = 0;
          ActivateSignal(index, current_direction, current_score, now);
@@ -5091,17 +5448,22 @@ void UpdateSignalState(const int index, const datetime now)
       if(g_profiles[index].confidence_below_since == 0)
          g_profiles[index].confidence_below_since = now;
 
-      if(now - g_profiles[index].confidence_below_since >= DisplayUpdateSeconds ||
-         current_age > 300 ||
-         SignalExpiredByContext(index, current_direction, now))
+      if(context_expired ||
+         now - g_profiles[index].confidence_below_since >= SIGNAL_DECAY_GRACE_SECONDS)
       {
-         EndActiveSignal(index, current_direction, now);
+         int cooldown = (current_age <= SIGNAL_EARLY_COLLAPSE_SECONDS ?
+                         FailedSignalCooldownSeconds : ValidSignalCooldownSeconds);
+         EndActiveSignal(index, current_direction, now, cooldown);
       }
 
       return;
    }
 
-   if(best_direction != DIR_NONE && best_score >= g_min_display_confidence)
+   int best_direction = DIR_NONE;
+   double best_score = 0.0;
+   PickBestDirection(index, now, best_direction, best_score);
+
+   if(best_direction != DIR_NONE && MeetsThreshold(best_score, g_min_display_confidence))
    {
       if(g_profiles[index].event_state == STATE_CANDIDATE &&
          g_profiles[index].candidate_direction == best_direction)
@@ -5113,14 +5475,16 @@ void UpdateSignalState(const int index, const datetime now)
          return;
       }
 
-      g_profiles[index].event_state = STATE_CANDIDATE;
-      g_profiles[index].candidate_direction = best_direction;
-      g_profiles[index].candidate_start_time = now;
-      g_profiles[index].candidate_bar_time = g_profiles[index].trigger_bar_time;
+      // A candidate abandoned for the other direction failed, and cools down
+      // like any other failed candidate before the new one starts.
+      if(g_profiles[index].event_state == STATE_CANDIDATE &&
+         g_profiles[index].candidate_direction != DIR_NONE &&
+         g_profiles[index].candidate_direction != best_direction)
+      {
+         StartCooldown(index, g_profiles[index].candidate_direction, now, FailedSignalCooldownSeconds);
+      }
 
-      if(SignalConfirmationMode == CONFIRM_LIVE_TICK)
-         ActivateSignal(index, best_direction, best_score, now);
-
+      StartCandidate(index, best_direction, best_score, now);
       return;
    }
 
@@ -5152,13 +5516,13 @@ void PickBestDirection(const int index,
    bool up_allowed = (now >= g_profiles[index].cooldown_end_up);
    bool down_allowed = (now >= g_profiles[index].cooldown_end_down);
 
-   if(up_allowed && g_profiles[index].final_score_up >= g_min_display_confidence)
+   if(up_allowed && MeetsThreshold(g_profiles[index].final_score_up, g_min_display_confidence))
    {
       best_direction = DIR_UP;
       best_score = g_profiles[index].final_score_up;
    }
 
-   if(down_allowed && g_profiles[index].final_score_down >= g_min_display_confidence &&
+   if(down_allowed && MeetsThreshold(g_profiles[index].final_score_down, g_min_display_confidence) &&
       g_profiles[index].final_score_down > best_score)
    {
       best_direction = DIR_DOWN;
@@ -5166,17 +5530,32 @@ void PickBestDirection(const int index,
    }
 }
 
+void StartCandidate(const int index,
+                    const int direction,
+                    const double score,
+                    const datetime now)
+{
+   g_profiles[index].event_state = STATE_CANDIDATE;
+   g_profiles[index].candidate_direction = direction;
+   g_profiles[index].candidate_start_time = now;
+   g_profiles[index].candidate_bar_time = g_profiles[index].trigger_bar_time;
+
+   if(SignalConfirmationMode == CONFIRM_LIVE_TICK)
+      ActivateSignal(index, direction, score, now);
+}
+
 void ActivateSignal(const int index,
                     const int direction,
                     const double score,
                     const datetime now)
 {
-   if(!IsConfirmedSignal(index, direction, score, now))
-      return;
-
+   // Confirmation gates entry into the active state. A running signal is
+   // re-activated every scan to refresh its score, history row and alerts, and
+   // must not be re-gated: its candidate fields were cleared on activation.
    bool new_signal = (!IsActiveState(g_profiles[index].event_state) ||
                       g_profiles[index].active_direction != direction);
-   BreakoutEventState active_state = STATE_ACTIVE_CONFIRMED;
+   if(new_signal && !IsConfirmedSignal(index, direction, score, now))
+      return;
 
    if(new_signal)
    {
@@ -5185,10 +5564,10 @@ void ActivateSignal(const int index,
       g_profiles[index].strong_alert_handled = false;
       PushSignalHistory(index, direction, score, g_profiles[index].event_local_time);
       g_profiles[index].pending_alert = true;
-      g_profiles[index].pending_strong_upgrade = (score >= g_strong_alert_confidence);
+      g_profiles[index].pending_strong_upgrade = MeetsThreshold(score, g_strong_alert_confidence);
       g_profiles[index].pending_alert_score = score;
    }
-   else if(score >= g_strong_alert_confidence && !g_profiles[index].strong_alert_handled)
+   else if(MeetsThreshold(score, g_strong_alert_confidence) && !g_profiles[index].strong_alert_handled)
    {
       UpdateSignalHistory(index, direction, score);
       g_profiles[index].pending_alert = true;
@@ -5201,17 +5580,16 @@ void ActivateSignal(const int index,
    }
 
    g_profiles[index].active_direction = direction;
-   g_profiles[index].event_state = active_state;
+   g_profiles[index].event_state = STATE_ACTIVE_CONFIRMED;
    g_profiles[index].candidate_direction = DIR_NONE;
    g_profiles[index].candidate_start_time = 0;
    g_profiles[index].candidate_bar_time = 0;
    g_profiles[index].confidence_below_since = 0;
-
 }
 
-void EndActiveSignal(const int index, const int direction, const datetime now)
+void EndActiveSignal(const int index, const int direction, const datetime now, const int cooldown_seconds)
 {
-   StartCooldown(index, direction, now, ValidSignalCooldownSeconds);
+   StartCooldown(index, direction, now, cooldown_seconds);
    g_profiles[index].active_direction = DIR_NONE;
    g_profiles[index].event_state = STATE_COOLDOWN;
    g_profiles[index].event_start_time = 0;
@@ -5519,7 +5897,7 @@ void CollectDashboardSignals(DashboardSignal &signals[])
          continue;
 
       int direction = g_profiles[i].active_direction;
-      if(DirectionDisplayedScore(i, direction) < g_min_display_confidence)
+      if(!MeetsThreshold(DirectionDisplayedScore(i, direction), g_min_display_confidence))
          continue;
 
       DashboardSignal signal;
@@ -5580,8 +5958,14 @@ int BlockStageRank(const SignalBlockReason reason)
 {
    if(reason == BLOCK_NONE)
       return -1;
-   if(reason == BLOCK_NO_MOVEMENT_DATA || reason == BLOCK_CONTEXT_CONFLICT)
+   // Reasons raised after the engines ran are more informative than the
+   // direction-independent execution gates that precede them.
+   if(reason == BLOCK_NO_MOVEMENT_DATA || reason == BLOCK_CONTEXT_CONFLICT ||
+      reason == BLOCK_NO_SETUP || reason == BLOCK_SPREAD_ONLY_BREAKOUT ||
+      reason == BLOCK_EXPIRED)
+   {
       return 1;
+   }
    return 0;
 }
 
@@ -6169,7 +6553,7 @@ double BreakoutDistance(const int index, const int direction)
 double ContinuationScore(const int index, const int direction, bool &available)
 {
    available = false;
-   if(g_profiles[index].snapshot_count < 3)
+   if(g_profiles[index].snapshot_count < 3 || !SnapshotWindowCovered(index, 30))
       return 0.0;
 
    double old_mid = ReferenceMid(index, 30);
@@ -6207,23 +6591,24 @@ double TickGapSeconds(const int index, const long time_msc)
    return MathMax(0.0, (double)(time_msc - g_snapshots[last_index].time_msc) / 1000.0);
 }
 
+// Sample quality is a measurement of the CopyTicks window; on every path that
+// cannot measure it the profile is left unmeasured (tick_quality_available
+// false) instead of carrying an assumed quality into the impulse score.
 void UpdateTickQuality(const int index)
 {
-   g_profiles[index].tick_sample_quality_score = 0.50;
+   g_profiles[index].tick_quality_available = false;
+   g_profiles[index].tick_sample_quality_score = 0.0;
    g_profiles[index].valid_ticks_used = 0;
    g_profiles[index].tick_state = "TICK_SYNCING";
 
    if(!UseCopyTicksForImpulse)
    {
-      g_profiles[index].tick_sample_quality_score = 0.65;
-      g_profiles[index].valid_ticks_used = g_profiles[index].snapshot_count;
       g_profiles[index].tick_state = (g_profiles[index].quote_fresh ? "TICK_OK" : "TICK_STALE");
       return;
    }
 
    if(g_profiles[index].quote_time_msc <= 0)
    {
-      g_profiles[index].tick_sample_quality_score = 0.0;
       g_profiles[index].tick_state = "TICK_STALE";
       return;
    }
@@ -6232,12 +6617,15 @@ void UpdateTickQuality(const int index)
       return;
 
    MqlTick ticks[];
-   ulong from_msc = (ulong)MathMax(0, g_profiles[index].quote_time_msc - (long)CopyTicksLookbackSeconds * 1000);
+   long from_msc = MathMax(0, g_profiles[index].quote_time_msc - (long)CopyTicksLookbackSeconds * 1000);
    ResetLastError();
-   int copied = CopyTicks(g_profiles[index].symbol, ticks, COPY_TICKS_INFO, from_msc, MAX_COPY_TICKS);
+   // With a non-zero start time CopyTicks returns the OLDEST ticks after it, so
+   // a burst denser than MAX_COPY_TICKS per window would drop the newest ticks
+   // and read as stale exactly when activity peaks. Request the newest ticks
+   // and discard the ones that fall before the window instead.
+   int copied = CopyTicks(g_profiles[index].symbol, ticks, COPY_TICKS_INFO, 0, MAX_COPY_TICKS);
    if(copied <= 0)
    {
-      g_profiles[index].tick_sample_quality_score = 0.25;
       g_profiles[index].tick_state = "TICK_SYNCING";
       return;
    }
@@ -6254,7 +6642,7 @@ void UpdateTickQuality(const int index)
       long tick_time = (long)ticks[i].time_msc;
       if(tick_time <= 0)
          tick_time = (long)ticks[i].time * 1000;
-      if(tick_time <= 0)
+      if(tick_time <= 0 || tick_time < from_msc)
          continue;
       if(oldest <= 0)
          oldest = tick_time;
@@ -6265,13 +6653,19 @@ void UpdateTickQuality(const int index)
    g_profiles[index].valid_ticks_used = valid;
    if(valid <= 0)
    {
-      g_profiles[index].tick_sample_quality_score = 0.15;
       g_profiles[index].tick_state = "TICK_STALE";
       return;
    }
 
    double age_sec = MathMax(0.0, (double)(g_profiles[index].quote_time_msc - newest) / 1000.0);
    double coverage_sec = MathMax(1.0, (double)(newest - oldest) / 1000.0);
+   // The true tick rate replaces the coarse snapshot-count fallback.
+   if(valid >= 2)
+   {
+      g_profiles[index].tick_rate_per_sec = (double)valid / coverage_sec;
+      g_profiles[index].tick_rate_available = true;
+   }
+   g_profiles[index].tick_quality_available = true;
    double count_score = SmoothStep((double)MinCopyTicksForGoodQuality * 0.35,
                                   (double)MinCopyTicksForGoodQuality,
                                   (double)valid);
@@ -6306,26 +6700,33 @@ bool ReuseTickQualityFromSibling(const int index)
          continue;
       }
 
+      g_profiles[index].tick_quality_available = g_profiles[i].tick_quality_available;
       g_profiles[index].tick_sample_quality_score = g_profiles[i].tick_sample_quality_score;
       g_profiles[index].valid_ticks_used = g_profiles[i].valid_ticks_used;
       g_profiles[index].tick_state = g_profiles[i].tick_state;
+      if(g_profiles[i].tick_rate_available)
+      {
+         g_profiles[index].tick_rate_available = true;
+         g_profiles[index].tick_rate_per_sec = g_profiles[i].tick_rate_per_sec;
+      }
       return true;
    }
 
    return false;
 }
 
-double TickRateFromSnapshots(const int index, const int seconds_back)
+// Coarse fallback: new snapshots per second over a covered window. It counts
+// scan samples, so it is capped by the scan interval and only stands in until
+// CopyTicks provides the true rate.
+bool TickRateFromSnapshots(const int index, const int seconds_back, double &rate)
 {
+   rate = 0.0;
    int count = g_profiles[index].snapshot_count;
-   if(count < 2 || seconds_back <= 0)
-      return 0.0;
+   if(count < 2 || seconds_back <= 0 || !SnapshotWindowCovered(index, seconds_back))
+      return false;
 
    long min_time = g_profiles[index].quote_time_msc - (long)seconds_back * 1000;
    int observed = 0;
-   long first_time = 0;
-   long last_time = 0;
-
    for(int logical = 0; logical < count; logical++)
    {
       int position = LogicalSnapshotPosition(index, logical);
@@ -6333,103 +6734,165 @@ double TickRateFromSnapshots(const int index, const int seconds_back)
       long sample_time = g_snapshots[sample_index].time_msc;
       if(sample_time < min_time || sample_time <= 0)
          continue;
-      if(first_time <= 0)
-         first_time = sample_time;
-      last_time = sample_time;
       observed++;
    }
 
-   if(observed < 2 || last_time <= first_time)
-      return 0.0;
+   if(observed < 2)
+      return false;
 
-   return (double)(observed - 1) / MathMax(1.0, (double)(last_time - first_time) / 1000.0);
+   rate = (double)(observed - 1) / (double)seconds_back;
+   return true;
+}
+
+int SpeedWindowSlot(const int seconds_back)
+{
+   for(int window = 0; window < SPEED_WINDOW_COUNT; window++)
+   {
+      if(g_speed_window_seconds[window] == seconds_back)
+         return window;
+   }
+   return -1;
+}
+
+bool SpeedWindowReady(const int index, const int seconds_back)
+{
+   int window = SpeedWindowSlot(seconds_back);
+   return (window >= 0 && g_profiles[index].speed_baseline_ready[window] &&
+           SnapshotWindowCovered(index, seconds_back));
+}
+
+// Seconds spanned by the snapshot ring; a window longer than this has no
+// reference sample and is unmeasured.
+int SnapshotCoverageSeconds(const int index)
+{
+   if(g_profiles[index].snapshot_count <= 0)
+      return 0;
+   int oldest = SnapshotIndex(index, LogicalSnapshotPosition(index, 0));
+   if(g_snapshots[oldest].time_msc <= 0)
+      return 0;
+   long span_msc = g_profiles[index].quote_time_msc - g_snapshots[oldest].time_msc;
+   return (int)MathMax(0, span_msc / 1000);
+}
+
+bool SnapshotWindowCovered(const int index, const int seconds_back)
+{
+   return (g_profiles[index].snapshot_coverage_sec >= seconds_back);
 }
 
 double SpeedRobustZ(const int index, const int direction, const int seconds_back)
 {
-   if(seconds_back <= 0 || g_profiles[index].pip_size <= 0.0)
+   int window = SpeedWindowSlot(seconds_back);
+   if(window < 0 || g_profiles[index].pip_size <= 0.0 || !SpeedWindowReady(index, seconds_back))
       return 0.0;
 
    double directional_rate = DirectionalValue(MovementPips(index, seconds_back), direction) / (double)seconds_back;
    double atr_pips = MathMax(g_profiles[index].atr_trigger / g_profiles[index].pip_size, 0.1);
-   double fallback_mad = MathMax(atr_pips / 600.0, 0.01);
+   // A quiet ring can have zero dispersion; the ATR-based floor keeps a sudden
+   // move measurable without letting a degenerate MAD saturate the z.
+   double sigma_floor = MathMax(atr_pips / 600.0, 0.01);
 
-   // The cached baseline is the SIGNED per-tick rate distribution. Flipping its
-   // median by the direction is exact, because median(-x) == -median(x) and the
-   // absolute deviation is unchanged by the sign flip. The previous baseline was
-   // built from absolute moves, so a signed measurement was scored against an
-   // unsigned distribution and the z-score was never centred.
-   double directional_median = (double)direction * g_profiles[index].snapshot_median_rate;
-   double denominator = MathMax(g_profiles[index].snapshot_mad_rate * 1.4826, fallback_mad);
-   return (directional_rate - directional_median) / denominator;
+   // The baseline is the SIGNED window-rate distribution. Flipping its median
+   // by the direction is exact, because median(-x) == -median(x) and the
+   // absolute deviation is unchanged by the sign flip.
+   double directional_median = (double)direction * g_profiles[index].speed_median_rate[window];
+   return RobustZ(directional_rate, directional_median, g_profiles[index].speed_mad_rate[window], sigma_floor);
 }
 
 // Direction independent and identical for every lookback, so this runs once per
 // profile per scan instead of once per speed per direction.
+// One robust baseline per speed window, built from the rates of every
+// same-length window the ring holds, so a 30 s measurement is scored against
+// 30 s window rates rather than against 2 s interval rates.
 void UpdateSnapshotRateStats(const int index)
 {
-   g_profiles[index].snapshot_median_rate = 0.0;
-   g_profiles[index].snapshot_mad_rate = 0.0;
+   for(int window = 0; window < SPEED_WINDOW_COUNT; window++)
+   {
+      g_profiles[index].speed_baseline_ready[window] = false;
+      g_profiles[index].speed_median_rate[window] = 0.0;
+      g_profiles[index].speed_mad_rate[window] = 0.0;
+   }
 
    int count = g_profiles[index].snapshot_count;
    if(count < 3 || g_profiles[index].pip_size <= 0.0)
       return;
 
-   if(!PrepareScratch(g_rate_scratch, count - 1, SNAPSHOT_CAPACITY))
-      return;
-
-   int added = 0;
-   for(int logical = 1; logical < count; logical++)
+   for(int window = 0; window < SPEED_WINDOW_COUNT; window++)
    {
-      int prev_index = SnapshotIndex(index, LogicalSnapshotPosition(index, logical - 1));
-      int curr_index = SnapshotIndex(index, LogicalSnapshotPosition(index, logical));
-      long dt = g_snapshots[curr_index].time_msc - g_snapshots[prev_index].time_msc;
-      if(dt <= 0)
+      int window_seconds = g_speed_window_seconds[window];
+      long window_msc = (long)window_seconds * 1000;
+      if(!PrepareScratch(g_rate_scratch, count, SNAPSHOT_CAPACITY))
+         return;
+
+      int added = 0;
+      int reference = 0;
+      for(int logical = 1; logical < count; logical++)
+      {
+         int curr_index = SnapshotIndex(index, LogicalSnapshotPosition(index, logical));
+         long target = g_snapshots[curr_index].time_msc - window_msc;
+         // Advance to the latest sample at or before the window start.
+         while(reference + 1 < logical &&
+               g_snapshots[SnapshotIndex(index, LogicalSnapshotPosition(index, reference + 1))].time_msc <= target)
+         {
+            reference++;
+         }
+         int ref_index = SnapshotIndex(index, LogicalSnapshotPosition(index, reference));
+         if(g_snapshots[ref_index].time_msc > target || g_snapshots[ref_index].time_msc <= 0)
+            continue;   // the ring does not reach back a full window here yet
+
+         double pips = (g_snapshots[curr_index].mid - g_snapshots[ref_index].mid) /
+                       g_profiles[index].pip_size;
+         g_rate_scratch[added] = pips / (double)window_seconds;
+         added++;
+      }
+
+      if(added < 3 || !PrepareScratch(g_rate_scratch, added, SNAPSHOT_CAPACITY))
          continue;
 
-      double pips = (g_snapshots[curr_index].mid - g_snapshots[prev_index].mid) /
-                    g_profiles[index].pip_size;
-      g_rate_scratch[added] = pips / MathMax(0.001, (double)dt / 1000.0);
-      added++;
+      double median = MedianOfArray(g_rate_scratch, added);
+      g_profiles[index].speed_median_rate[window] = median;
+      g_profiles[index].speed_mad_rate[window] = MedianAbsDeviationInto(g_mad_scratch, g_rate_scratch,
+                                                                       added, median, SNAPSHOT_CAPACITY);
+      g_profiles[index].speed_baseline_ready[window] = true;
    }
-
-   if(added <= 0 || !PrepareScratch(g_rate_scratch, added, SNAPSHOT_CAPACITY))
-      return;
-
-   double median = MedianOfArray(g_rate_scratch, added);
-   g_profiles[index].snapshot_median_rate = median;
-   g_profiles[index].snapshot_mad_rate = MedianAbsDeviationInto(g_mad_scratch, g_rate_scratch,
-                                                                added, median, SNAPSHOT_CAPACITY);
 }
 
-double TickRateZ(const int index)
+// Tick-rate deviation: the session baseline z where one exists, else the
+// deviation from TickRateBaselinePerSec. An unmeasured rate reports
+// unavailable rather than a sentinel that reads as negative evidence.
+double TickRateZ(const int index, bool &available)
 {
+   available = false;
+   if(!g_profiles[index].tick_rate_available)
+      return 0.0;
+
+   available = true;
    if(UseSessionAwareBaselines && g_profiles[index].session_baseline_ready)
       return g_profiles[index].session_tick_rate_z;
 
-   double rate = g_profiles[index].tick_rate_per_sec;
-   if(rate <= 0.0)
-      return -1.0;
-
-   // Snapshot-derived tick rate is deliberately conservative; FX tick feeds differ
-   // by broker, so the baseline is configurable via TickRateBaselinePerSec.
-   return (rate - TickRateBaselinePerSec) / TickRateBaselinePerSec;
+   // FX tick feeds differ by broker, so the flat baseline is configurable.
+   return (g_profiles[index].tick_rate_per_sec - TickRateBaselinePerSec) / TickRateBaselinePerSec;
 }
 
-double TickVolumeRobustZ(const int index)
+// Tick-volume deviation: the session baseline z where one exists, else the
+// projected bar volume's ratio to the recent average, scaled by
+// TickVolumeRatioScale. It is a scaled ratio, not a robust z.
+double TickVolumeDeviation(const int index, bool &available)
 {
+   available = false;
    if(UseSessionAwareBaselines && g_profiles[index].session_baseline_ready)
+   {
+      available = true;
       return g_profiles[index].session_tick_volume_z;
+   }
 
    double average_volume = g_profiles[index].average_trigger_tick_volume;
-   if(average_volume <= 0.0)
+   double active_volume = g_profiles[index].active_trigger_tick_volume;
+   if(average_volume <= 0.0 || active_volume <= 0.0)
       return 0.0;
 
    // FX has no centralized real volume, so tick_volume is the practical default.
-   double active_volume = MathMax(g_profiles[index].current_trigger_tick_volume,
-                                  g_profiles[index].last_completed_trigger_tick_volume * 0.85);
-   double ratio = SafeDiv(active_volume, average_volume, 1.0);
-   return (ratio - 1.0) / TickVolumeRatioScale;
+   available = true;
+   return (active_volume / average_volume - 1.0) / TickVolumeRatioScale;
 }
 
 double MovementPips(const int index, const int seconds_back)
@@ -6466,12 +6929,8 @@ double ReferenceMid(const int index, const int seconds_back)
          break;
    }
 
-   if(reference_mid <= 0.0)
-   {
-      int oldest = SnapshotIndex(index, LogicalSnapshotPosition(index, 0));
-      reference_mid = g_snapshots[oldest].mid;
-   }
-
+   // No sample at or before the window start means the window is not covered;
+   // reporting the oldest sample instead measured a shorter span than asked for.
    return reference_mid;
 }
 
@@ -6715,13 +7174,13 @@ double MedianAbsDeviation(double &values[], const int count, const double median
    return MedianOfArray(deviations, count);
 }
 
-double RobustZ(const double value, const double median, const double mad)
+// Robust z-score. sigma_floor lets a caller that knows the natural scale of its
+// measurement (the speed windows use the ATR) keep a sudden move measurable on a
+// ring whose dispersion happens to be zero; without a floor, degenerate
+// dispersion carries no information and the z is 0, never a saturating value.
+double RobustZ(const double value, const double median, const double mad, const double sigma_floor = 0.0)
 {
-   double denominator = mad * 1.4826;
-
-   // Degenerate dispersion carries no information about how unusual the value
-   // is. Returning a large z here would score thin or stalled data as maximum
-   // confidence on every component that treats a high z as bullish evidence.
+   double denominator = MathMax(mad * MAD_TO_SIGMA, sigma_floor);
    if(denominator <= 0.0000001)
       return 0.0;
 

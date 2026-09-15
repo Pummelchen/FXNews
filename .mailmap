@@ -1,0 +1,14 @@
+# Consolidated author identities (F-031).
+#
+# One contributor appears under three names and two addresses, because git fell back to
+# the machine name on hosts with no user.name configured and to the GitHub account name
+# on others. A .mailmap is a display-only mapping: it changes what git log, shortlog and
+# blame show without rewriting a single commit, which matters because the audit may not
+# rewrite history.
+#
+# Canonical identity first, then each variant.
+André Borchert <0xa0b1@gmail.com> André Borchert <andreborchert@MacBook-AB.local>
+André Borchert <0xa0b1@gmail.com> André Borchert <andreborchert@macbook-ab.tail1c3b90.ts.net>
+André Borchert <0xa0b1@gmail.com> Pummelchen <0xa0b1@gmail.com>
+André Borchert <0xa0b1@gmail.com> Pummelchen <andreborchert@MacBook-AB.local>
+André Borchert <0xa0b1@gmail.com> node3 <0xa0b1@gmail.com>

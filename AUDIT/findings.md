@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 55 | done 33 | open 22 | blocked 0 | S0:1 S1:13 S2:19 S3:22**
+**total 55 | done 34 | open 21 | blocked 0 | S0:1 S1:13 S2:18 S3:23**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -35,7 +35,6 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-018 | S2 | scoring | DONE | `FXNews.mq5:5026-5031` | single_feature_cap is applied without checking that the feature it measures was evaluated |
 | F-019 | S2 | scoring | DONE | `FXNews.mq5:4958-4959` | The +0.05 synergy bonus is awarded on component scores without checking that either engine passed or was measured |
 | F-021 | S2 | dashboard | START | `FXNews.mq5:7482,7419` | WrapLabelText wraps report lines at 63 characters but SetDashboardRow re-clips them to the measured pixel limit, truncating the wrapped tail |
-| F-022 | S2 | dashboard | START | `FXNews.mq5:6817-6825,6747` | UpdateActivityStatusLine recomputes CountDashboardObjects (up to 40 ObjectFind calls) on every scan that skips the full dashboard |
 | F-023 | S2 | tests | START | `FXNews.mq5:930-1109` | No test exercises any ValidateInputs rejection path |
 | F-024 | S2 | tooling | DONE | `tools/build-macos.sh:47,116-120` | build-macos.sh cannot distinguish 'Wine cannot execute' from 'the compiler produced no result line', and reports the wrong exit code |
 | F-025 | S2 | ops | START | `session credential handling` | A live-looking GitHub PAT was supplied in plaintext and is present in the agent session transcript |
@@ -44,6 +43,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-050 | S2 | tooling | DONE | `.github/workflows/ci.yml; tools/selftest-macos.sh:89-96` | The CI workflow pinned every analysis tool except shellcheck, and the unpinned one failed the build |
 | F-010 | S3 | historical | START | `FXNews.mq5:2926-2930,3039` | The 85+ bucket in the historical report is unreachable (now empirically confirmed; the wiki already documents the empty bucket, so only the unannotated report row remains) |
 | F-020 | S3 | scoring | DONE | `FXNews.mq5:8266-8270,4661,5114-5116` | RobustZ returning 0 on degenerate dispersion is the correct z, not an imputation (filed as a false-measured spread_z; disproved) |
+| F-022 | S3 | dashboard | DONE | `FXNews.mq5:6817-6825,6747` | BuildDiagnosticsLines recounts the dashboard objects on every scan, including the light path |
 | F-026 | S3 | tooling | DONE | `tools/census.py:273,274` | ruff F541: two f-strings without placeholders |
 | F-027 | S3 | tooling | DONE | `tools/census.py` | ruff format drift: the only Python file is not formatted to the formatter's standard |
 | F-028 | S3 | tooling | DONE | `tools/build-macos.sh; tools/selftest-macos.sh` | shfmt drift in both shell scripts |
@@ -396,16 +396,6 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 - **Notes:** Tracker task 118 introduced the 63-character budget; the pixel fit and the character wrap disagree.
 
-### F-022 (S2, dashboard) — UpdateActivityStatusLine recomputes CountDashboardObjects (up to 40 ObjectFind calls) on every scan that skips the full dashboard
-
-- **Status:** START  |  **Category:** perf  |  **Host:** node3  |  **Commit:** -
-- **Location:** `FXNews.mq5:6817-6825,6747`
-- **Discovered by:** Phase B L5 + dashboard audit
-- **Evidence (before):**
-
-  > 'UpdateActivityStatusLine' calls BuildDiagnosticsLines (:6821), which reaches CountDashboardObjects (:6747) and its 40 ObjectFind calls, identically to the full path. Tracker task 69 removed exactly this cost from the full path (:6769) but the lighter path still pays it on every scan.
-
-
 ### F-023 (S2, tests) — No test exercises any ValidateInputs rejection path
 
 - **Status:** START  |  **Category:** test  |  **Host:** node3  |  **Commit:** -
@@ -501,6 +491,19 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 - **Fix:** No code change. The finding was disproved by tracing the guarantees of the computation: AddSpreadSample inserts the current spread into the ring before UpdateSpreadStatistics runs, and RobustZ returns 0 only when mad == 0, which means every ring value including the current one equals the median. The numerator (value - median) is then exactly 0, so 0 is the exact z rather than a neutral stand-in, and awarding the term full credit is correct.
 - **Evidence (after):** Proof by the computation's own invariants: FXNews.mq5 AddSpreadSample precedes UpdateSpreadStatistics in UpdateMarketData; RobustZ (FXNews.mq5:~8680) returns 0 only when MathMax(mad * MAD_TO_SIGMA, sigma_floor) <= 1e-7, and with sigma_floor = 0 (the spread call) that requires mad == 0, i.e. every ring sample equals the median. The same argument holds for BaselineZ on a zero-variance session baseline, where an EWMA mean equal to the value gives sd = 0 and (value - mean) = 0. The genuinely degenerate case that would matter - a value differing from a zero-dispersion centre - cannot occur, because the value is itself one of the samples that established the zero dispersion.
 - **Notes:** SCOPE NOTE on the original finding, per the rule against closing a task by narrowing it. The filed claim was: 'RobustZ returns 0 for degenerate dispersion while spread_z_available stays true, so a genuine-looking 0.0 is weighted at 0.14 as if measured'. The availability half is accurate; the 'imputed neutral' half is false, because a 0 in that branch is the exact z. Severity drops from S2 to S3 and the residual is a documentation point: the RobustZ comment already explains the sigma_floor contract, but nothing states that a degenerate spread ring implies value == median. No defect means no fail-before test; the evidence is the invariant proof above. This is the third finding this audit has disproved rather than fixed, alongside F-001's original framing and F-010's.
+
+### F-022 (S3, dashboard) — BuildDiagnosticsLines recounts the dashboard objects on every scan, including the light path
+
+- **Status:** DONE  |  **Category:** perf  |  **Host:** node3  |  **Commit:** -
+- **Location:** `FXNews.mq5:6817-6825,6747`
+- **Discovered by:** Phase B L5 + dashboard audit
+- **Evidence (before):**
+
+  > 'UpdateActivityStatusLine' calls BuildDiagnosticsLines (:6821), which reaches CountDashboardObjects (:6747) and its 40 ObjectFind calls, identically to the full path. Tracker task 69 removed exactly this cost from the full path (:6769) but the lighter path still pays it on every scan.
+
+- **Fix:** The dashboard object count is now refreshed once inside UpdateDashboard, immediately after it writes its rows, and read from g_dashboard_object_count elsewhere. UpdateDashboard is the only writer of those rows, so the reported value is unchanged and cannot drift.
+- **Evidence (after):** New contract 'diagnostics-object-count' requires BuildDiagnosticsLines not to call CountDashboardObjects() directly. BEFORE (cache read reverted): contracts fails with that exact message, exit 1. AFTER: 0 violations across 7 contracts. Build 0/0; census 0; selftest 149/0.
+- **Notes:** SEVERITY CORRECTED S2 -> S3 with the reasoning recorded: 40 ObjectFind calls at the default 2 s scan interval is about 20 calls per second and microseconds of work, so the original S2 performance rating overstated it. The change is kept on maintainability grounds - the work was unnecessary, not expensive - and it is measured here rather than assumed.
 
 ### F-026 (S3, tooling) — ruff F541: two f-strings without placeholders
 

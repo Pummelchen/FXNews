@@ -10,7 +10,7 @@
 #      with zero failed assertions
 #
 # Usage:  ./tools/selftest-macos.sh [--validation | --autotune]
-#   default      run the built-in self-test (72 pure-helper assertions)
+#   default      run the built-in self-test; the result line prints the total
 #   --validation run a VALIDATION pass over EURUSD,GBPUSD on M5,H1 and require
 #                a complete report (exercises the historical engine end to end)
 #   --autotune   the same for an AUTOTUNE sweep
@@ -25,24 +25,36 @@ case "${1:-}" in
   "") ;;
   --validation) MODE="validation" ;;
   --autotune) MODE="autotune" ;;
-  *) echo "selftest: unknown option $1" >&2; exit 2 ;;
+  *)
+    echo "selftest: unknown option $1" >&2
+    exit 2
+    ;;
 esac
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null || dirname "$HERE")"
 
-WINE="/Applications/MetaTrader 5.app/Contents/SharedSupport/wine/bin/wine64"
-export WINEPREFIX="$HOME/Library/Application Support/net.metaquotes.wine.metatrader5"
-MT5="$WINEPREFIX/drive_c/Program Files/MetaTrader 5"
-TERMINAL="$MT5/terminal64.exe"
-export WINEDEBUG="${WINEDEBUG:--all}"
+# Paths and Wine/Rosetta handling live in one place, shared with build-macos.sh.
+# shellcheck source=tools/lib-mt5.sh
+. "$HERE/lib-mt5.sh" || {
+  echo "selftest: cannot load $HERE/lib-mt5.sh" >&2
+  exit 2
+}
+mt5_configure
 TIMEOUT_SECONDS="${FXNEWS_SELFTEST_TIMEOUT:-240}"
 if [ "$MODE" != "selftest" ]; then
   TIMEOUT_SECONDS="${FXNEWS_SELFTEST_TIMEOUT:-900}"
 fi
 
-[ -x "$WINE" ]     || { echo "selftest: wine64 not found at $WINE" >&2; exit 2; }
-[ -f "$TERMINAL" ] || { echo "selftest: terminal64.exe not found at $TERMINAL" >&2; exit 2; }
+[ -x "$WINE" ] || {
+  echo "selftest: wine64 not found at $WINE" >&2
+  exit 2
+}
+[ -f "$TERMINAL" ] || {
+  echo "selftest: terminal64.exe not found at $TERMINAL" >&2
+  exit 2
+}
+mt5_require_wine "selftest"
 if pgrep -f 'terminal64.exe' >/dev/null 2>&1; then
   echo "selftest: MetaTrader 5 is already running; close it and retry" >&2
   exit 2
@@ -50,6 +62,16 @@ fi
 
 # shellcheck disable=SC1003  # tr '\\' is a literal backslash, not a quote escape
 to_win() { printf 'Z:%s' "$(printf '%s' "$1" | tr '/' '\\')"; }
+
+# The cross-file string contracts first: they cost nothing and a broken one turns
+# this gate into a timeout or a silent pass, which is exactly what it is here to
+# prevent. Run before any compile so the failure is reported as a contract, not as
+# a missing journal line.
+echo "selftest: checking cross-file contracts"
+python3 "$HERE/contracts.py" "$ROOT" || {
+  echo "selftest: a cross-file contract is broken; see above" >&2
+  exit 2
+}
 
 echo "selftest: compiling indicator"
 "$HERE/build-macos.sh" "$ROOT/FXNews.mq5" || exit 2
@@ -65,28 +87,30 @@ cp "$ROOT/FXNews.ex5" "$INSTALL_DIR/FXNews.ex5" || exit 2
 cp "$ROOT/tools/mql5/FXNewsSelfTest.ex5" "$SCRIPT_DIR/FXNewsSelfTest.ex5" || exit 2
 
 WORK="$(mktemp -d -t fxnews-selftest)"
-# shellcheck disable=SC2329  # invoked through the EXIT trap
-cleanup() {
-  rm -rf "$WORK"
-  rm -rf "$INSTALL_DIR"
-  rm -f "$SCRIPT_DIR/FXNewsSelfTest.ex5" "$PRESET"
-}
-trap cleanup EXIT
+# Inlined rather than defined as a function and referenced by `trap cleanup EXIT`:
+# a function reached only through a trap is invisible to static analysis, which
+# reported its body as unreachable (SC2317 on shellcheck 0.9, and SC2329 on newer
+# versions, which is why the older code needed a disable directive). Naming the
+# commands directly removes the need to suppress anything.
+trap 'rm -rf "$WORK"; rm -rf "$INSTALL_DIR"; rm -f "$SCRIPT_DIR/FXNewsSelfTest.ex5" "$PRESET"' EXIT
 
 # The script's inputs travel through a preset file; the historical modes get a
 # small basket so a run finishes in minutes rather than the full default sweep.
 case "$MODE" in
   selftest)
-    printf 'HarnessMode=3\r\nHarnessSymbols=\r\nHarnessTimeframes=\r\nHarnessTimeoutSeconds=90\r\n' > "$PRESET" ;;
+    printf 'HarnessMode=3\r\nHarnessSymbols=\r\nHarnessTimeframes=\r\nHarnessTimeoutSeconds=90\r\n' >"$PRESET"
+    ;;
   validation)
-    printf 'HarnessMode=1\r\nHarnessSymbols=EURUSD,GBPUSD\r\nHarnessTimeframes=M5,H1\r\nHarnessTimeoutSeconds=%d\r\n' "$((TIMEOUT_SECONDS - 60))" > "$PRESET" ;;
+    printf 'HarnessMode=1\r\nHarnessSymbols=EURUSD,GBPUSD\r\nHarnessTimeframes=M5,H1\r\nHarnessTimeoutSeconds=%d\r\n' "$((TIMEOUT_SECONDS - 60))" >"$PRESET"
+    ;;
   autotune)
-    printf 'HarnessMode=2\r\nHarnessSymbols=EURUSD,GBPUSD\r\nHarnessTimeframes=M5,H1\r\nHarnessTimeoutSeconds=%d\r\n' "$((TIMEOUT_SECONDS - 60))" > "$PRESET" ;;
+    printf 'HarnessMode=2\r\nHarnessSymbols=EURUSD,GBPUSD\r\nHarnessTimeframes=M5,H1\r\nHarnessTimeoutSeconds=%d\r\n' "$((TIMEOUT_SECONDS - 60))" >"$PRESET"
+    ;;
 esac
 
 # Windows ini files are read as ANSI; the content is pure ASCII so no BOM is needed.
 CONFIG="$WORK/fxnews-selftest.ini"
-printf '[StartUp]\r\nSymbol=EURUSD\r\nPeriod=M5\r\nScript=FXNewsSelfTest\r\nScriptParameters=FXNewsHarness.set\r\nShutdownTerminal=1\r\n' > "$CONFIG"
+printf '[StartUp]\r\nSymbol=EURUSD\r\nPeriod=M5\r\nScript=FXNewsSelfTest\r\nScriptParameters=FXNewsHarness.set\r\nShutdownTerminal=1\r\n' >"$CONFIG"
 
 LOG_DIR="$MT5/MQL5/Logs"
 STAMP="$(date +%Y%m%d)"
@@ -142,15 +166,32 @@ if [ "$MODE" = "selftest" ]; then
   exit 1
 fi
 
-# A historical run passes when the ready label appeared and the Journal holds
-# the report's signal line; ABORTED or a timeout fails.
+# A historical run passes when the ready label appeared AND the Journal holds the
+# report's signal line AND the run actually read history; ABORTED or a timeout
+# fails. The history check exists because a report over no data used to pass: on
+# 2026-09-15 a VALIDATION run reported "Symbols 0/2 ... M1 bars=0" and the gate
+# still printed OK, so the mode whose whole purpose is to exercise the historical
+# engine end to end gave a green result while reading zero bars. A quiet market
+# legitimately yields zero signals, so the gate requires loaded bars, not signals.
 SIGNALS="$(printf '%s' "$JOURNAL" | grep -o 'signals=[0-9]*\|Signals=[0-9]*' | tail -1)"
+BARS="$(printf '%s' "$JOURNAL" | grep -o 'M1 bars=[0-9]*' | tail -1 | grep -o '[0-9]*$')"
+LOADED="$(printf '%s' "$JOURNAL" | grep -o 'Symbols [0-9]*/[0-9]*' | tail -1 | sed -n 's#Symbols \([0-9]*\)/.*#\1#p')"
+SCANNED="$(printf '%s' "$JOURNAL" | grep -o 'evaluated [0-9]* of' | tail -1 | grep -o '[0-9]*')"
 case "$VERDICT" in
-  *"VALIDATION ready"*|*"AUTOTUNE ready"*)
-    if [ -n "$SIGNALS" ]; then
-      echo "selftest: OK ($MODE report complete, $SIGNALS)"
-      exit 0
+  *"VALIDATION ready"* | *"AUTOTUNE ready"*)
+    if [ -z "$SIGNALS" ]; then
+      echo "selftest: FAILED ($VERDICT; the journal holds no report signal line)" >&2
+      exit 1
     fi
+    if [ "${LOADED:-0}" -le 0 ] || [ "${BARS:-0}" -le 0 ]; then
+      echo "selftest: FAILED ($MODE read no history: ${LOADED:-0} symbol(s) loaded, ${BARS:-0} M1 bar(s), ${SCANNED:-0} boundar(ies) evaluated)" >&2
+      echo "  The historical engine cannot be exercised without M1 history: the report" >&2
+      echo "  is empty, not quiet. Open an M1 chart for each symbol so the terminal" >&2
+      echo "  downloads it, confirm the terminal is connected, then re-run." >&2
+      exit 1
+    fi
+    echo "selftest: OK ($MODE report complete, $SIGNALS, ${LOADED} symbol(s), ${BARS} bar(s), ${SCANNED:-0} boundar(ies))"
+    exit 0
     ;;
 esac
 echo "selftest: FAILED ($VERDICT)" >&2

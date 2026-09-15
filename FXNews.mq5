@@ -1,6 +1,6 @@
-// FXNews version 3.0
+// FXNews version 3.1
 #property strict
-#property version   "3.000"
+#property version   "3.100"
 #property indicator_chart_window
 #property indicator_plots 0
 #property description "Chart-only multi-symbol breakout radar indicator. No trade execution. No disk I/O."
@@ -147,6 +147,12 @@ input int HistoricalWarmupBars = 500;
 // Boundaries (scan-timeframe bar closes) evaluated per profile at most; denser
 // history is sub-sampled uniformly and the report prints the coverage.
 input int HistoricalMaxBoundariesPerProfile = 2000;
+// M1 history is downloaded on demand: the first CopyRates for a window the
+// terminal has not cached returns 0 while the download runs, which is not a
+// verdict about the symbol. The historical modes poll for up to this many seconds
+// per symbol before declaring it unavailable, so a fresh terminal produces a
+// report instead of an empty one. 0 restores the old single-attempt behaviour.
+input int HistoricalHistoryWaitSeconds = 60;
 input int AutotuneMinSignals = 100;
 
 
@@ -198,10 +204,20 @@ input int AutotuneMinSignals = 100;
 #define MAX_RANGE_LOOKBACK 500
 #define MAX_ATR_PERIOD 200
 #define MAX_TICK_LOOKBACK_SECONDS 300
+// F-017: both of these had only a lower bound, so a large value silently disabled the
+// gate each one feeds - a quote-age of a day makes the freshness check vacuous, and a
+// hold requirement longer than any signal lives makes the hold bonus unreachable. The
+// ceilings match the other time-shaped inputs, which top out at one hour.
+#define MAX_QUOTE_AGE_SECONDS 3600
+#define MAX_FULL_HOLD_SCORE_SECONDS 3600
 #define MAX_CALENDAR_WINDOW_MINUTES 1440
 #define MAX_HISTORICAL_LOOKBACK_DAYS 365
 #define MAX_HISTORICAL_WARMUP_BARS 10000
 #define MAX_HISTORICAL_BOUNDARIES_PER_PROFILE 20000
+// Upper bound on the on-demand history wait, so a mistyped value cannot stall a
+// validation run for an hour per symbol. Declared here so the bound enforced in
+// ValidateInputs() stays tied to the value actually used.
+#define MAX_HISTORICAL_HISTORY_WAIT_SECONDS 600
 // Historical model constants: an aggregated bar or an outcome window needs
 // this share of its minutes present; spread and volume baselines look back
 // this far; the minute-scale acceleration proxy ramps over this ATR/minute.
@@ -348,6 +364,7 @@ struct ImpulseQuality
    bool tick_volume_available;
    double tick_volume_z;
    double exhaustion_penalty;
+   bool exhaustion_available;      // the five-minute move behind the penalty was measured
    bool tick_quality_available;
    double tick_sample_quality_score;
    string tick_state;
@@ -393,7 +410,12 @@ struct CompositeSignalScore
    bool valid;
    double raw_score;          // 0..100 before final caps
    double displayed_score;    // rounded dashboard score source
-   double age_free_score;     // displayed score before the event-age caps
+   // The score after the component-level caps (snapback, MTF reject, unsupported impulse,
+   // overextension) and BEFORE every remaining ceiling: the age caps, the calendar
+   // uncertainty cap, the single-feature cap, the elite cap and the absolute ceiling. The
+   // old comment said only "before the event-age caps", which understated what it excludes
+   // and made it look comparable to displayed_score (F-039).
+   double age_free_score;
    ExecutionQuality execution;
    BreakoutStructure breakout;
    ImpulseQuality impulse;
@@ -437,7 +459,13 @@ struct CompositeContext
 
 struct SessionBaseline
 {
-   int sample_count;
+   // One counter per measured series. A shared counter let a bucket report a
+   // z-score as measured for a series that had never contributed a sample: the
+   // tick rate is only folded when it is actually known, so a spread-only bucket
+   // still reached the readiness threshold and published a neutral 0 for it.
+   int spread_samples;
+   int tick_rate_samples;
+   int tick_volume_samples;
    double spread_mean;
    double spread_var;
    double tick_rate_mean;
@@ -610,7 +638,9 @@ struct SymbolProfile
    double session_spread_z;
    double session_tick_rate_z;
    double session_tick_volume_z;
-   bool session_baseline_ready;
+   bool session_spread_z_ready;      // this session bucket measured spread often enough
+   bool session_tick_rate_z_ready;   // ... and likewise the tick rate
+   bool session_tick_volume_z_ready; // ... and likewise the tick volume
    SessionBucket session_index;
    bool tick_quality_available;      // measured from CopyTicks this scan
    double tick_sample_quality_score;
@@ -651,6 +681,7 @@ struct SymbolProfile
    double speed_30s_pips;
    double speed_60s_pips;
    double movement_5m_pips;
+   bool has_movement_5m;             // the M1 copy behind movement_5m_pips succeeded
    bool has_m5_move;
    bool has_m15_move;
    double m5_move_atr;
@@ -738,6 +769,11 @@ MqlRates g_rates_m15[];
 MqlTick g_ticks_scratch[];
 int g_scan_sequence = 0;            // increments once per ScanAll
 bool g_dashboard_needs_refit = false;
+// Dashboard rows are only ever created or deleted inside UpdateDashboard, so the
+// object count is refreshed there and read from here everywhere else. The
+// diagnostics used to recount up to DASHBOARD_MAX_OBJECTS labels with ObjectFind on
+// every scan, including the light path that only updates the status tooltip.
+int g_dashboard_object_count = 0;
 double g_dashboard_char_pixels = 0.0;   // measured once per font/DPI
 bool g_symbol_identity_dirty = true;
 bool g_selftest_done = false;
@@ -781,6 +817,7 @@ void ResetRuntimeState()
    g_symbol_identity_dirty = true;
    g_scan_sequence = 0;
    g_dashboard_needs_refit = false;
+   g_dashboard_object_count = 0;
    g_dashboard_char_pixels = 0.0;
 
    for(int i = 0; i < CURRENCY_COUNT; i++)
@@ -927,6 +964,320 @@ int OnCalculate(const int rates_total,
    return rates_total;
 }
 
+// Every numeric input that ValidateInputs bounds-checks, gathered in one struct so the
+// checks can be exercised without a terminal: MQL5 input variables are read-only, so a
+// test cannot set them. ValidateInputs fills this from the inputs; the self-test builds
+// the same struct by hand and asserts that each rejection path actually rejects (F-023).
+struct ValidationInputs
+{
+   int    scan_interval_seconds;
+   int    display_update_seconds;
+   int    max_quote_age_seconds;
+   double min_display_confidence;
+   double strong_alert_confidence;
+   int    range_lookback_m1;
+   int    atr_period;
+   double breakout_buffer_atr;
+   double min_breakout_buffer_pips;
+   double max_spread_pips;
+   double max_spread_median_multiplier;
+   int    failed_signal_cooldown_seconds;
+   int    valid_signal_cooldown_seconds;
+   double max_spread_to_atr_ratio;
+   double max_tick_gap_seconds;
+   double max_spread_z_score;
+   int    min_hold_seconds_for_high_score;
+   int    full_hold_score_seconds;
+   double max_overextension_atr;
+   double min_impulse_z_for_signal;
+   double max_exhaustion_atr;
+   double min_basket_agreement_for_high_score;
+   double min_directional_edge_for_high_score;
+   double m5_reject_atr;
+   double m15_reject_atr;
+   double tick_rate_baseline_per_sec;
+   double tick_volume_ratio_scale;
+   int    calendar_lookback_minutes;
+   int    calendar_lookahead_minutes;
+   int    calendar_pre_news_block_minutes;
+   bool   ignore_rollover_time;
+   int    rollover_start_hour_server;
+   int    rollover_end_hour_server;
+   int    asia_start_hour_server;
+   int    asia_end_hour_server;
+   int    london_start_hour_server;
+   int    london_end_hour_server;
+   int    newyork_start_hour_server;
+   int    newyork_end_hour_server;
+   int    overlap_start_hour_server;
+   int    overlap_end_hour_server;
+   int    outcome_horizon_minutes1;
+   int    outcome_horizon_minutes2;
+   int    outcome_horizon_minutes3;
+   double outcome_target_atr;
+   double outcome_stop_atr;
+   int    baseline_lookback_samples;
+   int    min_baseline_samples;
+   double recent_list_min_score;
+   int    max_dashboard_rows;
+   int    signal_ttl_seconds;
+   int    copy_ticks_lookback_seconds;
+   int    min_copy_ticks_for_good_quality;
+   int    historical_lookback_days;
+   int    historical_step_minutes;
+   int    historical_warmup_bars;
+   int    historical_max_boundaries_per_profile;
+   int    historical_history_wait_seconds;
+   int    autotune_min_signals;
+};
+
+ValidationInputs CurrentValidationInputs()
+{
+   ValidationInputs in;
+   in.scan_interval_seconds = ScanIntervalSeconds;
+   in.display_update_seconds = DisplayUpdateSeconds;
+   in.max_quote_age_seconds = MaxQuoteAgeSeconds;
+   in.min_display_confidence = MinDisplayConfidence;
+   in.strong_alert_confidence = StrongAlertConfidence;
+   in.range_lookback_m1 = RangeLookbackM1;
+   in.atr_period = ATRPeriod;
+   in.breakout_buffer_atr = BreakoutBufferATR;
+   in.min_breakout_buffer_pips = MinBreakoutBufferPips;
+   in.max_spread_pips = MaxSpreadPips;
+   in.max_spread_median_multiplier = MaxSpreadMedianMultiplier;
+   in.failed_signal_cooldown_seconds = FailedSignalCooldownSeconds;
+   in.valid_signal_cooldown_seconds = ValidSignalCooldownSeconds;
+   in.max_spread_to_atr_ratio = MaxSpreadToAtrRatio;
+   in.max_tick_gap_seconds = MaxTickGapSeconds;
+   in.max_spread_z_score = MaxSpreadZScore;
+   in.min_hold_seconds_for_high_score = MinHoldSecondsForHighScore;
+   in.full_hold_score_seconds = FullHoldScoreSeconds;
+   in.max_overextension_atr = MaxOverextensionAtr;
+   in.min_impulse_z_for_signal = MinImpulseZForSignal;
+   in.max_exhaustion_atr = MaxExhaustionAtr;
+   in.min_basket_agreement_for_high_score = MinBasketAgreementForHighScore;
+   in.min_directional_edge_for_high_score = MinDirectionalEdgeForHighScore;
+   in.m5_reject_atr = M5RejectAtr;
+   in.m15_reject_atr = M15RejectAtr;
+   in.tick_rate_baseline_per_sec = TickRateBaselinePerSec;
+   in.tick_volume_ratio_scale = TickVolumeRatioScale;
+   in.calendar_lookback_minutes = CalendarLookbackMinutes;
+   in.calendar_lookahead_minutes = CalendarLookaheadMinutes;
+   in.calendar_pre_news_block_minutes = CalendarPreNewsBlockMinutes;
+   in.ignore_rollover_time = IgnoreRolloverTime;
+   in.rollover_start_hour_server = RolloverStartHourServer;
+   in.rollover_end_hour_server = RolloverEndHourServer;
+   in.asia_start_hour_server = AsiaStartHourServer;
+   in.asia_end_hour_server = AsiaEndHourServer;
+   in.london_start_hour_server = LondonStartHourServer;
+   in.london_end_hour_server = LondonEndHourServer;
+   in.newyork_start_hour_server = NewYorkStartHourServer;
+   in.newyork_end_hour_server = NewYorkEndHourServer;
+   in.overlap_start_hour_server = LondonNYOverlapStartHourServer;
+   in.overlap_end_hour_server = LondonNYOverlapEndHourServer;
+   in.outcome_horizon_minutes1 = OutcomeHorizonMinutes1;
+   in.outcome_horizon_minutes2 = OutcomeHorizonMinutes2;
+   in.outcome_horizon_minutes3 = OutcomeHorizonMinutes3;
+   in.outcome_target_atr = OutcomeTargetAtr;
+   in.outcome_stop_atr = OutcomeStopAtr;
+   in.baseline_lookback_samples = BaselineLookbackSamples;
+   in.min_baseline_samples = MinBaselineSamples;
+   in.recent_list_min_score = RecentListMinScore;
+   in.max_dashboard_rows = MaxDashboardRows;
+   in.signal_ttl_seconds = SignalTTLSeconds;
+   in.copy_ticks_lookback_seconds = CopyTicksLookbackSeconds;
+   in.min_copy_ticks_for_good_quality = MinCopyTicksForGoodQuality;
+   in.historical_lookback_days = HistoricalLookbackDays;
+   in.historical_step_minutes = HistoricalStepMinutes;
+   in.historical_warmup_bars = HistoricalWarmupBars;
+   in.historical_max_boundaries_per_profile = HistoricalMaxBoundariesPerProfile;
+   in.historical_history_wait_seconds = HistoricalHistoryWaitSeconds;
+   in.autotune_min_signals = AutotuneMinSignals;
+   return in;
+}
+
+// The numeric half of ValidateInputs, pure over its argument and setting the exact
+// operator-facing message. Validating a struct rather than the inputs is what makes
+// every rejection path reachable from the self-test.
+bool ValidateInputsCore(const ValidationInputs &in, string &reason)
+{
+   if(in.scan_interval_seconds < 1 || in.display_update_seconds < 1 || in.max_quote_age_seconds < 1 ||
+      in.max_quote_age_seconds > MAX_QUOTE_AGE_SECONDS)
+   {
+      reason = StringFormat("FXNews: scan, display, and quote-age inputs must be positive "
+                            "(MaxQuoteAgeSeconds at most %d).", MAX_QUOTE_AGE_SECONDS);
+      return false;
+   }
+
+   if(!MathIsValidNumber(in.min_display_confidence) || !MathIsValidNumber(in.strong_alert_confidence) ||
+      in.min_display_confidence < 1.0 || in.min_display_confidence > 99.0 ||
+      in.strong_alert_confidence < in.min_display_confidence || in.strong_alert_confidence > 100.0)
+   {
+      reason = "FXNews: confidence inputs are inconsistent.";
+      return false;
+   }
+
+   if(in.range_lookback_m1 < 10 || in.range_lookback_m1 > MAX_RANGE_LOOKBACK ||
+      in.atr_period < 2 || in.atr_period > MAX_ATR_PERIOD ||
+      !MathIsValidNumber(in.breakout_buffer_atr) || !MathIsValidNumber(in.min_breakout_buffer_pips) ||
+      in.breakout_buffer_atr < 0.0 || in.min_breakout_buffer_pips < 0.0)
+   {
+      reason = "FXNews: range and ATR inputs are outside supported bounds.";
+      return false;
+   }
+
+   if(!MathIsValidNumber(in.max_spread_pips) || !MathIsValidNumber(in.max_spread_median_multiplier) ||
+      in.max_spread_pips <= 0.0 || in.max_spread_median_multiplier <= 1.0)
+   {
+      reason = "FXNews: spread filters are outside supported bounds.";
+      return false;
+   }
+
+   if(in.failed_signal_cooldown_seconds < 1 || in.valid_signal_cooldown_seconds < 1)
+   {
+      reason = "FXNews: cooldown inputs must be positive.";
+      return false;
+   }
+
+   if(!MathIsValidNumber(in.max_spread_to_atr_ratio) || !MathIsValidNumber(in.max_tick_gap_seconds) ||
+      !MathIsValidNumber(in.max_spread_z_score) || in.max_spread_to_atr_ratio <= 0.0 ||
+      in.max_tick_gap_seconds <= 0.0 || in.max_spread_z_score <= 0.0)
+   {
+      reason = "FXNews: execution gate inputs must be positive.";
+      return false;
+   }
+
+   // A zero hold requirement would let the HYBRID confirmation clause pass on
+   // the first scan and silently turn it into CONFIRM_LIVE_TICK.
+   if(in.min_hold_seconds_for_high_score < 1 || in.full_hold_score_seconds < 1 ||
+      in.full_hold_score_seconds < in.min_hold_seconds_for_high_score ||
+      in.full_hold_score_seconds > MAX_FULL_HOLD_SCORE_SECONDS ||
+      !MathIsValidNumber(in.max_overextension_atr) || in.max_overextension_atr <= 0.0)
+   {
+      reason = StringFormat("FXNews: breakout-quality inputs are outside supported bounds "
+                            "(MinHoldSecondsForHighScore must be at least 1 and at most FullHoldScoreSeconds, "
+                            "which is itself at most %d).", MAX_FULL_HOLD_SCORE_SECONDS);
+      return false;
+   }
+
+   if(!MathIsValidNumber(in.min_impulse_z_for_signal) || !MathIsValidNumber(in.max_exhaustion_atr) ||
+      !MathIsValidNumber(in.min_basket_agreement_for_high_score) ||
+      !MathIsValidNumber(in.min_directional_edge_for_high_score) ||
+      in.min_impulse_z_for_signal < 0.0 || in.max_exhaustion_atr <= 0.0 ||
+      in.min_basket_agreement_for_high_score <= BASKET_AGREEMENT_SCORE_FLOOR ||
+      in.min_basket_agreement_for_high_score > 1.0 ||
+      in.min_directional_edge_for_high_score <= 0.0)
+   {
+      reason = StringFormat("FXNews: impulse or basket-quality inputs are outside supported bounds. "
+                            "MinBasketAgreementForHighScore must be above %.2f and at most 1.00; "
+                            "MinDirectionalEdgeForHighScore must be above 0.",
+                            BASKET_AGREEMENT_SCORE_FLOOR);
+      return false;
+   }
+
+   // Both reject levels are the lower edge of a rising ramp. A value at or above
+   // the upper edge would score moves against the signal as confirmation.
+   if(!MathIsValidNumber(in.m5_reject_atr) || !MathIsValidNumber(in.m15_reject_atr) ||
+      in.m5_reject_atr >= M5_CONTEXT_FULL_ATR || in.m15_reject_atr >= M15_CONTEXT_FULL_ATR ||
+      in.m5_reject_atr < -5.0 || in.m15_reject_atr < -5.0)
+   {
+      reason = StringFormat("FXNews: multi-timeframe reject levels are outside supported bounds. "
+                            "M5RejectAtr must be below %.2f and M15RejectAtr below %.2f.",
+                            M5_CONTEXT_FULL_ATR, M15_CONTEXT_FULL_ATR);
+      return false;
+   }
+
+   if(!MathIsValidNumber(in.tick_rate_baseline_per_sec) || !MathIsValidNumber(in.tick_volume_ratio_scale) ||
+      in.tick_rate_baseline_per_sec <= 0.0 || in.tick_rate_baseline_per_sec > 100.0 ||
+      in.tick_volume_ratio_scale <= 0.0 || in.tick_volume_ratio_scale > 10.0)
+   {
+      reason = "FXNews: tick-activity calibration inputs must be positive and within range.";
+      return false;
+   }
+
+   if(in.calendar_lookback_minutes < 0 || in.calendar_lookback_minutes > MAX_CALENDAR_WINDOW_MINUTES ||
+      in.calendar_lookahead_minutes < 0 || in.calendar_lookahead_minutes > MAX_CALENDAR_WINDOW_MINUTES ||
+      in.calendar_pre_news_block_minutes < 0 ||
+      in.calendar_pre_news_block_minutes > in.calendar_lookahead_minutes)
+   {
+      reason = StringFormat("FXNews: calendar minutes must be between 0 and %d, and CalendarPreNewsBlockMinutes "
+                            "must not exceed CalendarLookaheadMinutes.", MAX_CALENDAR_WINDOW_MINUTES);
+      return false;
+   }
+
+   // Equal hours would silently disable the rollover block while the input
+   // says it is on; sessions with equal hours are documented as disabled.
+   if(in.ignore_rollover_time && in.rollover_start_hour_server == in.rollover_end_hour_server)
+   {
+      reason = "FXNews: RolloverStartHourServer and RolloverEndHourServer must differ while IgnoreRolloverTime is on.";
+      return false;
+   }
+
+   if(in.rollover_start_hour_server < 0 || in.rollover_start_hour_server > 23 ||
+      in.rollover_end_hour_server < 0 || in.rollover_end_hour_server > 23 ||
+      in.asia_start_hour_server < 0 || in.asia_start_hour_server > 23 ||
+      in.asia_end_hour_server < 0 || in.asia_end_hour_server > 23 ||
+      in.london_start_hour_server < 0 || in.london_start_hour_server > 23 ||
+      in.london_end_hour_server < 0 || in.london_end_hour_server > 23 ||
+      in.newyork_start_hour_server < 0 || in.newyork_start_hour_server > 23 ||
+      in.newyork_end_hour_server < 0 || in.newyork_end_hour_server > 23 ||
+      in.overlap_start_hour_server < 0 || in.overlap_start_hour_server > 23 ||
+      in.overlap_end_hour_server < 0 || in.overlap_end_hour_server > 23)
+   {
+      reason = "FXNews: session and rollover hours must be between 0 and 23.";
+      return false;
+   }
+
+   if(in.outcome_horizon_minutes1 < 1 || in.outcome_horizon_minutes2 < in.outcome_horizon_minutes1 ||
+      in.outcome_horizon_minutes3 < in.outcome_horizon_minutes2 ||
+      in.outcome_horizon_minutes3 > MAX_OUTCOME_HORIZON_MINUTES ||
+      !MathIsValidNumber(in.outcome_target_atr) || !MathIsValidNumber(in.outcome_stop_atr) ||
+      in.outcome_target_atr <= 0.0 || in.outcome_stop_atr <= 0.0)
+   {
+      reason = "FXNews: outcome inputs are inconsistent.";
+      return false;
+   }
+
+   if(in.baseline_lookback_samples < 50 || in.baseline_lookback_samples > MAX_BASELINE_SAMPLES ||
+      in.min_baseline_samples < 10 || in.min_baseline_samples > in.baseline_lookback_samples)
+   {
+      reason = "FXNews: session baseline inputs are inconsistent.";
+      return false;
+   }
+
+   if(!MathIsValidNumber(in.recent_list_min_score) || in.recent_list_min_score < in.min_display_confidence ||
+      in.recent_list_min_score > 100.0)
+   {
+      reason = "FXNews: RecentListMinScore must be between MinDisplayConfidence and 100.";
+      return false;
+   }
+
+   if(in.max_dashboard_rows < 1 || in.max_dashboard_rows > DASHBOARD_MAX_OBJECTS - SIGNAL_FIRST_ROW_INDEX ||
+      in.signal_ttl_seconds < 30 || in.signal_ttl_seconds > 3600 ||
+      in.display_update_seconds > 3600 || in.scan_interval_seconds > 3600 ||
+      in.copy_ticks_lookback_seconds < 5 || in.copy_ticks_lookback_seconds > MAX_TICK_LOOKBACK_SECONDS ||
+      in.min_copy_ticks_for_good_quality < 1 || in.min_copy_ticks_for_good_quality > MAX_COPY_TICKS)
+   {
+      reason = "FXNews: dashboard, lifecycle, or tick-quality inputs are inconsistent.";
+      return false;
+   }
+
+   if(in.historical_lookback_days < 1 || in.historical_lookback_days > MAX_HISTORICAL_LOOKBACK_DAYS ||
+      in.historical_step_minutes < 1 || in.historical_step_minutes > 60 ||
+      in.historical_warmup_bars < 100 || in.historical_warmup_bars > MAX_HISTORICAL_WARMUP_BARS ||
+      in.historical_max_boundaries_per_profile < 10 ||
+      in.historical_max_boundaries_per_profile > MAX_HISTORICAL_BOUNDARIES_PER_PROFILE ||
+      in.historical_history_wait_seconds < 0 ||
+      in.historical_history_wait_seconds > MAX_HISTORICAL_HISTORY_WAIT_SECONDS ||
+      in.autotune_min_signals < 10)
+   {
+      reason = "FXNews: historical validation/autotune inputs are inconsistent.";
+      return false;
+   }
+
+   return true;
+}
+
 bool ValidateInputs()
 {
    if(StringLen(SymbolsToScan) <= 0 || StringLen(SymbolsToScan) > MAX_UNIQUE_SYMBOLS * (MAX_SYMBOL_TOKEN_LENGTH + 1) ||
@@ -939,170 +1290,16 @@ bool ValidateInputs()
       return false;
    }
 
-   if(ScanIntervalSeconds < 1 || DisplayUpdateSeconds < 1 || MaxQuoteAgeSeconds < 1)
+   string reason = "";
+   if(!ValidateInputsCore(CurrentValidationInputs(), reason))
    {
-      Print("FXNews: scan, display, and quote-age inputs must be positive.");
-      return false;
-   }
-
-   if(!MathIsValidNumber(MinDisplayConfidence) || !MathIsValidNumber(StrongAlertConfidence) ||
-      MinDisplayConfidence < 1.0 || MinDisplayConfidence > 99.0 ||
-      StrongAlertConfidence < MinDisplayConfidence || StrongAlertConfidence > 100.0)
-   {
-      Print("FXNews: confidence inputs are inconsistent.");
-      return false;
-   }
-
-   if(RangeLookbackM1 < 10 || RangeLookbackM1 > MAX_RANGE_LOOKBACK ||
-      ATRPeriod < 2 || ATRPeriod > MAX_ATR_PERIOD ||
-      !MathIsValidNumber(BreakoutBufferATR) || !MathIsValidNumber(MinBreakoutBufferPips) ||
-      BreakoutBufferATR < 0.0 || MinBreakoutBufferPips < 0.0)
-   {
-      Print("FXNews: range and ATR inputs are outside supported bounds.");
-      return false;
-   }
-
-   if(!MathIsValidNumber(MaxSpreadPips) || !MathIsValidNumber(MaxSpreadMedianMultiplier) ||
-      MaxSpreadPips <= 0.0 || MaxSpreadMedianMultiplier <= 1.0)
-   {
-      Print("FXNews: spread filters are outside supported bounds.");
-      return false;
-   }
-
-   if(FailedSignalCooldownSeconds < 1 || ValidSignalCooldownSeconds < 1)
-   {
-      Print("FXNews: cooldown inputs must be positive.");
-      return false;
-   }
-
-   if(!MathIsValidNumber(MaxSpreadToAtrRatio) || !MathIsValidNumber(MaxTickGapSeconds) ||
-      !MathIsValidNumber(MaxSpreadZScore) || MaxSpreadToAtrRatio <= 0.0 ||
-      MaxTickGapSeconds <= 0.0 || MaxSpreadZScore <= 0.0)
-   {
-      Print("FXNews: execution gate inputs must be positive.");
-      return false;
-   }
-
-   // A zero hold requirement would let the HYBRID confirmation clause pass on
-   // the first scan and silently turn it into CONFIRM_LIVE_TICK.
-   if(MinHoldSecondsForHighScore < 1 || FullHoldScoreSeconds < 1 ||
-      FullHoldScoreSeconds < MinHoldSecondsForHighScore || !MathIsValidNumber(MaxOverextensionAtr) ||
-      MaxOverextensionAtr <= 0.0)
-   {
-      Print("FXNews: breakout-quality inputs are outside supported bounds "
-            "(MinHoldSecondsForHighScore must be at least 1 and at most FullHoldScoreSeconds).");
+      Print(reason);
       return false;
    }
 
    if(!UseTechnicalBreakoutEngine && !UseImpulseBreakoutEngine)
    {
       Print("FXNews: enable at least one signal engine.");
-      return false;
-   }
-
-   if(!MathIsValidNumber(MinImpulseZForSignal) || !MathIsValidNumber(MaxExhaustionAtr) ||
-      !MathIsValidNumber(MinBasketAgreementForHighScore) || !MathIsValidNumber(MinDirectionalEdgeForHighScore) ||
-      MinImpulseZForSignal < 0.0 || MaxExhaustionAtr <= 0.0 ||
-      MinBasketAgreementForHighScore <= BASKET_AGREEMENT_SCORE_FLOOR ||
-      MinBasketAgreementForHighScore > 1.0 ||
-      MinDirectionalEdgeForHighScore <= 0.0)
-   {
-      PrintFormat("FXNews: impulse or basket-quality inputs are outside supported bounds. "
-                  "MinBasketAgreementForHighScore must be above %.2f and at most 1.00; "
-                  "MinDirectionalEdgeForHighScore must be above 0.",
-                  BASKET_AGREEMENT_SCORE_FLOOR);
-      return false;
-   }
-
-   // Both reject levels are the lower edge of a rising ramp. A value at or above
-   // the upper edge would score moves against the signal as confirmation.
-   if(!MathIsValidNumber(M5RejectAtr) || !MathIsValidNumber(M15RejectAtr) ||
-      M5RejectAtr >= M5_CONTEXT_FULL_ATR || M15RejectAtr >= M15_CONTEXT_FULL_ATR ||
-      M5RejectAtr < -5.0 || M15RejectAtr < -5.0)
-   {
-      PrintFormat("FXNews: multi-timeframe reject levels are outside supported bounds. "
-                  "M5RejectAtr must be below %.2f and M15RejectAtr below %.2f.",
-                  M5_CONTEXT_FULL_ATR, M15_CONTEXT_FULL_ATR);
-      return false;
-   }
-
-   if(!MathIsValidNumber(TickRateBaselinePerSec) || !MathIsValidNumber(TickVolumeRatioScale) ||
-      TickRateBaselinePerSec <= 0.0 || TickRateBaselinePerSec > 100.0 ||
-      TickVolumeRatioScale <= 0.0 || TickVolumeRatioScale > 10.0)
-   {
-      Print("FXNews: tick-activity calibration inputs must be positive and within range.");
-      return false;
-   }
-
-   if(CalendarLookbackMinutes < 0 || CalendarLookbackMinutes > MAX_CALENDAR_WINDOW_MINUTES ||
-      CalendarLookaheadMinutes < 0 || CalendarLookaheadMinutes > MAX_CALENDAR_WINDOW_MINUTES ||
-      CalendarPreNewsBlockMinutes < 0 || CalendarPreNewsBlockMinutes > CalendarLookaheadMinutes)
-   {
-      PrintFormat("FXNews: calendar minutes must be between 0 and %d, and CalendarPreNewsBlockMinutes "
-                  "must not exceed CalendarLookaheadMinutes.", MAX_CALENDAR_WINDOW_MINUTES);
-      return false;
-   }
-
-   // Equal hours would silently disable the rollover block while the input
-   // says it is on; sessions with equal hours are documented as disabled.
-   if(IgnoreRolloverTime && RolloverStartHourServer == RolloverEndHourServer)
-   {
-      Print("FXNews: RolloverStartHourServer and RolloverEndHourServer must differ while IgnoreRolloverTime is on.");
-      return false;
-   }
-
-   if(RolloverStartHourServer < 0 || RolloverStartHourServer > 23 ||
-      RolloverEndHourServer < 0 || RolloverEndHourServer > 23 ||
-      AsiaStartHourServer < 0 || AsiaStartHourServer > 23 || AsiaEndHourServer < 0 || AsiaEndHourServer > 23 ||
-      LondonStartHourServer < 0 || LondonStartHourServer > 23 || LondonEndHourServer < 0 || LondonEndHourServer > 23 ||
-      NewYorkStartHourServer < 0 || NewYorkStartHourServer > 23 || NewYorkEndHourServer < 0 || NewYorkEndHourServer > 23 ||
-      LondonNYOverlapStartHourServer < 0 || LondonNYOverlapStartHourServer > 23 ||
-      LondonNYOverlapEndHourServer < 0 || LondonNYOverlapEndHourServer > 23)
-   {
-      Print("FXNews: session and rollover hours must be between 0 and 23.");
-      return false;
-   }
-
-   if(OutcomeHorizonMinutes1 < 1 || OutcomeHorizonMinutes2 < OutcomeHorizonMinutes1 ||
-      OutcomeHorizonMinutes3 < OutcomeHorizonMinutes2 || OutcomeHorizonMinutes3 > MAX_OUTCOME_HORIZON_MINUTES ||
-      !MathIsValidNumber(OutcomeTargetAtr) || !MathIsValidNumber(OutcomeStopAtr) ||
-      OutcomeTargetAtr <= 0.0 || OutcomeStopAtr <= 0.0)
-   {
-      Print("FXNews: outcome inputs are inconsistent.");
-      return false;
-   }
-
-   if(BaselineLookbackSamples < 50 || BaselineLookbackSamples > MAX_BASELINE_SAMPLES || MinBaselineSamples < 10 ||
-      MinBaselineSamples > BaselineLookbackSamples)
-   {
-      Print("FXNews: session baseline inputs are inconsistent.");
-      return false;
-   }
-
-   if(!MathIsValidNumber(RecentListMinScore) || RecentListMinScore < MinDisplayConfidence ||
-      RecentListMinScore > 100.0)
-   {
-      Print("FXNews: RecentListMinScore must be between MinDisplayConfidence and 100.");
-      return false;
-   }
-
-   if(MaxDashboardRows < 1 || MaxDashboardRows > DASHBOARD_MAX_OBJECTS - SIGNAL_FIRST_ROW_INDEX ||
-      SignalTTLSeconds < 30 || SignalTTLSeconds > 3600 ||
-      DisplayUpdateSeconds > 3600 || ScanIntervalSeconds > 3600 ||
-      CopyTicksLookbackSeconds < 5 || CopyTicksLookbackSeconds > MAX_TICK_LOOKBACK_SECONDS ||
-      MinCopyTicksForGoodQuality < 1 || MinCopyTicksForGoodQuality > MAX_COPY_TICKS)
-   {
-      Print("FXNews: dashboard, lifecycle, or tick-quality inputs are inconsistent.");
-      return false;
-   }
-
-   if(HistoricalLookbackDays < 1 || HistoricalLookbackDays > MAX_HISTORICAL_LOOKBACK_DAYS ||
-      HistoricalStepMinutes < 1 || HistoricalStepMinutes > 60 || HistoricalWarmupBars < 100 ||
-      HistoricalWarmupBars > MAX_HISTORICAL_WARMUP_BARS || HistoricalMaxBoundariesPerProfile < 10 ||
-      HistoricalMaxBoundariesPerProfile > MAX_HISTORICAL_BOUNDARIES_PER_PROFILE ||
-      AutotuneMinSignals < 10)
-   {
-      Print("FXNews: historical validation/autotune inputs are inconsistent.");
       return false;
    }
 
@@ -1494,14 +1691,954 @@ void SelfTestAvailabilityAndComposer()
    for(int i = 0; i < 26; i++)
       long_text += "word" + IntegerToString(i) + " ";
    string pieces[];
-   int piece_count = WrapLabelText(long_text, pieces);
+   int piece_count = WrapLabelText(long_text, pieces, DASHBOARD_MAX_TEXT_CHARS);
    bool pieces_fit = (piece_count >= 3);
    for(int i = 0; i < piece_count; i++)
       pieces_fit = pieces_fit && (StringLen(pieces[i]) <= DASHBOARD_MAX_TEXT_CHARS);
    SelfTestCheck(pieces_fit && StringFind(pieces[1], "  ") == 0,
                  "WrapLabelText splits at the label limit and indents continuations");
 
+   // F-021: the wrap width must be the width the rows are clipped to. Wrapping at the
+   // 63-character cap while the row clipped to a narrower pixel width produced a
+   // truncated first piece and lost the wrapped tail entirely. On a narrow chart the
+   // text therefore has to come out as more, shorter pieces, every one of which fits,
+   // with no word dropped.
+   string narrow[];
+   int narrow_count = WrapLabelText(long_text, narrow, 20);
+   bool narrow_fits = (narrow_count > piece_count);
+   for(int i = 0; i < narrow_count; i++)
+      narrow_fits = narrow_fits && (StringLen(narrow[i]) <= 20);
+   string joined = "";
+   for(int i = 0; i < narrow_count; i++)
+      joined += narrow[i] + " ";
+   SelfTestCheck(narrow_fits && StringFind(joined, "word0 ") >= 0 && StringFind(joined, "word25") >= 0,
+                 "WrapLabelText wraps to the requested width and keeps every word (F-021)");
+
+   // Regression test for a self-test assertion that could not fail. The displayed
+   // score cannot distinguish exclusion from imputation here because
+   // flow_absent_cap binds at 84 either way, so the assertion above passes under
+   // both the correct implementation and one that folds an unmeasured component in
+   // at zero.
+   //
+   // With every measured component at the same quality, dropping a component's
+   // weight from the normaliser leaves the blended average unchanged, whereas
+   // imputing 0 drags it down by the excluded weight's share. Asserting raw_score
+   // (pre-cap) therefore distinguishes the two. Flow is the component under test
+   // because the breakout/impulse synergy term is identical in both branches and
+   // so cancels out.
+   {
+      CompositeSignalScore equal_score;
+      CompositeContext equal_context;
+      ResetCompositeSignalScore(equal_score);
+      equal_score.execution.pass = true;
+      equal_score.execution.score = 0.60;
+      equal_score.breakout.measured = true;
+      equal_score.breakout.score = 0.60;
+      equal_score.impulse.measured = true;
+      equal_score.impulse.score = 0.60;
+      equal_score.regime.score = 0.60;
+      equal_score.flow.available = true;
+      equal_score.flow.score = 0.60;
+      equal_context.direction = DIR_UP;
+      equal_context.m5_move_directional = 0.0;
+      equal_context.m15_move_directional = 0.0;
+      equal_context.age_seconds = 0;
+      equal_context.age_limit_seconds = 0;
+      equal_context.max_spread_to_atr = 0.45;
+
+      ComposeSignalScore(equal_score, equal_context, false);
+      double flow_measured_raw = equal_score.raw_score;
+
+      // Exactly the state ResetCompositeSignalScore leaves behind: no reading.
+      equal_score.flow.available = false;
+      equal_score.flow.score = 0.0;
+      ComposeSignalScore(equal_score, equal_context, false);
+      SelfTestNear(equal_score.raw_score, flow_measured_raw,
+                   "ComposeSignalScore leaves the blend unchanged when a component is unmeasured");
+   }
+
    SelfTestGroup("availability and composer", before);
+}
+
+// A session bucket must publish a z-score only for a series it has actually
+// sampled. The three series are folded on different conditions (the tick rate
+// only when it is known, the tick volume only when the trigger timeframe has
+// data), so a single shared counter let a spread-only bucket report a
+// measured-looking neutral 0 for the other two. Regression test for that defect.
+void SelfTestSessionBaselines()
+{
+   int before = g_selftest_failed;
+
+   if(ArrayResize(g_profiles, 1) != 1 ||
+      ArrayResize(g_session_baselines, SESSION_COUNT) != SESSION_COUNT)
+   {
+      SelfTestCheck(false, "session baseline: synthetic allocation");
+      SelfTestGroup("session baselines", before);
+      return;
+   }
+
+   ResetProfile(g_profiles[0], "S0", PERIOD_M5, "M5");
+   ResetSessionBaselines();
+   g_profiles[0].session_index = SESSION_LONDON;
+   g_profiles[0].spread_pips = 1.2;
+   g_profiles[0].tick_rate_available = false;   // no rate reading this scan
+   g_profiles[0].has_trigger = false;           // and no tick volume either
+   g_profiles[0].active_trigger_tick_volume = 0.0;
+
+   for(int i = 0; i < MinBaselineSamples + 1; i++)
+      UpdateSessionBaseline(0);
+
+   if(UseSessionAwareBaselines)
+   {
+      SelfTestCheck(g_profiles[0].session_spread_z_ready,
+                    "session baseline: spread reaches readiness on spread samples");
+      SelfTestCheck(!g_profiles[0].session_tick_rate_z_ready,
+                    "session baseline: spread samples do not make the tick-rate z ready");
+      SelfTestCheck(!g_profiles[0].session_tick_volume_z_ready,
+                    "session baseline: spread samples do not make the tick-volume z ready");
+
+      // The tick rate and the trigger bar appear. One sample is not a baseline:
+      // a shared counter would declare both ready here and publish a neutral 0
+      // for series that had contributed nothing.
+      g_profiles[0].tick_rate_available = true;
+      g_profiles[0].tick_rate_per_sec = 1.5;
+      g_profiles[0].has_trigger = true;
+      g_profiles[0].active_trigger_tick_volume = 40.0;
+      UpdateSessionBaseline(0);
+      SelfTestCheck(!g_profiles[0].session_tick_rate_z_ready &&
+                    !g_profiles[0].session_tick_volume_z_ready,
+                    "session baseline: a single rate sample is not yet a baseline");
+
+      // Their own samples eventually reach readiness.
+      for(int i = 0; i < MinBaselineSamples + 1; i++)
+         UpdateSessionBaseline(0);
+      SelfTestCheck(g_profiles[0].session_tick_rate_z_ready &&
+                    g_profiles[0].session_tick_volume_z_ready,
+                    "session baseline: rate and volume reach readiness on their own samples");
+   }
+   else
+   {
+      SelfTestCheck(!g_profiles[0].session_spread_z_ready &&
+                    !g_profiles[0].session_tick_rate_z_ready &&
+                    !g_profiles[0].session_tick_volume_z_ready,
+                    "session baseline: disabled input publishes no readiness at all");
+   }
+
+   // Every bucket must start from a clean slate: a new session must not inherit
+   // another bucket's counts.
+   int london = BaselineIndex(0, SESSION_LONDON);
+   int asia = BaselineIndex(0, SESSION_ASIA);
+   SelfTestCheck(g_session_baselines[london].spread_samples > 0 &&
+                 g_session_baselines[asia].spread_samples == 0,
+                 "session baseline: counts are per session bucket");
+
+   SelfTestGroup("session baselines", before);
+}
+
+// The spread/cost/spread-z gate must behave identically for the live scanner and
+// the historical validator, and must apply the cost-to-ATR and spread-z ceilings
+// only under UseStrictExecutionGate. Regression test for the validator applying
+// the cost ceiling unconditionally and so rejecting boundaries live accepts.
+void SelfTestExecutionGate()
+{
+   int before = g_selftest_failed;
+
+   ExecutionQuality ex;
+   ex.spread_pips = 1.0;
+   ex.median_available = false;
+   ex.median_spread_pips = 0.0;
+   ex.spread_ratio = 0.0;
+   ex.spread_z_available = false;
+   ex.spread_z = 0.0;
+   ex.cost_to_atr = 0.60;
+
+   SelfTestCheck(ExecutionSpreadBlock(ex, 0.45, false) == BLOCK_NONE,
+                 "execution gate: a high cost-to-ATR passes when the strict gate is off");
+   SelfTestCheck(ExecutionSpreadBlock(ex, 0.45, true) == BLOCK_BAD_SPREAD,
+                 "execution gate: the same reading is rejected when the strict gate is on");
+
+   // The ungated ceilings apply regardless of the strict switch.
+   ex.cost_to_atr = 0.10;
+   ex.spread_pips = MaxSpreadPips + 1.0;
+   SelfTestCheck(ExecutionSpreadBlock(ex, 0.45, false) == BLOCK_BAD_SPREAD,
+                 "execution gate: the absolute spread ceiling applies without the strict gate");
+
+   ex.spread_pips = 1.0;
+   ex.median_available = true;
+   ex.spread_ratio = MaxSpreadMedianMultiplier + 0.5;
+   SelfTestCheck(ExecutionSpreadBlock(ex, 0.45, false) == BLOCK_BAD_SPREAD,
+                 "execution gate: the median-multiple ceiling applies without the strict gate");
+
+   ex.median_available = false;
+   ex.spread_ratio = 0.0;
+   ex.spread_z_available = true;
+   ex.spread_z = MaxSpreadZScore + 1.0;
+   SelfTestCheck(ExecutionSpreadBlock(ex, 0.45, false) == BLOCK_NONE &&
+                 ExecutionSpreadBlock(ex, 0.45, true) == BLOCK_BAD_SPREAD,
+                 "execution gate: the spread-z ceiling is strict-gated as well");
+
+   SelfTestGroup("execution gate", before);
+}
+
+// An impulse term whose inputs do not exist must leave the blend and the
+// normaliser, not enter them at zero. This is the shared pure blend, so the test
+// pins the contract for the live scanner and the validator alike; the validator
+// used to force both weights on, which made its scores incomparable with live on
+// thin history.
+void SelfTestImpulseAvailability()
+{
+   int before = g_selftest_failed;
+
+   ImpulseQuality impulse;
+   impulse.measured = true;
+   impulse.atr_expansion_score = 1.0;
+   impulse.acceleration_score = 0.0;      // a zero reading, but only if measured
+   impulse.tick_volume_available = false;
+   impulse.tick_volume_z = 0.0;
+   impulse.tick_rate_available = false;
+   impulse.tick_rate_z = 0.0;
+
+   // Speed (0.25) and ATR expansion (0.20) measured at full quality, everything
+   // else unavailable: the blend must be exactly 1.0, i.e. nothing was imputed.
+   BlendImpulseScore(impulse, 1.0, false, false, 0.0);
+   SelfTestNear(impulse.score, 1.0, "impulse blend: unavailable terms leave the normaliser");
+
+   // With the same zero readings declared available they carry weight, so the
+   // score must drop to 0.45/0.75. If the two differ, exclusion is real.
+   BlendImpulseScore(impulse, 1.0, true, true, 0.0);
+   SelfTestNear(impulse.score, 0.60, "impulse blend: an available zero term carries weight");
+
+   SelfTestGroup("impulse availability", before);
+}
+
+// hold_score is a measurement, not an imputation: a price inside the buffered
+// boundary has held outside for zero seconds, which is real information, and the
+// weight applies to a measured-but-not-passing box on purpose. This is a
+// characterisation test - no behaviour changed - so it passes both with and
+// without the clarity edit that made the assignment single-valued. It exists so
+// that a future change to the guard cannot silently turn the zero into a default.
+void SelfTestBreakoutHold()
+{
+   int before = g_selftest_failed;
+
+   BreakoutStructure inside;
+   BreakoutStructure outside;
+   // Inside the boundary: distance is negative, so the box has not broken and the
+   // price has held outside for zero seconds.
+   ComputeBreakoutStructure(DIR_UP, 0.0010, 0.0030, -0.0002, 0.0002, 1.80,
+                            1.1000, 1.1030, 1.0995, 1.1025, -1.0, -1.0, inside);
+   // Same bar, broken and held well past the full-hold horizon.
+   ComputeBreakoutStructure(DIR_UP, 0.0010, 0.0030, 0.0006, 0.0002, 1.80,
+                            1.1000, 1.1030, 1.0995, 1.1025,
+                            (double)FullHoldScoreSeconds * 2.0, -1.0, outside);
+
+   SelfTestCheck(inside.measured && !inside.pass && inside.hold_score == 0.0,
+                 "ComputeBreakoutStructure: an unbroken box is measured, not passing, zero hold");
+   SelfTestCheck(outside.measured && outside.pass && outside.hold_score > 0.99 &&
+                 outside.score > inside.score,
+                 "ComputeBreakoutStructure weights a sustained hold above a zero hold");
+
+   SelfTestGroup("breakout hold", before);
+}
+
+// The overextension cap must be driven by a measured reading. The five-minute
+// move arrives as a 0.0 sentinel when its M1 copy failed, and a penalty of 0 for
+// an unmeasured reading is indistinguishable from "not overextended" - so the cap
+// is gated on exhaustion_available rather than on the value alone.
+void SelfTestExhaustionAvailability()
+{
+   int before = g_selftest_failed;
+
+   CompositeSignalScore score;
+   CompositeContext context;
+   ResetCompositeSignalScore(score);
+   score.execution.pass = true;
+   score.execution.score = 0.90;
+   score.breakout.measured = true;
+   score.breakout.score = 0.90;
+   score.impulse.measured = true;
+   score.impulse.score = 0.90;
+   score.regime.score = 0.90;
+   score.impulse.exhaustion_penalty = 0.90;   // a reading that would cap if trusted
+   context.direction = DIR_UP;
+   context.m5_move_directional = 0.0;
+   context.m15_move_directional = 0.0;
+   context.age_seconds = 0;
+   context.age_limit_seconds = 0;
+   context.max_spread_to_atr = 0.45;
+
+   score.impulse.exhaustion_available = false;
+   ComposeSignalScore(score, context, false);
+   SelfTestCheck(StringFind(score.cap_reasons, "overextended_cap") < 0,
+                 "ComposeSignalScore ignores an overextension reading that was not measured");
+
+   score.impulse.exhaustion_available = true;
+   ComposeSignalScore(score, context, false);
+   SelfTestCheck(StringFind(score.cap_reasons, "overextended_cap") >= 0,
+                 "ComposeSignalScore caps a measured overextension");
+
+   SelfTestGroup("exhaustion availability", before);
+}
+
+// Two composer rules read a component score without asking whether that component
+// was measured: the +0.05 synergy bonus (F-019) and the single-feature cap
+// (F-018). A leftover score in an unmeasured component could satisfy either, and a
+// disabled engine could never satisfy the bonus because its score stays 0.
+void SelfTestComposerEngineGating()
+{
+   int before = g_selftest_failed;
+
+   CompositeContext ctx;
+   ctx.direction = DIR_UP;
+   ctx.m5_move_directional = 0.0;
+   ctx.m15_move_directional = 0.0;
+   ctx.age_seconds = 0;
+   ctx.age_limit_seconds = 0;
+   ctx.max_spread_to_atr = 0.45;
+
+   // F-019: the bonus needs two measured engines, not two non-zero scores.
+   CompositeSignalScore bonus;
+   ResetCompositeSignalScore(bonus);
+   bonus.execution.pass = true;
+   bonus.execution.score = 0.60;
+   bonus.breakout.measured = true;
+   bonus.breakout.score = 0.60;
+   bonus.impulse.measured = true;
+   bonus.impulse.score = 0.60;
+   bonus.regime.score = 0.60;
+   ComposeSignalScore(bonus, ctx, false);
+   double both_measured = bonus.raw_score;
+
+   bonus.breakout.measured = false;   // its 0.60 is now a leftover, not a reading
+   ComposeSignalScore(bonus, ctx, false);
+   SelfTestCheck(bonus.raw_score < both_measured,
+                 "ComposeSignalScore grants the synergy bonus only to measured engines");
+
+   // F-018: the single-feature cap must ignore an unmeasured engine's leftover
+   // score, even when that leftover is high enough to look like confirmation.
+   // The measured engine sits just under the confirm level and the other
+   // components are perfect, so the capped score still exceeds the cap's own
+   // "above 80" gate: with the leftover counted, max(0.90, 0.59) = 0.90 looks
+   // like confirmation and the cap is skipped.
+   CompositeSignalScore single;
+   ResetCompositeSignalScore(single);
+   single.execution.pass = true;
+   single.execution.score = 1.0;
+   single.impulse.measured = true;
+   single.impulse.score = 0.59;       // the only real engine reading
+   single.breakout.measured = false;
+   single.breakout.score = 0.90;      // leftover from an earlier evaluation
+   single.regime.score = 1.0;
+   ComposeSignalScore(single, ctx, false);
+   SelfTestCheck(StringFind(single.cap_reasons, "single_feature_cap") >= 0,
+                 "ComposeSignalScore caps a single measured feature, ignoring a stale one");
+
+   SelfTestGroup("composer engine gating", before);
+}
+
+// The live signal state machine, driven from synthetic scores instead of from the
+// market. This closes the largest coverage hole the project had: the lifecycle was
+// verified only by manual runtime observation, and three defects fixed in 3.0
+// (stale TTL, re-gating a running signal, a trivially-true HYBRID hold clause)
+// lived exactly here. It covers candidate creation, confirmation, the TTL and
+// decay endings, cooldown blocking and reversal. It does not cover alert dispatch,
+// correlation grouping or dashboard rendering, which need the terminal's object
+// and notification surfaces; that remainder is tracked as F-049.
+void SelfTestSignalLifecycle()
+{
+   int before = g_selftest_failed;
+
+   if(ArrayResize(g_profiles, 1) != 1)
+   {
+      SelfTestCheck(false, "signal lifecycle: synthetic allocation");
+      SelfTestGroup("signal lifecycle", before);
+      return;
+   }
+
+   datetime t0 = D'2026.09.15 10:00';
+   ResetProfile(g_profiles[0], "S0", PERIOD_M5, "M5");
+   g_profiles[0].pip_size = 0.0001;
+   g_profiles[0].point = 0.00001;
+   g_profiles[0].bid = 1.19995;
+   g_profiles[0].ask = 1.20005;
+   g_profiles[0].mid = 1.20000;      // above the box, so the UP context stays valid
+   g_profiles[0].spread_pips = 1.0;
+   g_profiles[0].tick_gap_sec = 0.0;
+   g_profiles[0].range_high = 1.1000;
+   g_profiles[0].range_low = 1.0900;
+   g_profiles[0].range_width = 0.0100;
+   g_profiles[0].quote_time = t0;
+   g_profiles[0].trigger_bar_time = t0;
+   g_profiles[0].event_state = STATE_WATCH;
+   g_profiles[0].active_direction = DIR_NONE;
+   g_profiles[0].cooldown_end_up = 0;
+   g_profiles[0].cooldown_end_down = 0;
+   g_profiles[0].final_score_up = 90.0;
+   g_profiles[0].final_score_down = 0.0;
+   // HYBRID confirms on a measured hold; the other modes ignore it.
+   g_profiles[0].composite_up.breakout.hold_score = 1.0;
+   g_profiles[0].composite_up.age_free_score = 50.0;
+
+   // 1. An above-threshold score with no cooldown starts an event. In LIVE_TICK it
+   //    activates immediately; in the other modes it becomes a candidate.
+   UpdateSignalState(0, t0);
+   SelfTestCheck(g_profiles[0].event_state == STATE_CANDIDATE ||
+                 g_profiles[0].event_state == STATE_ACTIVE_CONFIRMED,
+                 "signal lifecycle: an above-threshold score starts an event");
+
+   // 2. A new trigger bar (and in HYBRID the measured hold) confirms it.
+   g_profiles[0].trigger_bar_time = t0 + 60;
+   UpdateSignalState(0, t0 + 60);
+   SelfTestCheck(g_profiles[0].event_state == STATE_ACTIVE_CONFIRMED &&
+                 g_profiles[0].active_direction == DIR_UP &&
+                 g_profiles[0].event_start_time > 0,
+                 "signal lifecycle: the event confirms, activates and is timestamped");
+
+   // 3. The age limit ends it, and the ending records a cooldown for its own
+   //    direction rather than leaving the slot free.
+   datetime started = g_profiles[0].event_start_time;
+   if(ExpireOldSignals)
+   {
+      datetime expired_at = started + SignalTTLSeconds + 5;
+      UpdateSignalState(0, expired_at);
+      SelfTestCheck(g_profiles[0].event_state == STATE_COOLDOWN &&
+                    g_profiles[0].active_direction == DIR_NONE &&
+                    g_profiles[0].cooldown_end_up >= expired_at,
+                    "signal lifecycle: the age limit ends the signal into a cooldown");
+
+      // 4. While that cooldown runs, the same direction cannot open a new event.
+      g_profiles[0].final_score_up = 90.0;
+      UpdateSignalState(0, g_profiles[0].cooldown_end_up - 1);
+      SelfTestCheck(g_profiles[0].event_state == STATE_COOLDOWN &&
+                    g_profiles[0].active_direction == DIR_NONE,
+                    "signal lifecycle: a running cooldown holds that direction out");
+   }
+   else
+   {
+      // With the age limit off, a still-scoring event must survive the same
+      // instant that would otherwise expire it.
+      UpdateSignalState(0, started + SignalTTLSeconds + 5);
+      SelfTestCheck(g_profiles[0].event_state == STATE_ACTIVE_CONFIRMED,
+                    "signal lifecycle: with the age limit off the signal survives");
+   }
+
+   // 5. Reversal: a much stronger opposite score ends the running event and enters
+   //    the normal candidate path for the opposite direction, so every
+   //    confirmation mode applies its own rule to it.
+   ResetProfile(g_profiles[0], "S0", PERIOD_M5, "M5");
+   g_profiles[0].pip_size = 0.0001;
+   g_profiles[0].point = 0.00001;
+   g_profiles[0].bid = 1.10005;
+   g_profiles[0].ask = 1.10015;
+   g_profiles[0].mid = 1.10010;
+   g_profiles[0].spread_pips = 1.0;
+   g_profiles[0].tick_gap_sec = 0.0;
+   g_profiles[0].range_high = 1.1000;
+   g_profiles[0].range_low = 1.0900;
+   g_profiles[0].range_width = 0.0100;
+   g_profiles[0].trigger_bar_time = t0;
+   g_profiles[0].event_state = STATE_WATCH;
+   g_profiles[0].active_direction = DIR_NONE;
+   g_profiles[0].final_score_up = 90.0;
+   g_profiles[0].composite_up.breakout.hold_score = 1.0;
+   g_profiles[0].composite_up.age_free_score = 50.0;
+   UpdateSignalState(0, t0);
+   g_profiles[0].trigger_bar_time = t0 + 60;
+   UpdateSignalState(0, t0 + 60);
+   bool active_up = (g_profiles[0].event_state == STATE_ACTIVE_CONFIRMED &&
+                     g_profiles[0].active_direction == DIR_UP);
+
+   g_profiles[0].final_score_down = 99.0;
+   datetime flip_at = t0 + 120;
+   UpdateSignalState(0, flip_at);
+   bool flipped = (g_profiles[0].active_direction == DIR_DOWN ||
+                   (g_profiles[0].event_state == STATE_CANDIDATE &&
+                    g_profiles[0].candidate_direction == DIR_DOWN));
+   SelfTestCheck(active_up && flipped && g_profiles[0].cooldown_end_up >= flip_at,
+                 "signal lifecycle: a stronger opposite score reverses into the candidate path");
+
+   SelfTestGroup("signal lifecycle", before);
+}
+
+// The visible signal history backs g_signal_history_dirty, the flag that schedules
+// the whole dashboard update, so consuming that flag must not depend on which
+// display mode happens to be drawing. The call site that guarantees the refresh
+// runs unconditionally is pinned structurally by tools/contracts.py, because
+// driving UpdateDashboard here would create chart objects and could overwrite the
+// harness's own verdict label.
+void SelfTestHistoryRefresh()
+{
+   int before = g_selftest_failed;
+
+   if(ArrayResize(g_profiles, 1) != 1)
+   {
+      SelfTestCheck(false, "history refresh: synthetic allocation");
+      SelfTestGroup("history refresh", before);
+      return;
+   }
+
+   ResetProfile(g_profiles[0], "S0", PERIOD_M5, "M5");
+   ClearSignalHistory();
+   g_signal_history[0].used = true;
+   g_signal_history[0].symbol = "S0";
+   g_signal_history[0].timeframe_label = "M5";
+   g_signal_history[0].direction = DIR_UP;
+   g_signal_history[0].local_time = D'2026.09.15 10:00';
+   g_signal_history[0].score = 90.0;
+   g_signal_history[0].text = "S0 M5 UP 90%";
+   g_signal_history[0].reason = "reason";
+   g_signal_history_count = 1;
+
+   g_signal_history_dirty = true;
+   RefreshVisibleSignalHistoryIfDue();
+   SelfTestCheck(!g_signal_history_dirty,
+                 "history refresh: the dirty flag is consumed by the refresh");
+   SelfTestCheck(g_visible_signal_history_count == 1,
+                 "history refresh: a displayable entry reaches the visible list");
+
+   // The list threshold is stricter than the live display threshold.
+   g_signal_history[0].score = 0.0;
+   g_signal_history_dirty = true;
+   RefreshVisibleSignalHistoryIfDue();
+   SelfTestCheck(g_visible_signal_history_count == 0,
+                 "history refresh: a sub-threshold entry is not published to the list");
+
+   SelfTestGroup("history refresh", before);
+}
+
+// The breakout blend's ceiling, which is the whole substance of F-012. All sub-scores at
+// their maximum with no rejection wick must reach 1.00, because every other component can.
+// The case was filed as a normaliser defect and re-examined rather than assumed: the
+// penalty is deducted after normalisation, so folding its 0.15 into total_weight would
+// drop this assertion to 0.95/1.10 and fail it.
+void SelfTestBreakoutBlend()
+{
+   int before = g_selftest_failed;
+
+   BreakoutStructure b;
+   b.pass = false;
+   b.measured = true;
+   b.candle_measured = false;
+   b.score = 0.0;
+   b.compression_score = 1.0;
+   b.distance_score = 1.0;
+   b.close_location_score = 0.0;
+   b.hold_score = 1.0;
+   b.body_quality_score = 0.0;
+   b.wick_rejection_penalty = 0.0;
+   b.fakeout_penalty = 0.0;
+
+   SelfTestNear(BlendBreakoutScore(b, false), 1.0,
+                "breakout blend: a candle-less maximum reaches 1.00");
+
+   b.candle_measured = true;
+   b.close_location_score = 1.0;
+   b.body_quality_score = 1.0;
+   SelfTestNear(BlendBreakoutScore(b, true), 1.0,
+                "breakout blend: a flawless measured candle still reaches 1.00 (F-012)");
+
+   b.wick_rejection_penalty = 1.0;
+   SelfTestNear(BlendBreakoutScore(b, true), 0.80 / 0.95,
+                "breakout blend: a full rejection wick costs 0.15 of the 0.95 positive weight");
+
+   SelfTestGroup("breakout blend", before);
+}
+
+// The alert group's identity, which is the whole of F-013: two timeframes of one symbol
+// moving the same way are one event and must share a group, while the opposite direction
+// is a different claim about the market and must not. Pinned here because the grouping is
+// what decides which signals reach the operator.
+void SelfTestAlertGroupIdentity()
+{
+   int before = g_selftest_failed;
+
+   SelfTestCheck(OwnAlertGroup("EURUSD", DIR_UP) == OwnAlertGroup("EURUSD", DIR_UP),
+                 "alert group: the same symbol and direction share one group (F-013)");
+
+   SelfTestCheck(OwnAlertGroup("EURUSD", DIR_UP) != OwnAlertGroup("EURUSD", DIR_DOWN),
+                 "alert group: opposite directions on one symbol do not share a group");
+
+   SelfTestCheck(OwnAlertGroup("EURUSD", DIR_UP) != OwnAlertGroup("GBPUSD", DIR_UP),
+                 "alert group: two symbols do not share a group");
+
+   SelfTestCheck(StringFind(OwnAlertGroup("EURUSD", DIR_UP), "EURUSD") == 0,
+                 "alert group: the fallback id names the symbol it belongs to");
+
+   SelfTestGroup("alert group", before);
+}
+
+// The ATR definition, undocumented until F-044: a SIMPLE mean of the last `period` true ranges,
+// not Wilder smoothing, which is what MT5's own ATR indicator plots. The numbers below are
+// chosen so the two definitions disagree (simple 7.667 against Wilder 8.667), so this fails if
+// a recursive average is ever substituted.
+void SelfTestAtrDefinition()
+{
+   int before = g_selftest_failed;
+
+   HistoricalBar bars[5];
+   for(int i = 0; i < 5; i++)
+   {
+      bars[i].valid = true;
+      bars[i].high = 0.0;
+      bars[i].low = 0.0;
+      bars[i].close = 0.0;
+   }
+
+   // Each true range is measured against the older neighbour's close:
+   //   bar 1: max(10, |100-104|, |90-104|)  = 14
+   //   bar 2: max( 5, |105-100|, |100-100|) =  5
+   //   bar 3: max( 4, |99-98|,  |95-98|)    =  4
+   bars[1].high = 100.0;
+   bars[1].low = 90.0;
+   bars[2].high = 105.0;
+   bars[2].low = 100.0;
+   bars[2].close = 104.0;
+   bars[3].high = 99.0;
+   bars[3].low = 95.0;
+   bars[3].close = 100.0;
+   bars[4].close = 98.0;
+
+   SelfTestNear(HistoricalATRFromBars(bars, 5, 3), (14.0 + 5.0 + 4.0) / 3.0,
+                "atr definition: the simple mean of the last period true ranges (F-044)");
+
+   SelfTestGroup("atr definition", before);
+}
+
+// The BAR_CLOSE confirmation rule, which no other test could reach because the mode is an
+// input. The first assertion pins the redundancy F-041 reported - the caller has already
+// checked the floor - and the second pins the defence that redundancy represents.
+void SelfTestBarCloseConfirmation()
+{
+   int before = g_selftest_failed;
+
+   SelfTestCheck(BarCloseConfirms(D'2026.09.15 10:00', D'2026.09.15 10:05', 90.0, 50.0),
+                 "bar-close confirmation: a surviving candidate above the floor confirms");
+
+   SelfTestCheck(!BarCloseConfirms(D'2026.09.15 10:00', D'2026.09.15 10:05', 40.0, 50.0),
+                 "bar-close confirmation: a surviving candidate below the floor does not confirm (F-041)");
+
+   SelfTestCheck(!BarCloseConfirms(0, D'2026.09.15 10:05', 90.0, 50.0),
+                 "bar-close confirmation: no candidate bar means no confirmation");
+
+   SelfTestCheck(!BarCloseConfirms(D'2026.09.15 10:00', D'2026.09.15 10:00', 90.0, 50.0),
+                 "bar-close confirmation: the trigger bar must be later than the candidate bar");
+
+   SelfTestGroup("bar-close confirmation", before);
+}
+
+// Alert dispatch and group election, the two areas F-049 names that live behind globals and a
+// chart. Both rules are now pure functions, so the boundaries that decide whether an operator
+// is told about a signal are asserted rather than observed.
+void SelfTestAlertDispatch()
+{
+   int before = g_selftest_failed;
+
+   datetime now = D'2026.09.15 12:00:00';
+   datetime sends[10];
+   for(int i = 0; i < 10; i++)
+      sends[i] = 0;
+
+   // Per-profile spacing: the boundary is inclusive, so exactly MIN_ALERT_INTERVAL_SECONDS is
+   // allowed and one second less is not.
+   SelfTestCheck(AlertRateLimitsAllow(now, now - MIN_ALERT_INTERVAL_SECONDS, sends, 10),
+                 "alert limits: a profile may alert again at exactly the minimum interval (F-049)");
+   SelfTestCheck(!AlertRateLimitsAllow(now, now - MIN_ALERT_INTERVAL_SECONDS + 1, sends, 10),
+                 "alert limits: a profile may not alert one second early");
+   SelfTestCheck(AlertRateLimitsAllow(now, 0, sends, 10),
+                 "alert limits: a profile that has never alerted is allowed");
+
+   // Global window: nine sends in the last minute leave room for a tenth, ten do not.
+   for(int i = 0; i < 9; i++)
+      sends[i] = now - 10;
+   SelfTestCheck(AlertRateLimitsAllow(now, 0, sends, 10),
+                 "alert limits: nine sends in the last minute still allow one more");
+
+   sends[9] = now - 10;
+   SelfTestCheck(!AlertRateLimitsAllow(now, 0, sends, 10),
+                 "alert limits: the tenth send in the last minute blocks the next (F-049)");
+
+   // A slot outside the window must stop counting rather than pinning the cap forever.
+   for(int i = 0; i < 10; i++)
+      sends[i] = now - 61;
+   SelfTestCheck(AlertRateLimitsAllow(now, 0, sends, 10),
+                 "alert limits: sends older than sixty seconds stop counting");
+
+   // Group election: the highest score leads, and a tie keeps the earliest member so the
+   // choice cannot flap between scans.
+   double scores[4];
+   scores[0] = 10.0;
+   scores[1] = 40.0;
+   scores[2] = 20.0;
+   scores[3] = -999999.0;
+   SelfTestCheck(GroupLeaderIndex(scores, 4) == 1,
+                 "group election: the highest scoring member leads (F-049)");
+
+   // A three-way tie at the top, so the assertion is about the tie rule and not about which
+   // of two different scores happens to be larger. The first version of this case lowered
+   // scores[1] to 10 while leaving scores[2] at 20, so it was not a tie at all and the
+   // assertion failed against correct code.
+   scores[1] = 10.0;
+   scores[2] = 10.0;
+   SelfTestCheck(GroupLeaderIndex(scores, 4) == 0,
+                 "group election: a tie keeps the earliest member");
+
+   scores[0] = -999999.0;
+   scores[1] = -999999.0;
+   scores[2] = -999999.0;
+   SelfTestCheck(GroupLeaderIndex(scores, 4) == -1,
+                 "group election: a group with no member has no leader");
+
+   SelfTestGroup("alert dispatch", before);
+}
+
+// Dashboard row objects, which the self-test CAN reach because the harness runs on a real chart.
+// F-049 named dashboard rendering as uncovered and F-051 carries that remainder; this covers the
+// row lifecycle that does not need a running scan - creation, the label budget, and the
+// stale-row deletion whose failure mode is a dashboard that keeps showing rows the current scan
+// no longer produces.
+void SelfTestDashboardRows()
+{
+   int before = g_selftest_failed;
+
+   int row = SIGNAL_FIRST_ROW_INDEX;
+   SetDashboardRow(row, "selftest row one", "tooltip one", clrWhite);
+   SetDashboardRow(row + 1, "selftest row two", "tooltip two", clrWhite);
+   SelfTestCheck(ObjectFind(0, DashboardName(row)) >= 0 &&
+                 ObjectFind(0, DashboardName(row + 1)) >= 0,
+                 "dashboard: writing a row creates its label object (F-051)");
+
+   // The terminal keeps only DASHBOARD_MAX_TEXT_CHARS characters, so no written row may exceed
+   // it whatever the measured width says.
+   string written = ObjectGetString(0, DashboardName(row), OBJPROP_TEXT);
+   SelfTestCheck(StringLen(written) <= DASHBOARD_MAX_TEXT_CHARS,
+                 "dashboard: a written row respects the label character budget (F-051)");
+
+   // Deletion starts AT the row and removes everything above it. An off-by-one here leaves
+   // exactly the row the caller asked to remove on screen.
+   DeleteDashboardRowsFrom(row);
+   SelfTestCheck(ObjectFind(0, DashboardName(row)) < 0,
+                 "dashboard: deleting from a row removes that row (F-051)");
+
+   int survivors = 0;
+   for(int i = row; i < DASHBOARD_MAX_OBJECTS; i++)
+      if(ObjectFind(0, DashboardName(i)) >= 0)
+         survivors++;
+   SelfTestCheck(survivors == 0,
+                 "dashboard: no row above the deletion point survives (F-051)");
+
+   // Leave the chart as it was found: the dashboard is otherwise rebuilt by the next scan, and a
+   // self-test that leaves labels behind would corrupt the diagnostics object count.
+   CleanupDashboardObjects();
+
+   SelfTestGroup("dashboard rows", before);
+}
+
+// The signal-history eviction dwell, named by F-049 and carried into F-051. The rule decides
+// which entry a burst of new signals is allowed to sweep off the chart, so its boundaries are
+// worth asserting rather than observing.
+void SelfTestHistoryEviction()
+{
+   int before = g_selftest_failed;
+
+   SignalHistoryEntry entries[4];
+   datetime now = D'2026.09.15 12:00:00';
+   for(int i = 0; i < 4; i++)
+   {
+      entries[i].used = true;
+      entries[i].local_time = now - 5;
+   }
+
+   // A partly-filled list has room, so the new entry goes to the list's own end and nothing is
+   // evicted - including the empty slot BELOW a used one, which would reorder the list.
+   entries[2].used = false;
+   SelfTestCheck(SignalHistoryEvictionSlot(entries, 4, now, SIGNAL_MESSAGE_MIN_VISIBLE_SECONDS) == 2,
+                 "history eviction: a free slot is used instead of evicting (F-051)");
+
+   entries[2].used = true;
+
+   // Every slot is still within its dwell, so capacity wins and the tail goes.
+   SelfTestCheck(SignalHistoryEvictionSlot(entries, 4, now, SIGNAL_MESSAGE_MIN_VISIBLE_SECONDS) == 3,
+                 "history eviction: with every slot inside its dwell the tail is evicted (F-051)");
+
+   // Realistic ordering matters here: entries are newest-first, so index 0 is the newest and the
+   // highest index is the oldest. The first version of this case gave a middle entry the oldest
+   // timestamp, which no real list can produce, and it failed against correct code.
+   entries[0].local_time = now - 2;
+   entries[1].local_time = now - 5;
+   entries[2].local_time = now - 40;
+   entries[3].local_time = now - 45;
+
+   // The OLDEST entry that has met its dwell is the one evicted, so rows that just appeared are
+   // never the ones swept away.
+   SelfTestCheck(SignalHistoryEvictionSlot(entries, 4, now, SIGNAL_MESSAGE_MIN_VISIBLE_SECONDS) == 3,
+                 "history eviction: the oldest entry that has met its dwell is evicted (F-051)");
+
+   // The boundary is inclusive: exactly the dwell qualifies and one second short does not, so the
+   // scan falls through to the next-oldest qualifying entry.
+   entries[2].local_time = now - SIGNAL_MESSAGE_MIN_VISIBLE_SECONDS;
+   entries[3].local_time = now - SIGNAL_MESSAGE_MIN_VISIBLE_SECONDS + 1;
+   SelfTestCheck(SignalHistoryEvictionSlot(entries, 4, now, SIGNAL_MESSAGE_MIN_VISIBLE_SECONDS) == 2,
+                 "history eviction: exactly the dwell qualifies and one second short does not");
+
+   SelfTestGroup("history eviction", before);
+}
+
+// One case per guard block in ValidateInputsCore, because the validation only ran at
+// OnInit and nothing could reach its rejection paths: the inputs are read-only, so
+// before the extraction no test could make one fail. Baseline first, then each field
+// perturbed out of range on its own, so a guard that quietly disappears is caught.
+void SelfTestInputValidation()
+{
+   int before = g_selftest_failed;
+
+   string reason = "";
+   ValidationInputs base = CurrentValidationInputs();
+   SelfTestCheck(ValidateInputsCore(base, reason),
+                 "input validation: the configured inputs are accepted");
+
+   ValidationInputs p = base;
+   p.scan_interval_seconds = 0;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: a non-positive scan interval is rejected");
+
+   p = base;
+   p.max_quote_age_seconds = MAX_QUOTE_AGE_SECONDS + 1;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: a quote age above the ceiling is rejected (F-017)");
+
+   p = base;
+   p.min_display_confidence = 0.5;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: a sub-1 display confidence is rejected");
+
+   p = base;
+   p.atr_period = 1;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: an ATR period below two is rejected");
+
+   p = base;
+   p.max_spread_pips = 0.0;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: a non-positive spread filter is rejected");
+
+   p = base;
+   p.failed_signal_cooldown_seconds = 0;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: a non-positive cooldown is rejected");
+
+   p = base;
+   p.max_spread_to_atr_ratio = 0.0;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: a non-positive execution gate is rejected");
+
+   p = base;
+   p.full_hold_score_seconds = MAX_FULL_HOLD_SCORE_SECONDS + 1;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: a hold requirement above the ceiling is rejected (F-017)");
+
+   p = base;
+   p.min_basket_agreement_for_high_score = 0.0;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: a basket floor at the score floor is rejected");
+
+   p = base;
+   p.m5_reject_atr = M5_CONTEXT_FULL_ATR;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: a reject level at the ramp ceiling is rejected");
+
+   p = base;
+   p.tick_rate_baseline_per_sec = 0.0;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: a non-positive tick calibration is rejected");
+
+   p = base;
+   p.calendar_pre_news_block_minutes = MAX_CALENDAR_WINDOW_MINUTES + 1;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: an out-of-range calendar window is rejected");
+
+   p = base;
+   p.ignore_rollover_time = true;
+   p.rollover_start_hour_server = p.rollover_end_hour_server;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: equal rollover hours are rejected while the block is on");
+
+   p = base;
+   p.asia_start_hour_server = 24;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: an hour above 23 is rejected");
+
+   p = base;
+   p.outcome_horizon_minutes2 = p.outcome_horizon_minutes1 - 1;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: unordered outcome horizons are rejected");
+
+   p = base;
+   p.min_baseline_samples = 5;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: too few baseline samples is rejected");
+
+   p = base;
+   p.recent_list_min_score = 0.0;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: a recent-list score below the display floor is rejected");
+
+   p = base;
+   p.max_dashboard_rows = 0;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: a zero dashboard row budget is rejected");
+
+   p = base;
+   p.autotune_min_signals = 1;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: too few autotune signals is rejected");
+
+   SelfTestGroup("input validation", before);
+}
+
+// Whether a historical sample supports the score's own ranking claim. The reports
+// used to assert that claim unconditionally, including on the AUTOTUNE run whose
+// buckets fell the wrong way, so the comparison is now a pure function with a test
+// and the call sites are pinned by tools/contracts.py.
+void SelfTestRankingCheck()
+{
+   int before = g_selftest_failed;
+
+   HistoricalBacktestStats stats;
+
+   // One populated bucket cannot say anything about ordering.
+   ResetHistoricalStats(stats);
+   AddHistoricalBucketStats(stats, 70, 0.25);
+   HistoricalRankingCheck single = EvaluateHistoricalRanking(stats);
+   SelfTestCheck(!single.comparable && !single.supported,
+                 "ranking check: a single populated bucket makes no claim");
+
+   ResetHistoricalStats(stats);
+   HistoricalRankingCheck empty = EvaluateHistoricalRanking(stats);
+   SelfTestCheck(!empty.comparable, "ranking check: no signals make no claim");
+
+   // A rising profile is supported.
+   ResetHistoricalStats(stats);
+   AddHistoricalBucketStats(stats, 60, -0.5);
+   AddHistoricalBucketStats(stats, 80, 0.5);
+   HistoricalRankingCheck rising = EvaluateHistoricalRanking(stats);
+   SelfTestCheck(rising.comparable && rising.supported &&
+                 rising.low_bucket == 60 && rising.high_bucket == 80 &&
+                 rising.compared_pairs == 1 && rising.rising_pairs == 1,
+                 "ranking check: a rising bucket profile is reported as supported");
+
+   // The profile the 2026-09-15 AUTOTUNE run produced: the highest bucket worse
+   // than the lowest, and no adjacent pair improving.
+   ResetHistoricalStats(stats);
+   AddHistoricalBucketStats(stats, 60, 0.5);
+   AddHistoricalBucketStats(stats, 75, 0.1);
+   AddHistoricalBucketStats(stats, 80, -0.5);
+   HistoricalRankingCheck falling = EvaluateHistoricalRanking(stats);
+   SelfTestCheck(falling.comparable && !falling.supported &&
+                 falling.low_bucket == 60 && falling.high_bucket == 80 &&
+                 falling.compared_pairs == 2 && falling.rising_pairs == 0,
+                 "ranking check: a falling bucket profile is reported as unsupported");
+
+   SelfTestGroup("ranking check", before);
 }
 
 // The historical engine on a synthetic minute series with a known shape and
@@ -1719,6 +2856,23 @@ void RunSelfTest()
    SelfTestSymbolsAndTimeframes();
    SelfTestScoringHelpers();
    SelfTestAvailabilityAndComposer();
+   SelfTestSessionBaselines();
+   SelfTestExecutionGate();
+   SelfTestImpulseAvailability();
+   SelfTestBreakoutHold();
+   SelfTestExhaustionAvailability();
+   SelfTestComposerEngineGating();
+   SelfTestSignalLifecycle();
+   SelfTestHistoryRefresh();
+   SelfTestDashboardRows();
+   SelfTestHistoryEviction();
+   SelfTestAlertDispatch();
+   SelfTestAtrDefinition();
+   SelfTestBarCloseConfirmation();
+   SelfTestAlertGroupIdentity();
+   SelfTestBreakoutBlend();
+   SelfTestInputValidation();
+   SelfTestRankingCheck();
    SelfTestHistoricalEngine();
    SelfTestSignalHistory();
 
@@ -1844,9 +2998,11 @@ struct HistoricalBoundaryFeatures
    bool speed_ready[SPEED_WINDOW_COUNT];
    double speed_z_up[SPEED_WINDOW_COUNT];   // signed for DIR_UP; negate for DIR_DOWN
    double acceleration_up;                  // ATR per minute, signed for DIR_UP
+   bool acceleration_available;             // both the 5- and the 30-minute window exist
    bool tick_volume_available;
    double tick_volume_z;
    double move5_atr_up;                     // five-minute close move in ATR, signed for DIR_UP
+   bool continuation_available;             // the 5-minute window exists
    bool m5_available;
    double m5_move_up;                       // last closed 5-minute bar move / ATR5
    bool m15_available;
@@ -2125,11 +3281,36 @@ int LoadHistoricalM1Rates(const string symbol, MqlRates &rates[])
       last_closed = TimeCurrent() - 60;
 
    datetime from_time = last_closed - (datetime)HistoricalLookbackDays * 86400;
-   ResetLastError();
    ArraySetAsSeries(rates, false);
-   int copied = CopyRates(symbol, PERIOD_M1, from_time, last_closed, rates);
+
+   // CopyRates starts an on-demand download for an uncached window and returns 0
+   // until it has data, so the first empty result is not a verdict about the
+   // symbol. Treating it as one produced an empty report on a terminal that had
+   // simply not opened the symbol yet. Poll inside a bounded budget, honour
+   // IsStopped so the terminal can still abort, and report a real wait once so a
+   // slow download stays distinguishable from a genuine data gap.
+   uint wait_started = GetTickCount();
+   int copied = 0;
+   for(;;)
+   {
+      ResetLastError();
+      copied = CopyRates(symbol, PERIOD_M1, from_time, last_closed, rates);
+      if(copied > 0)
+         break;
+      if(IsStopped())
+         return 0;
+      if((int)((GetTickCount() - wait_started) / 1000) >= HistoricalHistoryWaitSeconds)
+         break;
+      Sleep(250);
+   }
+
    if(copied <= 0)
       return 0;
+
+   int waited_seconds = (int)((GetTickCount() - wait_started) / 1000);
+   if(waited_seconds >= 2)
+      PrintFormat("FXNews %s: waited %d s for %d M1 bars to download.",
+                  symbol, waited_seconds, ArraySize(rates));
 
    return ArraySize(rates);
 }
@@ -2346,6 +3527,10 @@ bool AggregateHistoricalBarAt(MqlRates &rates[],
 
 // ATR of the scan timeframe from the aggregated bars 1..period, with each
 // bar's true range measured against the previous aggregated bar's close.
+//
+// Same definition as CalculateATRFromRates: a simple mean, not Wilder smoothing (F-044). The
+// historical modes must use the identical definition, or a score produced on history would not
+// describe what the live scanner produces on the same bars.
 double HistoricalATRFromBars(HistoricalBar &bars[], const int bars_available, const int period)
 {
    double total = 0.0;
@@ -2625,8 +3810,14 @@ bool BuildHistoricalBoundaryFeatures(const int profile_index,
    int index30 = HistoricalIndexAtOrBefore(rates, copied, rates[index].time - 1800);
    double move5_pips = (index5 >= 0 ? (rates[index].close - rates[index5].close) / pip_size : 0.0);
    double move30_pips = (index30 >= 0 ? (rates[index].close - rates[index30].close) / pip_size : 0.0);
-   features.move5_atr_up = (index5 >= 0 ? move5_pips / features.atr_pips : 0.0);
-   features.acceleration_up = (index5 >= 0 && index30 >= 0 ?
+   // A window that does not exist is unmeasured, not zero: the blend must drop
+   // the term's weight rather than fold a neutral 0 in. Without these flags the
+   // historical validator forced both weights on, which is why its scores were
+   // not comparable with the live scanner's on thin history.
+   features.continuation_available = (index5 >= 0);
+   features.acceleration_available = (index5 >= 0 && index30 >= 0);
+   features.move5_atr_up = (features.continuation_available ? move5_pips / features.atr_pips : 0.0);
+   features.acceleration_up = (features.acceleration_available ?
                                (move5_pips / 5.0 - move30_pips / 30.0) / features.atr_pips : 0.0);
 
    features.tick_volume_available = HistoricalTickVolumeZ(bars, bars_needed, features.tick_volume_z);
@@ -2662,10 +3853,7 @@ void ScoreHistoricalBoundary(const HistoricalBoundaryFeatures &features,
    score.execution.spread_z = features.spread_z;
    score.execution.cost_to_atr = features.cost_to_atr;
    if(features.rollover ||
-      features.spread_pips <= 0.0 || features.spread_pips > MaxSpreadPips ||
-      (features.median_available && features.spread_ratio > MaxSpreadMedianMultiplier) ||
-      features.cost_to_atr > params.max_spread_to_atr ||
-      (UseStrictExecutionGate && features.spread_z_available && features.spread_z > MaxSpreadZScore))
+      ExecutionSpreadBlock(score.execution, params.max_spread_to_atr, UseStrictExecutionGate) != BLOCK_NONE)
    {
       return;
    }
@@ -2724,8 +3912,11 @@ void ScoreHistoricalBoundary(const HistoricalBoundaryFeatures &features,
          score.impulse.tick_volume_z = features.tick_volume_z;
          double move5 = features.move5_atr_up * (double)direction;
          double continuation = SmoothStep(0.0, 0.80, move5);
-         score.impulse.exhaustion_penalty = SmoothStep(MaxExhaustionAtr, MaxExhaustionAtr * 1.70, move5);
-         BlendImpulseScore(score.impulse, speed_score, true, true, continuation);
+         score.impulse.exhaustion_available = features.continuation_available;
+         score.impulse.exhaustion_penalty = (features.continuation_available ?
+                                             SmoothStep(MaxExhaustionAtr, MaxExhaustionAtr * 1.70, move5) : 0.0);
+         BlendImpulseScore(score.impulse, speed_score,
+                           features.acceleration_available, features.continuation_available, continuation);
          score.impulse.pass = (speed_max >= params.minute_impulse_z || score.impulse.atr_expansion_score >= 0.45);
       }
    }
@@ -3026,6 +4217,108 @@ void AddHistoricalCoverageLines(const HistoricalBacktestStats &stats)
                                         stats.spread_from_median,
                                         stats.spread_from_symbol,
                                         stats.spread_unavailable));
+   // Two composite caps cannot bind in a historical run, so the reported score
+   // distribution must not be read as the live one. Hold is not resolvable below
+   // the scan timeframe and intra-bar re-entry is not tracked, so hold_score is
+   // saturated at 1.0 and fakeout_penalty is always 0; weak_hold_cap (:4984) and
+   // range_snapback_cap (:4988) are therefore inert here while both are active
+   // live. Disclosed rather than silently differing.
+   AddHistoricalReportLine("Model limits: hold below the scan timeframe is not resolvable and intra-bar");
+   AddHistoricalReportLine("  re-entry is not tracked, so hold_score saturates and fakeout_penalty is 0;");
+   AddHistoricalReportLine("  weak_hold_cap and range_snapback_cap cannot bind here, unlike a live scan.");
+}
+
+// The outcome of comparing the populated score buckets. Pure over the stats so the
+// self-test can assert it without capturing report text.
+struct HistoricalRankingCheck
+{
+   bool comparable;      // at least two buckets hold signals
+   int low_bucket;       // floor of the lowest populated bucket
+   int high_bucket;      // floor of the highest populated bucket
+   double low_R;
+   double high_R;
+   int rising_pairs;     // adjacent populated pairs whose average R improved
+   int compared_pairs;
+   bool supported;       // the highest populated bucket beat the lowest
+};
+
+HistoricalRankingCheck EvaluateHistoricalRanking(const HistoricalBacktestStats &stats)
+{
+   HistoricalRankingCheck check;
+   check.comparable = false;
+   check.low_bucket = 0;
+   check.high_bucket = 0;
+   check.low_R = 0.0;
+   check.high_R = 0.0;
+   check.rising_pairs = 0;
+   check.compared_pairs = 0;
+   check.supported = false;
+
+   int floor_of[6];
+   int counts[6];
+   double sums[6];
+   floor_of[0] = 60;  counts[0] = stats.bucket60_count;  sums[0] = stats.bucket60_R;
+   floor_of[1] = 65;  counts[1] = stats.bucket65_count;  sums[1] = stats.bucket65_R;
+   floor_of[2] = 70;  counts[2] = stats.bucket70_count;  sums[2] = stats.bucket70_R;
+   floor_of[3] = 75;  counts[3] = stats.bucket75_count;  sums[3] = stats.bucket75_R;
+   floor_of[4] = 80;  counts[4] = stats.bucket80_count;  sums[4] = stats.bucket80_R;
+   floor_of[5] = 85;  counts[5] = stats.bucket85_count;  sums[5] = stats.bucket85_R;
+
+   int low_index = -1;
+   int high_index = -1;
+   for(int i = 0; i < 6; i++)
+   {
+      if(counts[i] <= 0)
+         continue;
+      if(low_index < 0)
+         low_index = i;
+      if(high_index >= 0)
+      {
+         check.compared_pairs++;
+         if(sums[i] / (double)counts[i] > sums[high_index] / (double)counts[high_index])
+            check.rising_pairs++;
+      }
+      high_index = i;
+   }
+
+   if(low_index < 0 || low_index == high_index)
+      return check;
+
+   check.comparable = true;
+   check.low_bucket = floor_of[low_index];
+   check.high_bucket = floor_of[high_index];
+   check.low_R = sums[low_index] / (double)counts[low_index];
+   check.high_R = sums[high_index] / (double)counts[high_index];
+   check.supported = (check.high_R > check.low_R);
+   return check;
+}
+
+// The reports claim that a useful score ranks outcomes, and the Autotune report
+// then recommends settings on the strength of that ordering. Both used to print the
+// claim whether or not it held, so an operator reading the tail of the Journal could
+// act on a recommendation the sample did not support. This states the outcome.
+void AddHistoricalRankingVerdict(const HistoricalBacktestStats &stats)
+{
+   HistoricalRankingCheck check = EvaluateHistoricalRanking(stats);
+   if(!check.comparable)
+   {
+      AddHistoricalReportLine("Ranking check: fewer than two buckets hold signals, so this sample makes no claim about how the score ranks outcomes.");
+      return;
+   }
+
+   if(check.supported)
+   {
+      AddHistoricalReportLine(StringFormat("Ranking check: supported here - the highest populated bucket (%d+) averaged %+.3f R against %+.3f R in the lowest (%d+), with %d of %d adjacent pairs improving.",
+                                           check.high_bucket, check.high_R, check.low_R, check.low_bucket,
+                                           check.rising_pairs, check.compared_pairs));
+      return;
+   }
+
+   // The sentence an operator must not have to infer.
+   AddHistoricalReportLine(StringFormat("Ranking check: NOT SUPPORTED on this sample - the highest populated bucket (%d+) averaged %+.3f R against %+.3f R in the lowest (%d+), and only %d of %d adjacent pairs improved.",
+                                        check.high_bucket, check.high_R, check.low_R, check.low_bucket,
+                                        check.rising_pairs, check.compared_pairs));
+   AddHistoricalReportLine("  Higher scores did not produce better outcomes here, so this sample shows no ranking edge. Treat any recommendation below as unvalidated and check it on a separate holdout before entering settings.");
 }
 
 void AddHistoricalBucketLines(const string title, const HistoricalBacktestStats &stats)
@@ -3037,6 +4330,12 @@ void AddHistoricalBucketLines(const string title, const HistoricalBacktestStats 
    AddHistoricalReportLine(FormatHistoricalBucketLine("75-79", stats.bucket75_count, stats.bucket75_R));
    AddHistoricalReportLine(FormatHistoricalBucketLine("80-84", stats.bucket80_count, stats.bucket80_R));
    AddHistoricalReportLine(FormatHistoricalBucketLine("85+  ", stats.bucket85_count, stats.bucket85_R));
+   // The 85+ row is structurally empty rather than merely unpopulated: without a basket reading
+   // the composite caps at 84, and the historical engine has no basket data, so no boundary can
+   // ever land here. Printed so the zero row is not read as "the score never reached its top
+   // band on this sample" when it is unreachable by construction (F-010).
+   if(stats.bucket85_count <= 0)
+      AddHistoricalReportLine("  85+ is unreachable in historical mode: the model caps at 84 without a basket reading, so this row is structurally empty, not a gap in the sample.");
 }
 
 string FormatHistoricalParams(const HistoricalParams &params)
@@ -3077,8 +4376,9 @@ void BuildValidationReport(const HistoricalBacktestStats &stats, const Historica
                                         AverageStopScore(stats),
                                         ScoreEdge(stats)));
    AddHistoricalBucketLines("Buckets by displayed score: count | avg 30m R", stats);
+   AddHistoricalRankingVerdict(stats);
    AddHistoricalReportLine("Model: the live composer over bar features; no basket, calendar or tick data, so scores are capped at 84 like a live instance without a basket reading. Minute-scale impulse windows use their own threshold.");
-   AddHistoricalReportLine("Interpretation: score is a ranking metric. A useful score should show better R/PF in higher buckets.");
+   AddHistoricalReportLine("Interpretation: the score is an event-quality ranking, not a probability or a trade instruction. Whether this sample supports that ranking is stated by the ranking check above, not assumed here.");
    PrintHistoricalReportToJournal();
    SetHistoricalReadyMessage("VALIDATION");
 }
@@ -3140,6 +4440,9 @@ void BuildAutotuneReport(const HistoricalBacktestStats &default_stats,
    }
    AddHistoricalReportLine("Current settings baseline: " + FormatHistoricalParams(default_params));
    AddHistoricalBucketLines("Best score buckets: count | avg 30m R", best_stats);
+   // The recommendation above rests on the score ranking outcomes, so the ranking
+   // is checked and reported before the closing "no runtime change" line.
+   AddHistoricalRankingVerdict(best_stats);
    AddHistoricalReportLine(recommend ?
                            "Applied: no runtime change; review the recommendation with an external holdout before editing inputs." :
                            "Applied: no runtime change; no recommendation was produced.");
@@ -3317,7 +4620,7 @@ void UpdateHistoricalReportDashboard()
    for(int line = 0; line < lines && row < DASHBOARD_MAX_OBJECTS; line++)
    {
       string text = g_historical_report_lines[line];
-      int count = WrapLabelText(text, pieces);
+      int count = WrapLabelText(text, pieces, DashboardTextLimit());
       for(int piece = 0; piece < count && row < DASHBOARD_MAX_OBJECTS; piece++)
       {
          SetDashboardRow(row, pieces[piece], text, (line == 0 ? StatusLineColor() : clrWhite));
@@ -3619,7 +4922,9 @@ void ResetProfile(SymbolProfile &profile,
    profile.session_spread_z = 0.0;
    profile.session_tick_rate_z = 0.0;
    profile.session_tick_volume_z = 0.0;
-   profile.session_baseline_ready = false;
+   profile.session_spread_z_ready = false;
+   profile.session_tick_rate_z_ready = false;
+   profile.session_tick_volume_z_ready = false;
    profile.session_index = SESSION_OTHER;
    profile.tick_quality_available = false;
    profile.tick_sample_quality_score = 0.0;
@@ -3660,6 +4965,7 @@ void ResetProfile(SymbolProfile &profile,
    profile.speed_30s_pips = 0.0;
    profile.speed_60s_pips = 0.0;
    profile.movement_5m_pips = 0.0;
+   profile.has_movement_5m = false;
    profile.has_m5_move = false;
    profile.has_m15_move = false;
    profile.m5_move_atr = 0.0;
@@ -4045,7 +5351,9 @@ void ClearProfileHistory(const int index)
       int baseline_index = BaselineIndex(index, session);
       if(baseline_index < 0 || baseline_index >= ArraySize(g_session_baselines))
          continue;
-      g_session_baselines[baseline_index].sample_count = 0;
+      g_session_baselines[baseline_index].spread_samples = 0;
+      g_session_baselines[baseline_index].tick_rate_samples = 0;
+      g_session_baselines[baseline_index].tick_volume_samples = 0;
       g_session_baselines[baseline_index].spread_mean = 0.0;
       g_session_baselines[baseline_index].spread_var = 0.0;
       g_session_baselines[baseline_index].tick_rate_mean = 0.0;
@@ -4053,7 +5361,9 @@ void ClearProfileHistory(const int index)
       g_session_baselines[baseline_index].tick_volume_mean = 0.0;
       g_session_baselines[baseline_index].tick_volume_var = 0.0;
    }
-   g_profiles[index].session_baseline_ready = false;
+   g_profiles[index].session_spread_z_ready = false;
+   g_profiles[index].session_tick_rate_z_ready = false;
+   g_profiles[index].session_tick_volume_z_ready = false;
    g_profiles[index].session_spread_z = 0.0;
    g_profiles[index].session_tick_rate_z = 0.0;
    g_profiles[index].session_tick_volume_z = 0.0;
@@ -4262,10 +5572,13 @@ void UpdateRatesData(const int index)
    ResetLastError();
    int need_m1 = IntMax(ATRPeriod + 10, 40);
    int copied_m1 = CopyRates(symbol, PERIOD_M1, 0, need_m1, g_rates_m1);
-   if(copied_m1 > 5)
-      g_profiles[index].movement_5m_pips = (g_profiles[index].mid - g_rates_m1[5].close) / g_profiles[index].pip_size;
-   else
-      g_profiles[index].movement_5m_pips = 0.0;
+   // The value and its availability flag are set together: a failed copy used to
+   // leave a 0.0 that three consumers read as "no five-minute move" rather than as
+   // "no reading", which flattered exhaustion and basket agreement.
+   g_profiles[index].has_movement_5m = (copied_m1 > 5 && g_profiles[index].pip_size > 0.0);
+   g_profiles[index].movement_5m_pips = (g_profiles[index].has_movement_5m ?
+                                         (g_profiles[index].mid - g_rates_m1[5].close) / g_profiles[index].pip_size :
+                                         0.0);
 
    g_profiles[index].m1_atr_pips = 0.0;
    if(g_profiles[index].is_first_profile_for_symbol && g_profiles[index].pip_size > 0.0)
@@ -4353,6 +5666,7 @@ int FindFreshContextProfile(const int index)
 void CopyContextRatesData(const int target_index, const int source_index)
 {
    g_profiles[target_index].movement_5m_pips = g_profiles[source_index].movement_5m_pips;
+   g_profiles[target_index].has_movement_5m = g_profiles[source_index].has_movement_5m;
    g_profiles[target_index].has_m5 = g_profiles[source_index].has_m5;
    g_profiles[target_index].atr_m5 = g_profiles[source_index].atr_m5;
    g_profiles[target_index].has_m5_move = g_profiles[source_index].has_m5_move;
@@ -4398,6 +5712,13 @@ void BuildRangeBox(const int index, MqlRates &rates[], const int copied)
    g_profiles[index].range_anchor_bar_time = rates[0].time;
 }
 
+// ATR definition: the simple arithmetic mean of the true ranges of the last `period` closed
+// bars, where true range is max(high-low, |high-prev_close|, |low-prev_close|). This is NOT
+// Wilder smoothing, so it does not match the ATR that MT5's own ATR indicator plots, and the
+// two will disagree on a chart. The live and historical paths here use the same definition as
+// each other (CalculateATRFromRates and HistoricalATRFromBars), which is what matters for
+// consistency between the live scanner and the historical modes. Filed as F-044 because the
+// definition was nowhere written down; the self-test group "atr definition" pins it.
 double CalculateATRFromRates(MqlRates &rates[], const int copied, const int period)
 {
    if(copied <= period + 1 || period <= 0)
@@ -4441,7 +5762,9 @@ void ResetSessionBaselines()
 {
    for(int i = 0; i < ArraySize(g_session_baselines); i++)
    {
-      g_session_baselines[i].sample_count = 0;
+      g_session_baselines[i].spread_samples = 0;
+      g_session_baselines[i].tick_rate_samples = 0;
+      g_session_baselines[i].tick_volume_samples = 0;
       g_session_baselines[i].spread_mean = 0.0;
       g_session_baselines[i].spread_var = 0.0;
       g_session_baselines[i].tick_rate_mean = 0.0;
@@ -4465,43 +5788,57 @@ void UpdateSessionBaseline(const int index)
       return;
 
    SessionBaseline baseline = g_session_baselines[baseline_index];
-   double tick_volume = g_profiles[index].active_trigger_tick_volume;
    bool tick_rate_known = g_profiles[index].tick_rate_available;
+   // The projected bar volume only exists once the trigger timeframe has data.
+   // Folding the initial or a stale value in would poison the tick-volume
+   // baseline exactly as folding an unknown tick rate in as zero would, so both
+   // series carry the same guard and each carries its own sample count.
+   bool tick_volume_known = g_profiles[index].has_trigger;
+   double tick_volume = g_profiles[index].active_trigger_tick_volume;
 
-   // Readiness is taken from the baseline the z-scores are actually measured
-   // against, and assigned once. Reading it from the post-update count meant that
-   // on the sample where the count crossed the threshold the flag went true while
-   // the z-scores still held the previous scan's values. Zeroing on the not-ready
-   // path also stops a new session bucket inheriting the previous bucket's scores.
-   bool baseline_ready = (baseline.sample_count >= MinBaselineSamples);
-   g_profiles[index].session_baseline_ready = baseline_ready;
-   if(!baseline_ready)
-   {
-      g_profiles[index].session_spread_z = 0.0;
-      g_profiles[index].session_tick_rate_z = 0.0;
-      g_profiles[index].session_tick_volume_z = 0.0;
-   }
-   else
-   {
-      g_profiles[index].session_spread_z = BaselineZ(g_profiles[index].spread_pips,
-                                                      baseline.spread_mean,
-                                                      baseline.spread_var);
-      g_profiles[index].session_tick_rate_z = (tick_rate_known ?
-                                               BaselineZ(g_profiles[index].tick_rate_per_sec,
-                                                         baseline.tick_rate_mean,
-                                                         baseline.tick_rate_var) : 0.0);
-      g_profiles[index].session_tick_volume_z = BaselineZ(tick_volume,
-                                                           baseline.tick_volume_mean,
-                                                           baseline.tick_volume_var);
-   }
+   // Readiness is taken per series from the baseline that series' z-score is
+   // actually measured against, and assigned before the update, so on the sample
+   // that crosses the threshold the flag and the z-score agree. One shared flag
+   // published a measured-looking 0 for a series that had never contributed a
+   // sample. Zeroing on the not-ready path also stops a new session bucket
+   // inheriting the previous bucket's scores.
+   bool spread_ready = (baseline.spread_samples >= MinBaselineSamples);
+   bool tick_rate_ready = (tick_rate_known && baseline.tick_rate_samples >= MinBaselineSamples);
+   bool tick_volume_ready = (tick_volume_known && baseline.tick_volume_samples >= MinBaselineSamples);
+   g_profiles[index].session_spread_z_ready = spread_ready;
+   g_profiles[index].session_tick_rate_z_ready = tick_rate_ready;
+   g_profiles[index].session_tick_volume_z_ready = tick_volume_ready;
 
-   UpdateRollingMeanVar(baseline.spread_mean, baseline.spread_var, baseline.sample_count, g_profiles[index].spread_pips);
-   // An unmeasured tick rate must not be folded into the baseline as zero.
+   g_profiles[index].session_spread_z = (spread_ready ?
+                                         BaselineZ(g_profiles[index].spread_pips,
+                                                   baseline.spread_mean,
+                                                   baseline.spread_var) : 0.0);
+   g_profiles[index].session_tick_rate_z = (tick_rate_ready ?
+                                            BaselineZ(g_profiles[index].tick_rate_per_sec,
+                                                      baseline.tick_rate_mean,
+                                                      baseline.tick_rate_var) : 0.0);
+   g_profiles[index].session_tick_volume_z = (tick_volume_ready ?
+                                              BaselineZ(tick_volume,
+                                                        baseline.tick_volume_mean,
+                                                        baseline.tick_volume_var) : 0.0);
+
+   UpdateRollingMeanVar(baseline.spread_mean, baseline.spread_var, baseline.spread_samples, g_profiles[index].spread_pips);
+   if(baseline.spread_samples < BaselineLookbackSamples)
+      baseline.spread_samples++;
+   // An unmeasured tick rate or tick volume must not be folded into the baseline
+   // as zero, and must not advance the other series' counters either.
    if(tick_rate_known)
-      UpdateRollingMeanVar(baseline.tick_rate_mean, baseline.tick_rate_var, baseline.sample_count, g_profiles[index].tick_rate_per_sec);
-   UpdateRollingMeanVar(baseline.tick_volume_mean, baseline.tick_volume_var, baseline.sample_count, tick_volume);
-   if(baseline.sample_count < BaselineLookbackSamples)
-      baseline.sample_count++;
+   {
+      UpdateRollingMeanVar(baseline.tick_rate_mean, baseline.tick_rate_var, baseline.tick_rate_samples, g_profiles[index].tick_rate_per_sec);
+      if(baseline.tick_rate_samples < BaselineLookbackSamples)
+         baseline.tick_rate_samples++;
+   }
+   if(tick_volume_known)
+   {
+      UpdateRollingMeanVar(baseline.tick_volume_mean, baseline.tick_volume_var, baseline.tick_volume_samples, tick_volume);
+      if(baseline.tick_volume_samples < BaselineLookbackSamples)
+         baseline.tick_volume_samples++;
+   }
 
    g_session_baselines[baseline_index] = baseline;
 }
@@ -4701,8 +6038,17 @@ void CalculateCurrencyStrength()
       double atr_pips = MathMax(g_profiles[i].m1_atr_pips, 0.1);
       double n30 = Clamp(g_profiles[i].speed_30s_pips / (atr_pips * 0.35), -1.5, 1.5);
       double n60 = Clamp(g_profiles[i].speed_60s_pips / (atr_pips * 0.55), -1.5, 1.5);
-      double n5m = Clamp(g_profiles[i].movement_5m_pips / (atr_pips * 1.50), -1.5, 1.5);
-      double pair_strength = n30 * 0.45 + n60 * 0.25 + n5m * 0.30;
+      // The five-minute term leaves the normaliser when its M1 copy failed, rather
+      // than contributing a zero that reads as "no move" and drags the pair's
+      // strength toward the 30 s and 60 s speeds alone.
+      double pair_strength = n30 * 0.45 + n60 * 0.25;
+      double strength_weight = 0.45 + 0.25;
+      if(g_profiles[i].has_movement_5m)
+      {
+         pair_strength += Clamp(g_profiles[i].movement_5m_pips / (atr_pips * 1.50), -1.5, 1.5) * 0.30;
+         strength_weight += 0.30;
+      }
+      pair_strength /= strength_weight;
       double weight = 1.0;
       if(UseRobustCurrencyStrength)
       {
@@ -4797,7 +6143,7 @@ void ResetCompositeSignalScore(CompositeSignalScore &score)
    score.impulse.tick_volume_available = false;
    score.impulse.tick_volume_z = 0.0;
    score.impulse.exhaustion_penalty = 0.0;
-   score.impulse.tick_quality_available = false;
+   score.impulse.exhaustion_available = false;
    score.impulse.tick_sample_quality_score = 0.0;
    score.impulse.tick_state = "TICK_SYNCING";
 
@@ -4945,6 +6291,13 @@ void ComposeSignalScore(CompositeSignalScore &score, const CompositeContext &con
 
    double total_weight = breakout_weight + impulse_weight + execution_weight +
                          flow_weight + regime_weight + calendar_weight;
+   // Unreachable, and deliberately kept rather than deleted. execution_weight (0.18) and
+   // regime_weight (0.14) are unconditional literals, so this sum is at least 0.32 and can
+   // never be zero; the composer's "all optional components unmeasured" assertions cover
+   // that minimal case. It is not removed because deletion would trade a silent rescale for
+   // a silent divide-by-zero if a later edit made both weights conditional, and the fallback
+   // is the only thing standing between that edit and a fabricated maximum score (F-038).
+   // There is no observable test for this branch precisely because it cannot be taken.
    if(total_weight <= 0.0)
       total_weight = 1.0;
 
@@ -4955,7 +6308,16 @@ void ComposeSignalScore(CompositeSignalScore &score, const CompositeContext &con
                    score.regime.score * regime_weight +
                    score.calendar.score * calendar_weight) / total_weight;
 
-   if(score.breakout.score >= 0.45 && score.impulse.score >= 0.45)
+   // The synergy bonus rewards two engines agreeing. It used to be granted on two
+   // non-zero scores, so a stale score in an unmeasured component could earn it,
+   // and a disabled engine could never earn it because its score stays 0. Require
+   // each engine to be enabled and actually measured: with one engine there is no
+   // second opinion to agree with, so there is no synergy to reward.
+   bool breakout_confirms = (UseTechnicalBreakoutEngine && score.breakout.measured &&
+                             score.breakout.score >= 0.45);
+   bool impulse_confirms = (UseImpulseBreakoutEngine && score.impulse.measured &&
+                            score.impulse.score >= 0.45);
+   if(breakout_confirms && impulse_confirms)
       raw01 = Clamp01(raw01 + 0.05);
 
    score.raw_score = 100.0 * SmoothStep(0.35, 0.92, raw01);
@@ -5006,7 +6368,7 @@ void ComposeSignalScore(CompositeSignalScore &score, const CompositeContext &con
       capped = ApplyScoreCap(capped, 72.0, caps, "unsupported_impulse_cap");
    }
 
-   if(score.impulse.exhaustion_penalty >= 0.45)
+   if(score.impulse.exhaustion_available && score.impulse.exhaustion_penalty >= 0.45)
       capped = ApplyScoreCap(capped, 75.0, caps, "overextended_cap");
 
    score.age_free_score = Clamp(capped, 0.0, 100.0);
@@ -5023,9 +6385,19 @@ void ComposeSignalScore(CompositeSignalScore &score, const CompositeContext &con
    if(score.calendar.available && score.calendar.uncertainty_penalty >= 0.35)
       capped = ApplyScoreCap(capped, 88.0, caps, "calendar_uncertainty_cap");
 
+   // The strongest engine reading counts only if that engine was measured and is
+   // enabled: an unmeasured component's leftover score must not be able to satisfy
+   // the single-feature test and so suppress the cap (F-018). At least one engine
+   // is always measured here, because an unmeasured pair returns earlier as
+   // BLOCK_NO_MOVEMENT_DATA.
+   double best_engine_score = 0.0;
+   if(UseTechnicalBreakoutEngine && score.breakout.measured)
+      best_engine_score = MathMax(best_engine_score, score.breakout.score);
+   if(UseImpulseBreakoutEngine && score.impulse.measured)
+      best_engine_score = MathMax(best_engine_score, score.impulse.score);
+
    if(capped > 80.0 &&
-      (score.execution.score < 0.78 ||
-       MathMax(score.breakout.score, score.impulse.score) < ENGINE_CONFIRM_THRESHOLD))
+      (score.execution.score < 0.78 || best_engine_score < ENGINE_CONFIRM_THRESHOLD))
    {
       capped = ApplyScoreCap(capped, 79.0, caps, "single_feature_cap");
    }
@@ -5041,8 +6413,11 @@ void ComposeSignalScore(CompositeSignalScore &score, const CompositeContext &con
       capped = ApplyScoreCap(capped, 89.0, caps, "elite_score_cap");
    }
 
-   if(capped > 95.0)
-      capped = 95.0;
+   // Recorded through ApplyScoreCap like every other ceiling. This was the one cap that
+   // clamped the score without adding a reason, so a score sitting at exactly 95 explained
+   // itself to the operator as nothing at all (F-040). ApplyScoreCap only appends when the
+   // cap actually binds, so scores below it are unaffected.
+   capped = ApplyScoreCap(capped, 95.0, caps, "absolute_score_ceiling");
 
    score.displayed_score = Clamp(capped, 0.0, 100.0);
    score.valid = (score.displayed_score > 0.0);
@@ -5110,7 +6485,7 @@ void EvaluateExecutionQuality(const int index, const datetime now, ExecutionQual
    execution.median_spread_pips = (execution.median_available ? g_profiles[index].median_spread_pips : 0.0);
    execution.spread_ratio = (execution.median_available && execution.median_spread_pips > 0.0 ?
                              execution.spread_pips / execution.median_spread_pips : 0.0);
-   bool session_z_ready = (UseSessionAwareBaselines && g_profiles[index].session_baseline_ready);
+   bool session_z_ready = (UseSessionAwareBaselines && g_profiles[index].session_spread_z_ready);
    execution.spread_z_available = (session_z_ready || execution.median_available);
    execution.spread_z = (session_z_ready ? g_profiles[index].session_spread_z :
                          (execution.median_available ? g_profiles[index].spread_z : 0.0));
@@ -5149,8 +6524,7 @@ void EvaluateExecutionQuality(const int index, const datetime now, ExecutionQual
       return;
    }
 
-   if(execution.spread_pips <= 0.0 || execution.spread_pips > MaxSpreadPips ||
-      (execution.median_available && execution.spread_ratio > MaxSpreadMedianMultiplier))
+   if(ExecutionSpreadBlock(execution, MaxSpreadToAtrRatio, UseStrictExecutionGate) != BLOCK_NONE)
    {
       execution.block_reason = BLOCK_BAD_SPREAD;
       return;
@@ -5158,13 +6532,6 @@ void EvaluateExecutionQuality(const int index, const datetime now, ExecutionQual
 
    if(UseStrictExecutionGate)
    {
-      if(execution.cost_to_atr > MaxSpreadToAtrRatio ||
-         (execution.spread_z_available && execution.spread_z > MaxSpreadZScore))
-      {
-         execution.block_reason = BLOCK_BAD_SPREAD;
-         return;
-      }
-
       if(execution.tick_gap_sec > MaxTickGapSeconds)
       {
          execution.block_reason = BLOCK_STALE_QUOTE;
@@ -5174,6 +6541,33 @@ void EvaluateExecutionQuality(const int index, const datetime now, ExecutionQual
 
    execution.score = BlendExecutionScore(execution, MaxSpreadToAtrRatio, true);
    execution.pass = true;
+}
+
+// The spread, cost-to-ATR and spread-z ceilings as one predicate over the terms
+// that bar history can also measure. The live scanner and the historical
+// validator both call it, so the UseStrictExecutionGate switch cannot drift
+// between the strategy that runs live and the strategy the reports describe:
+// the validator used to apply the cost-to-ATR ceiling unconditionally, which
+// rejected boundaries the live scanner accepts. Returns BLOCK_NONE to accept.
+SignalBlockReason ExecutionSpreadBlock(const ExecutionQuality &execution,
+                                       const double max_spread_to_atr,
+                                       const bool strict)
+{
+   if(execution.spread_pips <= 0.0 || execution.spread_pips > MaxSpreadPips ||
+      (execution.median_available && execution.spread_ratio > MaxSpreadMedianMultiplier))
+   {
+      return BLOCK_BAD_SPREAD;
+   }
+
+   if(!strict)
+      return BLOCK_NONE;
+
+   if(execution.cost_to_atr > max_spread_to_atr)
+      return BLOCK_BAD_SPREAD;
+   if(execution.spread_z_available && execution.spread_z > MaxSpreadZScore)
+      return BLOCK_BAD_SPREAD;
+
+   return BLOCK_NONE;
 }
 
 // Execution quality from the measured terms only. The quote-age and tick-gap
@@ -5203,6 +6597,32 @@ double BlendExecutionScore(const ExecutionQuality &execution,
       weighted += (1.0 - SmoothStep(MaxTickGapSeconds * 0.45, MaxTickGapSeconds,
                                     execution.tick_gap_sec)) * 0.12;
       total_weight += 0.24;
+   }
+   return Clamp01(weighted / total_weight);
+}
+
+// The weighted sum over the breakout sub-scores. Extracted from EvaluateBreakoutStructure
+// so the self-test can pin its ceiling behaviour without market data.
+//
+// The wick penalty is deducted AFTER normalisation, on purpose. Filed as F-012 because
+// the code reads inconsistently - 'weighted -= wick*0.15' next to 'total_weight += 0.17 +
+// 0.17' - and it was re-examined rather than assumed: with the penalty at zero the
+// numerator is 0.95 and the denominator is 0.95, so a flawless candle reaches 1.00 like
+// every other component. Folding 0.15 into total_weight instead would cap this component
+// at 0.95/1.10 = 0.86 for every candle, so the apparent inconsistency is the correct
+// arrangement. A full rejection wick costs 0.15/0.95, about 15.8% of this component.
+double BlendBreakoutScore(const BreakoutStructure &breakout, const bool candle_measured)
+{
+   double weighted = breakout.compression_score * 0.17 +
+                     breakout.distance_score * 0.24 +
+                     breakout.hold_score * 0.20;
+   double total_weight = 0.17 + 0.24 + 0.20;
+   if(candle_measured)
+   {
+      weighted += breakout.close_location_score * 0.17 +
+                  breakout.body_quality_score * 0.17;
+      total_weight += 0.17 + 0.17;
+      weighted -= breakout.wick_rejection_penalty * 0.15;
    }
    return Clamp01(weighted / total_weight);
 }
@@ -5270,7 +6690,23 @@ void ComputeBreakoutStructure(const int direction,
                               const double reentered_seconds,
                               BreakoutStructure &breakout)
 {
+   // Fully initialise the output so this is a pure function of its arguments.
+   // It used to set only 'measured' and rely on every caller having reset the
+   // struct first: MQL5 does not zero the caller's struct, so a direct caller got
+   // whatever the memory held, and the "pure functions shared by the live scanner
+   // and the historical modes" promise in CLAUDE.md was not actually true. The
+   // self-test group "breakout hold" fails against the caller-dependent form.
+   breakout.pass = false;
    breakout.measured = true;
+   breakout.candle_measured = false;
+   breakout.score = 0.0;
+   breakout.compression_score = 0.0;
+   breakout.distance_score = 0.0;
+   breakout.close_location_score = 0.0;
+   breakout.hold_score = 0.0;
+   breakout.body_quality_score = 0.0;
+   breakout.wick_rejection_penalty = 0.0;
+   breakout.fakeout_penalty = 0.0;
 
    double range_atr = range_width / atr;
    double not_dead = SmoothStep(0.65, 1.80, range_atr);
@@ -5307,30 +6743,24 @@ void ComputeBreakoutStructure(const int direction,
       breakout.wick_rejection_penalty = Clamp01(rejection_wick / candle_range);
    }
 
-   if(outside_seconds >= 0.0)
-   {
-      breakout.hold_score = SmoothStep((double)MinHoldSecondsForHighScore,
-                                       (double)FullHoldScoreSeconds,
-                                       outside_seconds);
-   }
+   // A negative outside_seconds means the price is inside the buffered boundary,
+   // which is a measurement of "held outside for zero seconds", not missing data:
+   // UpdateOutsideTimers only reaches its classification when the trigger data
+   // exists, and EvaluateBreakoutStructure requires atr_trigger > 0 to get here.
+   // The zero is therefore weighted deliberately, and the branch is written out in
+   // full so the weight below and the value here are visibly one decision rather
+   // than a default that a future guard change could silently alter.
+   breakout.hold_score = (outside_seconds >= 0.0 ?
+                          SmoothStep((double)MinHoldSecondsForHighScore,
+                                     (double)FullHoldScoreSeconds,
+                                     outside_seconds) : 0.0);
 
    if(reentered_seconds >= 0.0 && reentered_seconds <= 30.0)
       breakout.fakeout_penalty = 1.0 - SmoothStep(0.0, 30.0, reentered_seconds);
 
    // The snapback (fakeout) penalty acts once, through range_snapback_cap in
    // the composite, rather than being subtracted here as well.
-   double weighted = breakout.compression_score * 0.17 +
-                     breakout.distance_score * 0.24 +
-                     breakout.hold_score * 0.20;
-   double total_weight = 0.17 + 0.24 + 0.20;
-   if(breakout.candle_measured)
-   {
-      weighted += breakout.close_location_score * 0.17 +
-                  breakout.body_quality_score * 0.17 -
-                  breakout.wick_rejection_penalty * 0.15;
-      total_weight += 0.17 + 0.17;
-   }
-   breakout.score = Clamp01(weighted / total_weight);
+   breakout.score = BlendBreakoutScore(breakout, breakout.candle_measured);
    breakout.pass = (distance > 0.0 && breakout.score > 0.06);
 }
 
@@ -5415,8 +6845,14 @@ void EvaluateImpulseQuality(const int index,
    bool continuation_available = false;
    double continuation = ContinuationScore(index, direction, continuation_available) / 100.0;
 
-   double extended_atr = DirectionalValue(g_profiles[index].movement_5m_pips, direction) / atr_pips;
-   impulse.exhaustion_penalty = SmoothStep(MaxExhaustionAtr, MaxExhaustionAtr * 1.70, extended_atr);
+   // The overextension reading needs the five-minute move to exist; without it the
+   // penalty is unmeasured, not zero, and cannot be read as "not overextended".
+   impulse.exhaustion_available = g_profiles[index].has_movement_5m;
+   if(impulse.exhaustion_available)
+   {
+      double extended_atr = DirectionalValue(g_profiles[index].movement_5m_pips, direction) / atr_pips;
+      impulse.exhaustion_penalty = SmoothStep(MaxExhaustionAtr, MaxExhaustionAtr * 1.70, extended_atr);
+   }
 
    BlendImpulseScore(impulse, speed_score, acceleration_available, continuation_available, continuation);
    // Sample quality scales the reading only when it was actually measured.
@@ -5913,6 +7349,12 @@ double CalculateBasketAgreement(const int index, const int direction, bool &avai
       if(!relevant)
          continue;
 
+      // An unmeasured five-minute move used to score as a neutral half-agreement
+      // (pair_move 0 lands in the +-0.03 band), which flattered the ratio exactly
+      // when the least was known. Leave the pair out of the normaliser instead.
+      if(!g_profiles[i].has_movement_5m)
+         continue;
+
       double atr_pips = MathMax(g_profiles[i].m1_atr_pips, 0.1);
       double pair_move = Clamp(g_profiles[i].movement_5m_pips / (atr_pips * 1.2), -1.0, 1.0);
       double expected = 0.0;
@@ -6173,6 +7615,26 @@ bool IsActiveState(const BreakoutEventState state)
    return (state == STATE_ACTIVE_CONFIRMED);
 }
 
+// BAR_CLOSE confirmation: the candidate has survived to the close of the next bar and its
+// score still meets the display floor. Pure over its arguments because SignalConfirmationMode
+// is an input variable and a self-test cannot set it, so this is the only way to exercise the
+// branch at all (F-041).
+//
+// The threshold clause is redundant at both current call sites - PickBestDirection has already
+// required MeetsThreshold(best_score, MinDisplayConfidence), and the reversal path requires
+// the stronger StrongAlertConfidence - and it is kept deliberately. It makes the branch mean
+// "still valid at the bar close" on its own terms rather than depending on a caller
+// precondition a future edit could drop, and the self-test below asserts it is enforced.
+bool BarCloseConfirms(const datetime candidate_bar_time,
+                      const datetime trigger_bar_time,
+                      const double score,
+                      const double min_confidence)
+{
+   return (candidate_bar_time > 0 &&
+           trigger_bar_time > candidate_bar_time &&
+           MeetsThreshold(score, min_confidence));
+}
+
 bool IsConfirmedSignal(const int index,
                        const int direction,
                        const double score,
@@ -6182,9 +7644,10 @@ bool IsConfirmedSignal(const int index,
       return true;
    if(SignalConfirmationMode == CONFIRM_BAR_CLOSE)
    {
-      return (g_profiles[index].candidate_bar_time > 0 &&
-              g_profiles[index].trigger_bar_time > g_profiles[index].candidate_bar_time &&
-              MeetsThreshold(score, MinDisplayConfidence));
+      return BarCloseConfirms(g_profiles[index].candidate_bar_time,
+                              g_profiles[index].trigger_bar_time,
+                              score,
+                              MinDisplayConfidence);
    }
 
    double hold = (direction == DIR_UP ?
@@ -6250,6 +7713,25 @@ bool CanDispatchAlert(const int index)
    return g_profiles[index].group_leader_signal;
 }
 
+// The group's leader is the member with the highest sort score, and the FIRST member wins a
+// tie because the comparison is strict. Extracted so the election rule can be tested without
+// profiles or a chart (F-049). Callers mark non-members with a sentinel below any real score
+// rather than leaving their slots at a neutral value a member could lose to.
+int GroupLeaderIndex(const double &scores[], const int count)
+{
+   int leader = -1;
+   double best = -999999.0;
+   for(int i = 0; i < count; i++)
+   {
+      if(scores[i] > best)
+      {
+         best = scores[i];
+         leader = i;
+      }
+   }
+   return leader;
+}
+
 // A signal's group is bound once, when it activates, and kept until it ends.
 // Re-deriving it every scan from the instantaneous basket let membership flap
 // between scans, which released held alerts and re-elected leaders at random.
@@ -6286,24 +7768,24 @@ void UpdateAlertGroups(const datetime now)
       if(already_processed)
          continue;
 
-      int leader = -1;
-      double leader_score = -999999.0;
       int members = 0;
+      int profile_count = ArraySize(g_profiles);
+      double member_scores[];
+      ArrayResize(member_scores, profile_count);
+      for(int j = 0; j < profile_count; j++)
+         member_scores[j] = -999999.0;   // non-members cannot lead
 
-      for(int j = 0; j < ArraySize(g_profiles); j++)
+      for(int j = 0; j < profile_count; j++)
       {
          if(g_profiles[j].correlated_alert_group_id != group_id)
             continue;
          members++;
          int member_direction = g_profiles[j].active_direction;
-         double candidate = DirectionSortScore(j, member_direction,
+         member_scores[j] = DirectionSortScore(j, member_direction,
                                                EventAgeSeconds(j, member_direction, now));
-         if(candidate > leader_score)
-         {
-            leader_score = candidate;
-            leader = j;
-         }
       }
+
+      int leader = GroupLeaderIndex(member_scores, profile_count);
 
       for(int j = 0; j < ArraySize(g_profiles); j++)
       {
@@ -6315,14 +7797,28 @@ void UpdateAlertGroups(const datetime now)
    }
 }
 
+// The fallback group id: one symbol, one direction. Every timeframe of that symbol shares
+// it, which is deliberate - the same pair moving the same way is one event seen at several
+// resolutions, and alerting once per timeframe would be the duplicate-alert problem this
+// grouping exists to solve. UpdateAlertGroups then elects the member with the highest
+// DirectionSortScore as the only one that alerts, so the strongest reading is the one that
+// fires, and the rest carry group_member_count > 1 and show as "(N)" on the dashboard
+// rather than disappearing. Filed as F-013 as a suspected bug on the strength of the old
+// comment, which said a signal without a basket reading "groups only with itself" and was
+// simply wrong about the code.
+string OwnAlertGroup(const string symbol, const int direction)
+{
+   return symbol + "_" + DirectionText(direction);
+}
+
 // Group id of a signal: the currency whose basket flow carries the move, in
 // the direction it flows. Without a basket reading, or when neither currency
-// supports the move, the signal groups only with itself.
+// supports the move, every timeframe of the symbol shares OwnAlertGroup().
 string DominantCurrencyFlow(const int index, const int direction)
 {
    int base = g_profiles[index].base_index;
    int quote = g_profiles[index].quote_index;
-   string own_group = g_profiles[index].symbol + "_" + DirectionText(direction);
+   string own_group = OwnAlertGroup(g_profiles[index].symbol, direction);
    if(!UseCurrencyStrength || base < 0 || quote < 0)
       return own_group;
 
@@ -6598,21 +8094,33 @@ bool SendOptionalAlert(const int index,
 }
 
 // Per-profile spacing plus a sliding one-minute window over the last sends.
-bool AlertRateLimitAllows(const int index, const datetime now)
+//
+// Pure over its inputs so the self-test can exercise the boundaries without a terminal. The
+// global window is a ring of send times, and a slot older than 60 s stops counting rather than
+// being cleared, so a stale slot cannot be mistaken for a recent send (F-049).
+bool AlertRateLimitsAllow(const datetime now,
+                          const datetime last_attempt_time,
+                          const datetime &send_times[],
+                          const int send_count)
 {
-   if(g_profiles[index].last_alert_attempt_time > 0 &&
-      now - g_profiles[index].last_alert_attempt_time < MIN_ALERT_INTERVAL_SECONDS)
-   {
+   if(last_attempt_time > 0 && now - last_attempt_time < MIN_ALERT_INTERVAL_SECONDS)
       return false;
-   }
 
    int recent = 0;
-   for(int i = 0; i < MAX_ALERTS_PER_MINUTE; i++)
+   for(int i = 0; i < send_count; i++)
    {
-      if(g_alert_send_times[i] > 0 && now - g_alert_send_times[i] < 60)
+      if(send_times[i] > 0 && now - send_times[i] < 60)
          recent++;
    }
    return (recent < MAX_ALERTS_PER_MINUTE);
+}
+
+bool AlertRateLimitAllows(const int index, const datetime now)
+{
+   return AlertRateLimitsAllow(now,
+                               g_profiles[index].last_alert_attempt_time,
+                               g_alert_send_times,
+                               MAX_ALERTS_PER_MINUTE);
 }
 
 void RecordAlertSend(const datetime now)
@@ -6726,7 +8234,7 @@ void BuildDiagnosticsLines(string &line1, string &line2)
                         g_average_scan_ms,
                         g_max_scan_ms,
                         BaselineHorizonMinutes(),
-                        CountDashboardObjects(),
+                        g_dashboard_object_count,
                         DASHBOARD_MAX_OBJECTS);
 }
 
@@ -6786,6 +8294,13 @@ void UpdateDashboard()
    int first_row = row;
    int max_row = DashboardSignalRowLimit();
 
+   // Maintain the visible history on every update, not only when it is the thing
+   // being drawn. It backs g_signal_history_dirty, the flag that schedules this whole
+   // function: leaving it unrefreshed while active rows rendered kept the flag set,
+   // so ScanAll rebuilt the entire dashboard on every scan and DisplayUpdateSeconds
+   // had no effect at all.
+   RefreshVisibleSignalHistoryIfDue();
+
    if(ShowActiveSignalRows)
    {
       DashboardSignal signals[];
@@ -6798,10 +8313,9 @@ void UpdateDashboard()
       }
    }
 
-   // With active rows disabled this is the only signal display, so it always runs.
+   // With active rows disabled the history list is the only signal display.
    if(row == first_row)
    {
-      RefreshVisibleSignalHistoryIfDue();
       for(int i = 0; i < g_visible_signal_history_count && row < max_row; i++)
       {
          SetDashboardRow(row, g_visible_signal_history[i].text, g_visible_signal_history[i].reason, clrWhite);
@@ -6810,6 +8324,8 @@ void UpdateDashboard()
    }
 
    DeleteDashboardRowsFrom(row);
+   // Exactly the rows this function just wrote, so the cached count cannot drift.
+   g_dashboard_object_count = CountDashboardObjects();
 
    ChartRedraw(0);
 }
@@ -7221,6 +8737,31 @@ int SignalHistoryScorePercent(const double score)
    return (int)MathRound(Clamp(score, 0.0, 100.0));
 }
 
+// Which slot a new history entry takes. Entries are held newest-first and contiguously from
+// slot 0, so a free slot is the list's own end and means nothing is dropped. Only when every
+// slot is in use is the oldest entry that has met its minimum dwell evicted, and if none has,
+// the tail goes anyway because capacity is a hard bound. Pure so the dwell rule can be tested
+// without a terminal (F-051).
+int SignalHistoryEvictionSlot(const SignalHistoryEntry &entries[],
+                              const int count,
+                              const datetime now,
+                              const int min_visible_seconds)
+{
+   for(int i = 0; i < count; i++)
+   {
+      if(!entries[i].used)
+         return i;
+   }
+
+   for(int i = count - 1; i >= 0; i--)
+   {
+      if(now - entries[i].local_time >= min_visible_seconds)
+         return i;
+   }
+
+   return count - 1;
+}
+
 void PushSignalHistory(const int index,
                        const int direction,
                        const double score,
@@ -7241,22 +8782,21 @@ void PushSignalHistory(const int index,
       return;
    }
 
-   // Entries are held newest-first. Drop the oldest slot that has already met
-   // its minimum dwell rather than always dropping the tail, so a burst of new
-   // signals cannot sweep a row off the chart seconds after it appeared. If
-   // every slot is still within its dwell the tail goes anyway: capacity is a
-   // hard bound. Removing a slot from the tail region preserves newest-first
-   // order for everything that stays.
-   int evict = SIGNAL_HISTORY_SIZE - 1;
-   for(int i = SIGNAL_HISTORY_SIZE - 1; i >= 0; i--)
-   {
-      if(!g_signal_history[i].used ||
-         local_time - g_signal_history[i].local_time >= SIGNAL_MESSAGE_MIN_VISIBLE_SECONDS)
-      {
-         evict = i;
-         break;
-      }
-   }
+   // Entries are held newest-first and contiguously from slot 0. Drop the oldest slot that
+   // has already met its minimum dwell rather than always dropping the tail, so a burst of
+   // new signals cannot sweep a row off the chart seconds after it appeared. If every slot
+   // is still within its dwell the tail goes anyway: capacity is a hard bound. Removing a
+   // slot from the tail region preserves newest-first order for everything that stays.
+   //
+   // The rule itself is SignalHistoryEvictionSlot, so it is covered by the self-test. Scanning
+   // from the tail directly used to return the last slot for a partly-filled list, so the shift
+   // below walked every empty slot above the last entry, copying nothing into nothing; the
+   // observable list was identical, which is why no behavioural test caught it at the time
+   // (F-042, F-051).
+   int evict = SignalHistoryEvictionSlot(g_signal_history,
+                                         SIGNAL_HISTORY_SIZE,
+                                         local_time,
+                                         SIGNAL_MESSAGE_MIN_VISIBLE_SECONDS);
 
    for(int i = evict; i > 0; i--)
       CopySignalHistoryEntry(g_signal_history[i - 1], g_signal_history[i]);
@@ -7474,15 +9014,22 @@ string FitDashboardText(const string text)
 
 // Splits a report line into label-sized pieces at word boundaries; the
 // continuation pieces are indented.
-int WrapLabelText(const string text, string &pieces[])
+// wrap_chars is passed in rather than read here so the width the rows will be clipped to
+// is one explicit decision at each call site, and so the self-test can exercise a narrow
+// width. Wrapping at the terminal's 63-character cap while SetDashboardRow clipped each
+// piece to DashboardTextLimit() truncated the first piece and discarded the wrapped tail
+// on any chart narrower than the cap (F-021).
+int WrapLabelText(const string text, string &pieces[], const int wrap_chars)
 {
    if(ArrayResize(pieces, 0) != 0)
       return 0;
+   if(wrap_chars < 1)
+      return 0;
    string remaining = text;
-   while(StringLen(remaining) > DASHBOARD_MAX_TEXT_CHARS)
+   while(StringLen(remaining) > wrap_chars)
    {
       int cut = -1;
-      for(int i = DASHBOARD_MAX_TEXT_CHARS; i >= DASHBOARD_MAX_TEXT_CHARS / 2; i--)
+      for(int i = wrap_chars; i >= wrap_chars / 2; i--)
       {
          if(StringGetCharacter(remaining, i) == ' ')
          {
@@ -7491,7 +9038,7 @@ int WrapLabelText(const string text, string &pieces[])
          }
       }
       if(cut < 0)
-         cut = DASHBOARD_MAX_TEXT_CHARS;
+         cut = wrap_chars;
 
       int next = ArraySize(pieces);
       if(ArrayResize(pieces, next + 1) != next + 1)
@@ -7953,7 +9500,7 @@ double TickRateZ(const int index, bool &available)
       return 0.0;
 
    available = true;
-   if(UseSessionAwareBaselines && g_profiles[index].session_baseline_ready)
+   if(UseSessionAwareBaselines && g_profiles[index].session_tick_rate_z_ready)
       return g_profiles[index].session_tick_rate_z;
 
    // FX tick feeds differ by broker, so the flat baseline is configurable.
@@ -7966,7 +9513,7 @@ double TickRateZ(const int index, bool &available)
 double TickVolumeDeviation(const int index, bool &available)
 {
    available = false;
-   if(UseSessionAwareBaselines && g_profiles[index].session_baseline_ready)
+   if(UseSessionAwareBaselines && g_profiles[index].session_tick_volume_z_ready)
    {
       available = true;
       return g_profiles[index].session_tick_volume_z;
@@ -8201,7 +9748,11 @@ double SmoothStep(const double edge0, const double edge1, const double x)
       return (x >= edge1 ? 1.0 : 0.0);
 
    // A reversed pair would silently invert the ramp and reward evidence against
-   // the signal, so orient the edges before interpolating.
+   // the signal, so orient the edges before interpolating. Filed as F-043 as a suspected
+   // silent re-orientation of a caller error; re-examined and NOT a defect. Every reversed
+   // call in the file is an assertion in the self-test below that pins this behaviour, no
+   // production caller passes reversed edges, and the orientation is the deliberate fix for
+   // a pre-1.4 bug that scored 1.00 for moves against the signal.
    double low = MathMin(edge0, edge1);
    double high = MathMax(edge0, edge1);
    double t = Clamp01((x - low) / (high - low));

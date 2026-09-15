@@ -42,22 +42,30 @@ Alongside the build, run the other two gates:
 
 ```bash
 tools/census.py            # dead-code and placeholder census, exits non-zero on any finding
-./tools/selftest-macos.sh  # 117 assertions in the terminal; --validation / --autotune run
+tools/contracts.py         # cross-file string contracts between the indicator, the harness and the gates
+./tools/selftest-macos.sh  # self-test in the terminal; --validation / --autotune run
                            # a short historical pass and require a complete report
 ```
 
 The self-test covers the pure helpers, the shared composer, the historical engine on
-synthetic bars and the recent-signal list. It does not cover the live signal lifecycle,
+synthetic bars, the recent-signal list and the live signal lifecycle. It does not cover
 correlation grouping, alert dispatch or dashboard rendering; those are verified by manual
-runtime observation.
+runtime observation. `tools/contracts.py` covers the string contracts between the
+indicator, the harness and these scripts, which no compiler sees.
 
 ## Version bumps touch three locations plus the wiki
 
 1. **This repo** — `FXNews.mq5` line 1 and `#property version`, plus `README.md`.
-2. **`MQL5/Indicators/FXNews/`** — a separate clone of this repository. Update it with git
-   (`fetch` + `reset --hard origin/main`), then `./tools/build-macos.sh --install` (or copy
-   a freshly compiled `FXNews.ex5` in). A stale `.ex5` next to a current `.mq5` is a trap:
-   MT5 loads the binary.
+2. **`MQL5/Indicators/FXNews/`** — the terminal's copy, which is a *separate clone* of this
+   repository, not a directory this repo maintains. It is not guaranteed to exist: on the
+   audit machine it was absent until `--install` created it, and it held only `FXNews.ex5`
+   afterwards (F-037). Bootstrap it once with
+   `git clone https://github.com/Pummelchen/FXNews.git`, then update it with
+   `fetch` + `reset --hard origin/main`, then `./tools/build-macos.sh --install` (or copy a
+   freshly compiled `FXNews.ex5` in). `--install` creates the directory and verifies the
+   copy but does **not** clone: installing into a directory with no `.git` leaves a binary
+   with no source beside it, so the `fetch`/`reset` step above will fail there. A stale
+   `.ex5` next to a current `.mq5` is a trap: MT5 loads the binary.
 3. **`origin/main`**.
 
 Then the wiki (a separate git repository): `Home.md` version line, a `Changelog.md`

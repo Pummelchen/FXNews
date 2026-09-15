@@ -1,6 +1,7 @@
 # FXNews
 
 [![Stars](https://img.shields.io/github/stars/Pummelchen/FXNews?style=flat-square&logo=github&label=Stars&color=e3b341)](https://github.com/Pummelchen/FXNews/stargazers)
+[![gates](https://github.com/Pummelchen/FXNews/actions/workflows/ci.yml/badge.svg)](https://github.com/Pummelchen/FXNews/actions/workflows/ci.yml)
 [![Views (14d)](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Pummelchen/FXNews/main/.github/traffic.json)](https://github.com/Pummelchen/FXNews)
 [![Last Commit](https://img.shields.io/github/last-commit/Pummelchen/FXNews?style=flat-square&logo=git&label=Last%20Commit&color=2ea44f)](https://github.com/Pummelchen/FXNews/commits/main)
 [![Contact](https://img.shields.io/badge/Contact-0xa0b1%40gmail.com-blue?style=flat-square&logo=gmail&logoColor=white)](mailto:0xa0b1@gmail.com)
@@ -19,7 +20,7 @@ FXNews does not place, modify, or manage trades. It uses no `WebRequest`, DLL, e
 
 ## Version
 
-Current source version: **3.0** (`#property version "3.000"`). See the [Changelog](https://github.com/Pummelchen/FXNews/wiki/Changelog) for versioned changes.
+Current source version: **3.1** (`#property version "3.100"`). See the [Changelog](https://github.com/Pummelchen/FXNews/wiki/Changelog) for versioned changes.
 
 ## Requirements
 
@@ -44,10 +45,18 @@ tools/census.py
 runs the dead-code and placeholder census (Python 3.14) and exits non-zero on any finding, and
 
 ```bash
+tools/contracts.py
+```
+
+checks the string contracts that tie the indicator, the harness and the gate scripts together — verdict labels, the result line, the report fields the gate parses and the harness install path — plus one structural invariant the compiler cannot see. It exits non-zero on any violation, and `./tools/selftest-macos.sh` runs it before compiling.
+
+```bash
 ./tools/selftest-macos.sh
 ```
 
-compiles the indicator, runs its built-in self-test (117 assertions) headlessly in the terminal and exits non-zero unless every assertion passes; `--validation` and `--autotune` run a short historical pass the same way. See [Testing and Validation](https://github.com/Pummelchen/FXNews/wiki/Testing-and-Validation).
+compiles the indicator, runs its built-in self-test headlessly in the terminal and exits non-zero unless every assertion passes (`--validation` and `--autotune` run a short historical pass the same way; the self-test prints its own assertion total, so no count is duplicated here). See [Testing and Validation](https://github.com/Pummelchen/FXNews/wiki/Testing-and-Validation).
+
+The census, the contract check, the linters (`ruff`, `mypy --strict`, `bandit`, `shellcheck`, `shfmt`) and a full-history secret scan are enforced by the `gates` workflow on every push and pull request. The two MetaTrader gates cannot run on a hosted Linux runner — they need Wine and a terminal with broker history — so they remain manual, and a green workflow is not by itself a release gate. The pinned tool versions match `AUDIT/environment.md`.
 
 ## Documentation
 

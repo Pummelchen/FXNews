@@ -1,0 +1,117 @@
+name: gates
+
+# The repository has four gates. Two of them run anywhere; two need macOS, Wine
+# and a MetaTrader 5 install with broker history, so they stay manual:
+#
+#   Linux-runnable (enforced here)   tools/census.py, tools/contracts.py,
+#                                    ruff, mypy, bandit, shellcheck, shfmt,
+#                                    gitleaks over the full history
+#   macOS-only (manual)              tools/build-macos.sh (MetaEditor under the
+#                                    MetaQuotes Wine bundle, which on Apple
+#                                    Silicon needs Rosetta 2) and
+#                                    tools/selftest-macos.sh (drives the terminal)
+#
+# A green run here is therefore NOT a release gate on its own; see the wiki's
+# Release Checklist for the full sequence.
+
+on:
+  push:
+    branches: [main, "audit/**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gates-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned to the versions recorded in AUDIT/environment.md so a local run and a
+  # CI run mean the same thing. shellcheck is pinned explicitly rather than taken
+  # from the runner image: the image's older release reported a trap-invoked
+  # cleanup function as unreachable (SC2317) while the current release does not,
+  # so an unpinned shellcheck made the pipeline's result depend on the image.
+  RUFF_VERSION: "0.16.7"
+  MYPY_VERSION: "2.3.1"
+  BANDIT_VERSION: "1.9.4"
+  SHFMT_VERSION: "3.14.1"
+  GITLEAKS_VERSION: "8.30.1"
+  SHELLCHECK_VERSION: "0.11.0"
+
+jobs:
+  analysis:
+    name: Analysis gates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out (full history, so the secret scan sees every commit)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install the analysis tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "ruff==${RUFF_VERSION}" \
+            "mypy==${MYPY_VERSION}" \
+            "bandit==${BANDIT_VERSION}"
+          curl -sSfL -o /tmp/shfmt \
+            "https://github.com/mvdan/sh/releases/download/v${SHFMT_VERSION}/shfmt_v${SHFMT_VERSION}_linux_amd64"
+          sudo install -m 0755 /tmp/shfmt /usr/local/bin/shfmt
+          curl -sSfL -o /tmp/shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          tar -xJf /tmp/shellcheck.tar.xz -C /tmp
+          sudo install -m 0755 "/tmp/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version | sed -n '2p'
+          curl -sSfL -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          sudo tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
+
+      # The two gates written for this repository come first: they are the ones
+      # that catch the classes of defect the compiler cannot see.
+      - name: Dead-code and placeholder census
+        run: python tools/census.py
+
+      - name: Cross-file contracts
+        run: python tools/contracts.py
+
+      - name: Python lint
+        run: |
+          targets="tools"
+          [ -d AUDIT ] && targets="$targets AUDIT"
+          ruff check $targets
+
+      - name: Python format
+        run: |
+          targets="tools"
+          [ -d AUDIT ] && targets="$targets AUDIT"
+          ruff format --check $targets
+
+      - name: Python types (strict)
+        run: |
+          files="tools/census.py tools/contracts.py"
+          [ -f AUDIT/render.py ] && files="$files AUDIT/render.py"
+          mypy --strict $files
+
+      - name: Python SAST
+        run: |
+          targets="tools"
+          [ -d AUDIT ] && targets="$targets AUDIT"
+          bandit -q -r $targets
+
+      - name: Shell lint
+        run: shellcheck tools/*.sh
+
+      - name: Shell format
+        run: shfmt -d -i 2 -ci tools/*.sh
+
+      - name: Secret scan over the full history
+        run: gitleaks detect --source . --no-banner --redact

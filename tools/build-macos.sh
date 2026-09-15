@@ -21,31 +21,50 @@ INSTALL=0
 for arg in "$@"; do
   case "$arg" in
     --install) INSTALL=1 ;;
-    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
+    -h | --help)
+      sed -n '2,19p' "$0"
+      exit 0
+      ;;
     *) SRC="$arg" ;;
   esac
 done
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 2
+
 if [ -z "$SRC" ]; then
-  HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 2
   # tools/ sits directly under the repository root; git resolves it in a clone,
   # the fallback covers an exported tree.
   ROOT="$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null || dirname "$HERE")"
   SRC="$ROOT/FXNews.mq5"
 fi
-[ -f "$SRC" ] || { echo "build: no such source file: $SRC" >&2; exit 2; }
-SRC_DIR="$(cd "$(dirname "$SRC")" && pwd)" || { echo "build: cannot resolve $SRC" >&2; exit 2; }
+[ -f "$SRC" ] || {
+  echo "build: no such source file: $SRC" >&2
+  exit 2
+}
+SRC_DIR="$(cd "$(dirname "$SRC")" && pwd)" || {
+  echo "build: cannot resolve $SRC" >&2
+  exit 2
+}
 SRC="$SRC_DIR/$(basename "$SRC")"
 
-WINE="/Applications/MetaTrader 5.app/Contents/SharedSupport/wine/bin/wine64"
-export WINEPREFIX="$HOME/Library/Application Support/net.metaquotes.wine.metatrader5"
-MT5="$WINEPREFIX/drive_c/Program Files/MetaTrader 5"
-ME="$MT5/MetaEditor64.exe"
-export WINEDEBUG="${WINEDEBUG:--all}"
+# Paths and Wine/Rosetta handling live in one place, shared with selftest-macos.sh.
+# shellcheck source=tools/lib-mt5.sh
+. "$HERE/lib-mt5.sh" || {
+  echo "build: cannot load $HERE/lib-mt5.sh" >&2
+  exit 2
+}
+mt5_configure
 BUILD_TIMEOUT="${BUILD_TIMEOUT:-300}"
 
-[ -x "$WINE" ] || { echo "build: wine64 not found at $WINE" >&2; exit 2; }
-[ -f "$ME" ]   || { echo "build: MetaEditor64.exe not found at $ME" >&2; exit 2; }
+[ -x "$WINE" ] || {
+  echo "build: wine64 not found at $WINE" >&2
+  exit 2
+}
+[ -f "$ME" ] || {
+  echo "build: MetaEditor64.exe not found at $ME" >&2
+  exit 2
+}
+mt5_require_wine "build"
 
 # The work directory is created under a space-free location: MetaEditor's
 # /compile: and /log: switches cannot handle a path containing a space (they
@@ -54,7 +73,10 @@ BUILD_TIMEOUT="${BUILD_TIMEOUT:-300}"
 # source and log paths are guarded. Compiling in place under
 # "MQL5/Indicators/..." is therefore impossible; compile from the repository
 # and copy the .ex5 across (see --install), or press F7 in MetaEditor.
-WORK="$(mktemp -d /tmp/mql5build.XXXXXX)" || { echo "build: mktemp failed" >&2; exit 2; }
+WORK="$(mktemp -d /tmp/mql5build.XXXXXX)" || {
+  echo "build: mktemp failed" >&2
+  exit 2
+}
 trap 'rm -rf "$WORK"' EXIT
 LOG="$WORK/build.log"
 for guarded in "$SRC" "$LOG"; do
@@ -112,7 +134,7 @@ OUT="$(printf '%s' "$OUT" | tr -d '\r' | sed '1s/^\xEF\xBB\xBF//')"
 printf '%s\n' "$OUT" | grep -vE 'information: (generating code( [0-9]+%)?|code generated)$' | sed '/^[[:space:]]*$/d'
 
 RESULT="$(printf '%s' "$OUT" | grep -o 'Result: [0-9]* errors, [0-9]* warnings' | tail -1)"
-ERRORS="$(printf '%s' "$RESULT"  | sed -n 's/Result: \([0-9]*\) errors.*/\1/p')"
+ERRORS="$(printf '%s' "$RESULT" | sed -n 's/Result: \([0-9]*\) errors.*/\1/p')"
 WARNINGS="$(printf '%s' "$RESULT" | sed -n 's/.*, \([0-9]*\) warnings/\1/p')"
 
 if [ -z "$RESULT" ]; then
@@ -134,8 +156,39 @@ echo "build: OK ($RESULT)"
 if [ "$INSTALL" -eq 1 ]; then
   EX5="${SRC%.mq5}.ex5"
   DEST="$MT5/MQL5/Indicators/FXNews"
-  [ -f "$EX5" ] || { echo "build: expected $EX5 after a clean compile" >&2; exit 2; }
-  mkdir -p "$DEST" || exit 2
+  [ -f "$EX5" ] || {
+    echo "build: expected $EX5 after a clean compile" >&2
+    exit 2
+  }
+  # Report whether the destination already existed. Creating it silently hid the case of an
+  # install aimed at the wrong terminal: an empty indicator folder appears, MT5 shows nothing,
+  # and the build reports success (F-045).
+  if [ -d "$DEST" ]; then
+    echo "build: install target exists: $DEST"
+  else
+    echo "build: install target absent, creating: $DEST"
+    mkdir -p "$DEST" || exit 2
+  fi
   cp "$EX5" "$DEST/" || exit 2
-  echo "build: installed $(basename "$EX5") to $DEST"
+
+  # An install is not complete until the binary is there at full length. A short copy is what
+  # a full disk or a permissions problem produces, and MT5 would load a truncated indicator,
+  # so the size is checked rather than assumed.
+  SRC_BYTES=$(wc -c <"$EX5" | tr -d ' ')
+  INSTALLED="$DEST/$(basename "$EX5")"
+  DST_BYTES=$(wc -c <"$INSTALLED" 2>/dev/null | tr -d ' ')
+  if [ "${DST_BYTES:-0}" != "$SRC_BYTES" ]; then
+    echo "build: installed copy is ${DST_BYTES:-0} bytes, expected $SRC_BYTES - install incomplete" >&2
+    exit 2
+  fi
+
+  # A stale .mq5 beside a fresh .ex5 is a documented trap: MT5 loads the binary, so the pair
+  # disagrees silently. Report it rather than failing, because installing a binary whose source
+  # is not kept in step is a legitimate manual workflow.
+  MQ5_INSTALLED="$DEST/$(basename "${SRC%.mq5}.mq5")"
+  if [ -f "$MQ5_INSTALLED" ] && ! cmp -s "$SRC" "$MQ5_INSTALLED"; then
+    echo "build: WARNING - $MQ5_INSTALLED differs from the source that produced the installed .ex5" >&2
+  fi
+
+  echo "build: installed $(basename "$EX5") to $DEST ($SRC_BYTES bytes, verified)"
 fi

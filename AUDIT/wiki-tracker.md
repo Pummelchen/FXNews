@@ -2,21 +2,19 @@
 
 Independent pre-production audit of the whole repository, run on branch `audit/2026-09-15` from base commit `71ce980`, and merged by pull request only after the final phase passed. The authoritative ledger lives in the repository at `AUDIT/ledger.md` / `AUDIT/ledger.json`; this page mirrors it and the ledger wins on any conflict.
 
-**total 47 | done 2 | open 45 | blocked 0 | S0:1 S1:9 S2:17 S3:20**
+**total 47 | done 4 | open 43 | blocked 0 | S0:1 S1:9 S2:17 S3:20**
 
 ### Open items
 
 | # | Sev | Status | Area | What |
 | --- | --- | --- | --- | --- |
 | F-001 | S1 | START | scoring | Breakout hold_score is imputed at 0 with a full 0.20 weight when the price is not outside the box, instead of leaving the normaliser |
-| F-002 | S1 | START | scoring | UpdateSessionBaseline folds active_trigger_tick_volume into the tick-volume baseline unguarded, while the adjacent line explicitly guards the tick rate |
 | F-003 | S1 | START | scoring | movement_5m_pips falls back to a 0.0 sentinel when the M1 copy fails and is then consumed as a measured value by three components |
 | F-004 | S1 | START | historical | Historical impulse evaluation forces acceleration_available and continuation_available to true, hard-coding weights for inputs that may be unmeasurable |
 | F-005 | S1 | START | historical | Historical execution gate applies cost_to_atr unconditionally, so VALIDATION/AUTOTUNE do not reproduce the live filter set when UseStrictExecutionGate is off |
 | F-006 | S1 | START | historical | Two composite caps are structurally inert in history, so historical scores are systematically less penalised than live scores |
 | F-007 | S1 | START | tests | The availability-and-composer self-test assertion cannot detect an exclusion regression |
 | F-008 | S1 | START | tests | The live signal lifecycle, correlation grouping, alert dispatch and dashboard rendering have no automated coverage |
-| F-009 | S2 | START | scoring | session_baseline_ready is a single flag for three independent baselines, so a z-score can be reported as measured when its own baseline never received samples |
 | F-010 | S2 | START | historical | The 85+ bucket in the historical report is unreachable dead code |
 | F-011 | S2 | START | dashboard | g_signal_history_dirty is never cleared while active signal rows are rendered, forcing a full dashboard rebuild every scan |
 | F-012 | S2 | START | scoring | wick_rejection_penalty is subtracted from the breakout blend without its weight being added to the normaliser |
@@ -64,3 +62,5 @@ _None._
 | --- | --- | --- | --- | --- |
 | E-1 | S0 | tooling | Build and self-test gates cannot execute: bundled wine64 is x86_64 and Rosetta 2 was absent on all four Macs | Rosetta install finished successfully; arch -x86_64 /usr/bin/true OK; wine64 --version -> wine-9.14; ./tools/build-macos.sh -> 0 errors, 0 warnings, exit 0; ./tools/selftest-macos.sh -> 117 passed, 0 failed |
 | E-2 | S1 | tooling | No MQL5 formatter, linter, static analyzer, SAST scanner or coverage tool exists | AUDIT/environment.md section 2 records the gap and the compensating controls |
+| F-002 | S1 | scoring | UpdateSessionBaseline folds active_trigger_tick_volume into the tick-volume baseline unguarded, while the adjacent line explicitly guards the tick rate | New self-test group 'session baselines'. BEFORE (temporary restore of shared-counter readiness): 'session baseline: a single rate sample is not yet a baseline' FAILED; RESULT 122 passed, 1 failed of 123 assertions; selftest exit 1. AFTER: RESULT 123 passed, 0 failed of 123; exit 0. Build 0 errors/0 warnings; census 0 findings; shellcheck clean; ruff/mypy --strict/bandit clean. |
+| F-009 | S2 | scoring | session_baseline_ready is a single flag for three independent baselines, so a z-score can be reported as measured when its own baseline never received samples | New self-test group 'session baselines'. BEFORE (temporary restore of shared-counter readiness): 'session baseline: a single rate sample is not yet a baseline' FAILED; RESULT 122 passed, 1 failed of 123 assertions; selftest exit 1. AFTER: RESULT 123 passed, 0 failed of 123; exit 0. Build 0 errors/0 warnings; census 0 findings; shellcheck clean; ruff/mypy --strict/bandit clean. |

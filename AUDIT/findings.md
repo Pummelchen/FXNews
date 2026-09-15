@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 47 | done 2 | open 45 | blocked 0 | S0:1 S1:9 S2:17 S3:20**
+**total 47 | done 4 | open 43 | blocked 0 | S0:1 S1:9 S2:17 S3:20**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -12,14 +12,14 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | E-1 | S0 | tooling | DONE | `tools/build-macos.sh:40` | Build and self-test gates cannot execute: bundled wine64 is x86_64 and Rosetta 2 was absent on all four Macs |
 | E-2 | S1 | tooling | DONE | `tools/selftest-macos.sh:34` | No MQL5 formatter, linter, static analyzer, SAST scanner or coverage tool exists |
 | F-001 | S1 | scoring | START | `FXNews.mq5:5222,5310,5324` | Breakout hold_score is imputed at 0 with a full 0.20 weight when the price is not outside the box, instead of leaving the normaliser |
-| F-002 | S1 | scoring | START | `FXNews.mq5:4502` | UpdateSessionBaseline folds active_trigger_tick_volume into the tick-volume baseline unguarded, while the adjacent line explicitly guards the tick rate |
+| F-002 | S1 | scoring | DONE | `FXNews.mq5:4502` | UpdateSessionBaseline folds active_trigger_tick_volume into the tick-volume baseline unguarded, while the adjacent line explicitly guards the tick rate |
 | F-003 | S1 | scoring | START | `FXNews.mq5:4268,4704,5418,5917` | movement_5m_pips falls back to a 0.0 sentinel when the M1 copy fails and is then consumed as a measured value by three components |
 | F-004 | S1 | historical | START | `FXNews.mq5:2728` | Historical impulse evaluation forces acceleration_available and continuation_available to true, hard-coding weights for inputs that may be unmeasurable |
 | F-005 | S1 | historical | START | `FXNews.mq5:2667` | Historical execution gate applies cost_to_atr unconditionally, so VALIDATION/AUTOTUNE do not reproduce the live filter set when UseStrictExecutionGate is off |
 | F-006 | S1 | historical | START | `FXNews.mq5:2693,5310-5318,4984-4989` | Two composite caps are structurally inert in history, so historical scores are systematically less penalised than live scores |
 | F-007 | S1 | tests | START | `FXNews.mq5:1455-1459` | The availability-and-composer self-test assertion cannot detect an exclusion regression |
 | F-008 | S1 | tests | START | `README.md:50; FXNews.mq5` | The live signal lifecycle, correlation grouping, alert dispatch and dashboard rendering have no automated coverage |
-| F-009 | S2 | scoring | START | `FXNews.mq5:4476-4477,7956-7957` | session_baseline_ready is a single flag for three independent baselines, so a z-score can be reported as measured when its own baseline never received samples |
+| F-009 | S2 | scoring | DONE | `FXNews.mq5:4476-4477,7956-7957` | session_baseline_ready is a single flag for three independent baselines, so a z-score can be reported as measured when its own baseline never received samples |
 | F-010 | S2 | historical | START | `FXNews.mq5:2926-2930,3039` | The 85+ bucket in the historical report is unreachable dead code |
 | F-011 | S2 | dashboard | START | `FXNews.mq5:3788,6802-6804,7182` | g_signal_history_dirty is never cleared while active signal rows are rendered, forcing a full dashboard rebuild every scan |
 | F-012 | S2 | scoring | START | `FXNews.mq5:5330-5331` | wick_rejection_penalty is subtracted from the breakout blend without its weight being added to the normaliser |
@@ -98,14 +98,16 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-002 (S1, scoring) — UpdateSessionBaseline folds active_trigger_tick_volume into the tick-volume baseline unguarded, while the adjacent line explicitly guards the tick rate
 
-- **Status:** START  |  **Category:** logic  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** logic  |  **Host:** node3  |  **Commit:** 2388b22
 - **Location:** `FXNews.mq5:4502`
 - **Discovered by:** Phase B L2 + scoring audit
 - **Evidence (before):**
 
   > ':4499-4501' comments 'An unmeasured tick rate must not be folded into the baseline as zero' and guards it with tick_rate_known; ':4502' folds tick_volume unconditionally. active_trigger_tick_volume is only assigned when has_trigger (:4237) and is not reset on the failure branch (:4240-4248), so a profile with no trigger-timeframe data folds either a stale value or the initial 0 into the baseline. The baseline feeds session_tick_volume_z, which TickVolumeDeviation consumes (:7969-7972) as a measured reading into the impulse blend and unsupported_impulse_cap.
 
-- **Notes:** Found independently by this audit and by the scoring audit; also not carried across the sibling-context path (:4252-4257 vs CopyContextRatesData :4353-4363).
+- **Fix:** SessionBaseline now carries spread_samples / tick_rate_samples / tick_volume_samples instead of one shared sample_count, and SymbolProfile carries session_spread_z_ready / session_tick_rate_z_ready / session_tick_volume_z_ready instead of one session_baseline_ready. Each series' EWMA uses its own counter and each counter advances only when that series was actually folded; a z-score is published only when its own series is ready. All reset paths and all three consumers updated.
+- **Evidence (after):** New self-test group 'session baselines'. BEFORE (temporary restore of shared-counter readiness): 'session baseline: a single rate sample is not yet a baseline' FAILED; RESULT 122 passed, 1 failed of 123 assertions; selftest exit 1. AFTER: RESULT 123 passed, 0 failed of 123; exit 0. Build 0 errors/0 warnings; census 0 findings; shellcheck clean; ruff/mypy --strict/bandit clean.
+- **Notes:** Found independently by this audit and by the scoring audit; also not carried across the sibling-context path (:4252-4257 vs CopyContextRatesData :4353-4363). Fixed together with F-009: one root cause, one change.
 
 ### F-003 (S1, scoring) — movement_5m_pips falls back to a 0.0 sentinel when the M1 copy fails and is then consumed as a measured value by three components
 
@@ -174,13 +176,16 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-009 (S2, scoring) — session_baseline_ready is a single flag for three independent baselines, so a z-score can be reported as measured when its own baseline never received samples
 
-- **Status:** START  |  **Category:** logic  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** logic  |  **Host:** node3  |  **Commit:** 2388b22
 - **Location:** `FXNews.mq5:4476-4477,7956-7957`
 - **Discovered by:** Phase B L2 + scoring audit
 - **Evidence (before):**
 
   > 'sample_count' is incremented unconditionally (:4503-4504) regardless of which series was folded (spread always :4498, tick volume always :4502, tick rate only when known :4500-4501). readiness is then derived from that one counter (:4476-4477) and gates all three z-scores (:7956-7957, :7969-7972). After 50 spread samples with no tick-rate sample, session_tick_rate_z is computed from mean=0,var=0 and BaselineZ returns 0.0 (:4527-4532), which TickRateZ reports as available.
 
+- **Fix:** SessionBaseline now carries spread_samples / tick_rate_samples / tick_volume_samples instead of one shared sample_count, and SymbolProfile carries session_spread_z_ready / session_tick_rate_z_ready / session_tick_volume_z_ready instead of one session_baseline_ready. Each series' EWMA uses its own counter and each counter advances only when that series was actually folded; a z-score is published only when its own series is ready. All reset paths and all three consumers updated.
+- **Evidence (after):** New self-test group 'session baselines'. BEFORE (temporary restore of shared-counter readiness): 'session baseline: a single rate sample is not yet a baseline' FAILED; RESULT 122 passed, 1 failed of 123 assertions; selftest exit 1. AFTER: RESULT 123 passed, 0 failed of 123; exit 0. Build 0 errors/0 warnings; census 0 findings; shellcheck clean; ruff/mypy --strict/bandit clean.
+- **Notes:** Shares one root cause with F-002 and is fixed by the same change, committed once under audit(F-002,F-009).
 
 ### F-010 (S2, historical) — The 85+ bucket in the historical report is unreachable dead code
 

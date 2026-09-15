@@ -358,6 +358,7 @@ struct ImpulseQuality
    bool tick_volume_available;
    double tick_volume_z;
    double exhaustion_penalty;
+   bool exhaustion_available;      // the five-minute move behind the penalty was measured
    bool tick_quality_available;
    double tick_sample_quality_score;
    string tick_state;
@@ -669,6 +670,7 @@ struct SymbolProfile
    double speed_30s_pips;
    double speed_60s_pips;
    double movement_5m_pips;
+   bool has_movement_5m;             // the M1 copy behind movement_5m_pips succeeded
    bool has_m5_move;
    bool has_m15_move;
    double m5_move_atr;
@@ -1748,6 +1750,45 @@ void SelfTestBreakoutHold()
    SelfTestGroup("breakout hold", before);
 }
 
+// The overextension cap must be driven by a measured reading. The five-minute
+// move arrives as a 0.0 sentinel when its M1 copy failed, and a penalty of 0 for
+// an unmeasured reading is indistinguishable from "not overextended" - so the cap
+// is gated on exhaustion_available rather than on the value alone.
+void SelfTestExhaustionAvailability()
+{
+   int before = g_selftest_failed;
+
+   CompositeSignalScore score;
+   CompositeContext context;
+   ResetCompositeSignalScore(score);
+   score.execution.pass = true;
+   score.execution.score = 0.90;
+   score.breakout.measured = true;
+   score.breakout.score = 0.90;
+   score.impulse.measured = true;
+   score.impulse.score = 0.90;
+   score.regime.score = 0.90;
+   score.impulse.exhaustion_penalty = 0.90;   // a reading that would cap if trusted
+   context.direction = DIR_UP;
+   context.m5_move_directional = 0.0;
+   context.m15_move_directional = 0.0;
+   context.age_seconds = 0;
+   context.age_limit_seconds = 0;
+   context.max_spread_to_atr = 0.45;
+
+   score.impulse.exhaustion_available = false;
+   ComposeSignalScore(score, context, false);
+   SelfTestCheck(StringFind(score.cap_reasons, "overextended_cap") < 0,
+                 "ComposeSignalScore ignores an overextension reading that was not measured");
+
+   score.impulse.exhaustion_available = true;
+   ComposeSignalScore(score, context, false);
+   SelfTestCheck(StringFind(score.cap_reasons, "overextended_cap") >= 0,
+                 "ComposeSignalScore caps a measured overextension");
+
+   SelfTestGroup("exhaustion availability", before);
+}
+
 // The historical engine on a synthetic minute series with a known shape and
 // a deliberate ten-minute gap after bar 250.
 void SelfTestHistoricalEngine()
@@ -1967,6 +2008,7 @@ void RunSelfTest()
    SelfTestExecutionGate();
    SelfTestImpulseAvailability();
    SelfTestBreakoutHold();
+   SelfTestExhaustionAvailability();
    SelfTestHistoricalEngine();
    SelfTestSignalHistory();
 
@@ -3002,7 +3044,9 @@ void ScoreHistoricalBoundary(const HistoricalBoundaryFeatures &features,
          score.impulse.tick_volume_z = features.tick_volume_z;
          double move5 = features.move5_atr_up * (double)direction;
          double continuation = SmoothStep(0.0, 0.80, move5);
-         score.impulse.exhaustion_penalty = SmoothStep(MaxExhaustionAtr, MaxExhaustionAtr * 1.70, move5);
+         score.impulse.exhaustion_available = features.continuation_available;
+         score.impulse.exhaustion_penalty = (features.continuation_available ?
+                                             SmoothStep(MaxExhaustionAtr, MaxExhaustionAtr * 1.70, move5) : 0.0);
          BlendImpulseScore(score.impulse, speed_score,
                            features.acceleration_available, features.continuation_available, continuation);
          score.impulse.pass = (speed_max >= params.minute_impulse_z || score.impulse.atr_expansion_score >= 0.45);
@@ -3950,6 +3994,7 @@ void ResetProfile(SymbolProfile &profile,
    profile.speed_30s_pips = 0.0;
    profile.speed_60s_pips = 0.0;
    profile.movement_5m_pips = 0.0;
+   profile.has_movement_5m = false;
    profile.has_m5_move = false;
    profile.has_m15_move = false;
    profile.m5_move_atr = 0.0;
@@ -4556,10 +4601,13 @@ void UpdateRatesData(const int index)
    ResetLastError();
    int need_m1 = IntMax(ATRPeriod + 10, 40);
    int copied_m1 = CopyRates(symbol, PERIOD_M1, 0, need_m1, g_rates_m1);
-   if(copied_m1 > 5)
-      g_profiles[index].movement_5m_pips = (g_profiles[index].mid - g_rates_m1[5].close) / g_profiles[index].pip_size;
-   else
-      g_profiles[index].movement_5m_pips = 0.0;
+   // The value and its availability flag are set together: a failed copy used to
+   // leave a 0.0 that three consumers read as "no five-minute move" rather than as
+   // "no reading", which flattered exhaustion and basket agreement.
+   g_profiles[index].has_movement_5m = (copied_m1 > 5 && g_profiles[index].pip_size > 0.0);
+   g_profiles[index].movement_5m_pips = (g_profiles[index].has_movement_5m ?
+                                         (g_profiles[index].mid - g_rates_m1[5].close) / g_profiles[index].pip_size :
+                                         0.0);
 
    g_profiles[index].m1_atr_pips = 0.0;
    if(g_profiles[index].is_first_profile_for_symbol && g_profiles[index].pip_size > 0.0)
@@ -4647,6 +4695,7 @@ int FindFreshContextProfile(const int index)
 void CopyContextRatesData(const int target_index, const int source_index)
 {
    g_profiles[target_index].movement_5m_pips = g_profiles[source_index].movement_5m_pips;
+   g_profiles[target_index].has_movement_5m = g_profiles[source_index].has_movement_5m;
    g_profiles[target_index].has_m5 = g_profiles[source_index].has_m5;
    g_profiles[target_index].atr_m5 = g_profiles[source_index].atr_m5;
    g_profiles[target_index].has_m5_move = g_profiles[source_index].has_m5_move;
@@ -5011,8 +5060,17 @@ void CalculateCurrencyStrength()
       double atr_pips = MathMax(g_profiles[i].m1_atr_pips, 0.1);
       double n30 = Clamp(g_profiles[i].speed_30s_pips / (atr_pips * 0.35), -1.5, 1.5);
       double n60 = Clamp(g_profiles[i].speed_60s_pips / (atr_pips * 0.55), -1.5, 1.5);
-      double n5m = Clamp(g_profiles[i].movement_5m_pips / (atr_pips * 1.50), -1.5, 1.5);
-      double pair_strength = n30 * 0.45 + n60 * 0.25 + n5m * 0.30;
+      // The five-minute term leaves the normaliser when its M1 copy failed, rather
+      // than contributing a zero that reads as "no move" and drags the pair's
+      // strength toward the 30 s and 60 s speeds alone.
+      double pair_strength = n30 * 0.45 + n60 * 0.25;
+      double strength_weight = 0.45 + 0.25;
+      if(g_profiles[i].has_movement_5m)
+      {
+         pair_strength += Clamp(g_profiles[i].movement_5m_pips / (atr_pips * 1.50), -1.5, 1.5) * 0.30;
+         strength_weight += 0.30;
+      }
+      pair_strength /= strength_weight;
       double weight = 1.0;
       if(UseRobustCurrencyStrength)
       {
@@ -5107,7 +5165,7 @@ void ResetCompositeSignalScore(CompositeSignalScore &score)
    score.impulse.tick_volume_available = false;
    score.impulse.tick_volume_z = 0.0;
    score.impulse.exhaustion_penalty = 0.0;
-   score.impulse.tick_quality_available = false;
+   score.impulse.exhaustion_available = false;
    score.impulse.tick_sample_quality_score = 0.0;
    score.impulse.tick_state = "TICK_SYNCING";
 
@@ -5316,7 +5374,7 @@ void ComposeSignalScore(CompositeSignalScore &score, const CompositeContext &con
       capped = ApplyScoreCap(capped, 72.0, caps, "unsupported_impulse_cap");
    }
 
-   if(score.impulse.exhaustion_penalty >= 0.45)
+   if(score.impulse.exhaustion_available && score.impulse.exhaustion_penalty >= 0.45)
       capped = ApplyScoreCap(capped, 75.0, caps, "overextended_cap");
 
    score.age_free_score = Clamp(capped, 0.0, 100.0);
@@ -5765,8 +5823,14 @@ void EvaluateImpulseQuality(const int index,
    bool continuation_available = false;
    double continuation = ContinuationScore(index, direction, continuation_available) / 100.0;
 
-   double extended_atr = DirectionalValue(g_profiles[index].movement_5m_pips, direction) / atr_pips;
-   impulse.exhaustion_penalty = SmoothStep(MaxExhaustionAtr, MaxExhaustionAtr * 1.70, extended_atr);
+   // The overextension reading needs the five-minute move to exist; without it the
+   // penalty is unmeasured, not zero, and cannot be read as "not overextended".
+   impulse.exhaustion_available = g_profiles[index].has_movement_5m;
+   if(impulse.exhaustion_available)
+   {
+      double extended_atr = DirectionalValue(g_profiles[index].movement_5m_pips, direction) / atr_pips;
+      impulse.exhaustion_penalty = SmoothStep(MaxExhaustionAtr, MaxExhaustionAtr * 1.70, extended_atr);
+   }
 
    BlendImpulseScore(impulse, speed_score, acceleration_available, continuation_available, continuation);
    // Sample quality scales the reading only when it was actually measured.
@@ -6261,6 +6325,12 @@ double CalculateBasketAgreement(const int index, const int direction, bool &avai
       bool relevant = (g_profiles[i].base_index == base || g_profiles[i].quote_index == base ||
                        g_profiles[i].base_index == quote || g_profiles[i].quote_index == quote);
       if(!relevant)
+         continue;
+
+      // An unmeasured five-minute move used to score as a neutral half-agreement
+      // (pair_move 0 lands in the +-0.03 band), which flattered the ratio exactly
+      // when the least was known. Leave the pair out of the normaliser instead.
+      if(!g_profiles[i].has_movement_5m)
          continue;
 
       double atr_pips = MathMax(g_profiles[i].m1_atr_pips, 0.1);

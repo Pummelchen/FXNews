@@ -766,8 +766,8 @@
       "evidenceBefore": "':6187' re-tests MeetsThreshold(score, MinDisplayConfidence) although every call site already gated on it (:6410 and the candidate path), so the branch is unreachable in the failing direction.",
       "fixSummary": "The rule moved into a pure BarCloseConfirms(candidate_bar_time, trigger_bar_time, score, min_confidence), which was the only way to exercise it because SignalConfirmationMode is an input variable. The threshold clause is kept: it is redundant at both call sites (PickBestDirection already required MinDisplayConfidence, and the reversal path requires the stronger StrongAlertConfidence) but it is what makes the branch mean 'still valid at the bar close' on its own terms, and it fails safe.",
       "evidenceAfter": "Four assertions, the load-bearing one being that a surviving candidate below the floor does NOT confirm. BEFORE (threshold clause dropped): 180 passed, 1 failed of 181, exit 1. AFTER: 181 passed, 0 failed of 181. Build 0/0; census 0; contracts 0/9.",
-      "commit": "e0f7cbf",
-      "notes": null,
+      "commit": "38fe455",
+      "notes": "The commit hash was first recorded as e0f7cbf, which does not exist on the branch; it is 38fe455, taken from git log rather than from memory.",
       "blockedReason": null
     },
     {

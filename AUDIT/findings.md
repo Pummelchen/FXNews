@@ -705,7 +705,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-041 (S3, logic) — The BAR_CLOSE confirmation rule was unreachable by any test, and its threshold clause is redundant
 
-- **Status:** DONE  |  **Category:** dead  |  **Host:** node3  |  **Commit:** e0f7cbf
+- **Status:** DONE  |  **Category:** dead  |  **Host:** node3  |  **Commit:** 38fe455
 - **Location:** `FXNews.mq5:6187,6410`
 - **Discovered by:** Phase B L2 + dashboard audit
 - **Evidence (before):**
@@ -714,6 +714,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 - **Fix:** The rule moved into a pure BarCloseConfirms(candidate_bar_time, trigger_bar_time, score, min_confidence), which was the only way to exercise it because SignalConfirmationMode is an input variable. The threshold clause is kept: it is redundant at both call sites (PickBestDirection already required MinDisplayConfidence, and the reversal path requires the stronger StrongAlertConfidence) but it is what makes the branch mean 'still valid at the bar close' on its own terms, and it fails safe.
 - **Evidence (after):** Four assertions, the load-bearing one being that a surviving candidate below the floor does NOT confirm. BEFORE (threshold clause dropped): 180 passed, 1 failed of 181, exit 1. AFTER: 181 passed, 0 failed of 181. Build 0/0; census 0; contracts 0/9.
+- **Notes:** The commit hash was first recorded as e0f7cbf, which does not exist on the branch; it is 38fe455, taken from git log rather than from memory.
 
 ### F-042 (S3, dashboard) — PushSignalHistory's shift loop copies empty slots when the list is not yet full
 

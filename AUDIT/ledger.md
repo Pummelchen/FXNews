@@ -71,5 +71,29 @@ standards for Swift, C# and C are **N/A — no source in those languages exists 
 
 ## Findings
 
-_Phase B populates this section. Nothing is listed as a finding until it has an evidence
-reference._
+The numbered enumeration is **generated** from `AUDIT/ledger.json` into
+`AUDIT/findings.md` (full detail) and `AUDIT/wiki-tracker.md` (the wiki mirror) by
+`python3 AUDIT/render.py`. Those two files are derived and must never be hand-edited;
+`AUDIT/ledger.json` is the single source of truth.
+
+Phase B summary at commit of the plan:
+
+| Severity | Count |
+| --- | --- |
+| S0 | 1 (E-1, remediated) |
+| S1 | 9 |
+| S2 | 17 |
+| S3 | 20 |
+| **Total** | **47** |
+
+**No S0 defect was found in the product itself.** The single S0 is the environment
+blocker E-1: every documented release gate was unrunnable on the entire Apple-Silicon
+fleet, which makes a verified release impossible. It is remediated and verified.
+
+The product-side severity floor is S1: the audit found no crash on a normal path, no
+security hole, no data loss or corruption, no placeholder on a production path, and no
+wrong-result defect that is unambiguous. The S1 findings are invariant violations
+(F-001 to F-004), validator fidelity defects (F-005, F-006) and test gaps (F-007, F-008).
+Each S1 is individually justified in `AUDIT/findings.md`.
+
+Work order for Phase C: all S1 first (there is no open S0), then S2, then S3.

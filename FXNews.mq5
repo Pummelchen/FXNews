@@ -3389,9 +3389,17 @@ bool RunHistoricalBacktestSet(HistoricalParams &params_set[],
       int copied = LoadHistoricalM1Rates(symbols[s], rates);
       if(copied <= 0)
       {
-         PrintFormat("FXNews %s: %s has no M1 history in the window (error %d) and is skipped; "
-                     "open a chart of the symbol so the terminal downloads it, then re-run.",
-                     OperatingModeText(), symbols[s], GetLastError());
+         // The old text said to "open a chart of the symbol so the terminal downloads it". That was
+         // measured on 2026-09-15 and is not sufficient: EURUSD is the chart symbol on the audit
+         // terminal, its M1 .hcc files are present, selecting it explicitly changes nothing, and a
+         // 420 s wait changes nothing, while GBPUSD in the same window returns 50 000 bars. The
+         // advice now names what was actually observed and what the operator can actually check
+         // (F-054).
+         PrintFormat("FXNews %s: %s returned no M1 bars for the %d-day window (error %d) after waiting up to %d s, and is skipped. "
+                     "Check the symbol's history in the terminal's Symbols dialog (Ctrl+U) and re-run; "
+                     "the report's Symbols line names how many were usable.",
+                     OperatingModeText(), symbols[s], HistoricalLookbackDays, GetLastError(),
+                     HistoricalHistoryWaitSeconds);
          continue;
       }
 

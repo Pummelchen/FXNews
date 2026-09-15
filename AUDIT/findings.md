@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 62 | done 61 | open 0 | blocked 1 | S0:1 S1:15 S2:19 S3:27**
+**total 65 | done 64 | open 0 | blocked 1 | S0:1 S1:15 S2:22 S3:27**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -42,8 +42,11 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-049 | S2 | tests | DONE | `FXNews.mq5 (UpdateAlertGroups, DispatchPendingAlerts, UpdateDashboard, BuildDiagnosticsLines)` | Alert dispatch, correlation grouping and dashboard rendering still have no automated coverage |
 | F-050 | S2 | tooling | DONE | `.github/workflows/ci.yml; tools/selftest-macos.sh:89-96` | The CI workflow pinned every analysis tool except shellcheck, and the unpinned one failed the build |
 | F-052 | S2 | reporting | DONE | `FXNews.mq5 (historical bucket aggregation and ranking verdict)` | The ranking evaluation could not say WHY the ranking failed - caps or the score |
-| F-053 | S2 | scoring | DONE | `FXNews.mq5 (rank evaluation, measured not changed)` | MEASURED: the score does not rank 30m outcomes on the audit sample, and the caps are not the cause |
+| F-053 | S2 | scoring | DONE | `FXNews.mq5 (rank evaluation, measured not changed)` | MEASURED across three windows: no bucket ever reaches break-even, and the ranking verdict is NOT stable |
 | F-055 | S2 | verification | DONE | `AUDIT/environment.md (Phase E procedure)` | Phase E needed root for no reason: a LaunchAgent in the user's own GUI domain works |
+| F-056 | S2 | engine | DONE | `FXNews.mq5 (LoadHistoricalM1Rates)` | The whole-window M1 load is a memory bound on usable lookback - measured, and higher than feared |
+| F-057 | S2 | testing | DONE | `tools/mql5/FXNewsSelfTest.mq5:58-60` | The harness passes only its first three inputs, so no historical run can use a non-default configuration |
+| F-058 | S2 | verification | DONE | `MetaTrader terminal config/common.ini (MaxBars)` | The terminal's MaxBars=50000 silently capped every historical window at 48.8 days |
 | F-010 | S3 | historical | DONE | `FXNews.mq5:2926-2930,3039` | The 85+ bucket in the historical report is unreachable (now empirically confirmed; the wiki already documents the empty bucket, so only the unannotated report row remains) |
 | F-012 | S3 | scoring | DONE | `FXNews.mq5:5330-5331` | DISPROVED: the wick penalty's missing denominator entry is the correct arrangement |
 | F-013 | S3 | dashboard | DONE | `FXNews.mq5:6325,6246` | DOMINANT FLOW's fallback group id is shared by every timeframe of a symbol - deliberate, not a defect |
@@ -501,7 +504,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 - **Evidence (after):** --validation (2589 boundaries, 605 signals): displayed NOT SUPPORTED (80+ -0.082 R vs 60+ -0.068 R), pre-cap NOT SUPPORTED (85+ -0.141 R vs 60+ -0.068 R); the report concludes both bucketings agree so it is a property of the score, not of the caps. --autotune (2584 boundaries): displayed NOT SUPPORTED (80+ -0.229 R vs 60+ -0.004 R), pre-cap NOT SUPPORTED (85+ -0.256 R vs 60+ -0.004 R), same conclusion. Fail-before: removing the pre-cap comparison fails the ranking-disclosure contract with a message naming F-048. Assertions 199 -> 204. Build 0/0; census 0; contracts 0/9.
 - **Notes:** The cap incidence is new information in its own right: of 605 signals the pre-cap bucketing puts 198 in the 85+ band and EVERY one of them was capped down, and 150 of the 164 samples in the 80-84 displayed bucket are capped samples. The displayed score is dominated by penalised events in exactly the bands a reader would read as strongest.
 
-### F-053 (S2, scoring) — MEASURED: the score does not rank 30m outcomes on the audit sample, and the caps are not the cause
+### F-053 (S2, scoring) — MEASURED across three windows: no bucket ever reaches break-even, and the ranking verdict is NOT stable
 
 - **Status:** DONE  |  **Category:** tests  |  **Host:** node3  |  **Commit:** 6e59498
 - **Location:** `FXNews.mq5 (rank evaluation, measured not changed)`
@@ -511,8 +514,8 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
   > F-048 left the question open: on the 2026-09-15 runs the bucket average 30m R was negative in every bucket and no candidate beat CURRENT, but the audit could not say whether the score or the cap ladder was responsible.
 
 - **Fix:** No code change: this is the measured answer, recorded because it is material to a go-live decision and because it disproves a hypothesis this audit had advanced.
-- **Evidence (after):** Both bucketings fail in the same direction on both runs. VALIDATION: displayed 80+ -0.082 R vs 60+ -0.068 R; pre-cap 85+ -0.141 R vs 60+ -0.068 R. AUTOTUNE: displayed 80+ -0.229 R vs 60+ -0.004 R; pre-cap 85+ -0.256 R vs 60+ -0.004 R. The report states that both bucketings agree, so the failure is a property of the score rather than of the caps.
-- **Notes:** DISPROVES A HYPOTHESIS OF MINE. I had suggested the 75-79 bucket looked inverted because events capped down by weak_hold_cap (74) and overextended_cap (75) concentrate there. That does not explain the result: bucketing on the score before ANY cap applied fails in the same direction and by a larger margin. The lead was wrong and is recorded as wrong. WHAT THIS DOES NOT ESTABLISH: that the score is broken. The product documents the score as an event-quality ranking, not a probability or a trade instruction, and nothing here tests event quality - only whether it ranks forward return. The measured statement is narrower: on one symbol over 48.8 days the score did not rank 30m outcomes, and the caps are not why. Whether the score SHOULD rank returns, and whether a longer or multi-symbol sample would show an edge this one cannot, remain human decisions. No weights were changed, because tuning them against the sample that exposed the failure is curve-fitting.
+- **Evidence (after):** Both bucketings fail in the same direction on both runs. VALIDATION: displayed 80+ -0.082 R vs 60+ -0.068 R; pre-cap 85+ -0.141 R vs 60+ -0.068 R. AUTOTUNE: displayed 80+ -0.229 R vs 60+ -0.004 R; pre-cap 85+ -0.256 R vs 60+ -0.004 R. The report states that both bucketings agree, so the failure is a property of the score rather than of the caps. EXTENDED to three windows after the terminal's MaxBars cap was found and lifted (F-058): 48.8 days / 6 symbols / 2892 signals gave PF 0.75, AvgR30 -0.162, every bucket 32-35% hit; 730 days / 6 symbols / 3272 signals gave PF 0.90, AvgR30 -0.063, buckets 36-41% hit with 70-74 the only positive bucket at +0.023 R and 40.8% hit; 2900 days (2018-2026) / 6 symbols / 3952 signals gave PF 0.78, AvgR30 -0.137, buckets 34-35% hit.
+- **Notes:** DISPROVES A HYPOTHESIS OF MINE. I had suggested the 75-79 bucket looked inverted because events capped down by weak_hold_cap (74) and overextended_cap (75) concentrate there. That does not explain the result: bucketing on the score before ANY cap applied fails in the same direction and by a larger margin. The lead was wrong and is recorded as wrong. WHAT THIS DOES NOT ESTABLISH: that the score is broken. The product documents the score as an event-quality ranking, not a probability or a trade instruction, and nothing here tests event quality - only whether it ranks forward return. The measured statement is narrower: on one symbol over 48.8 days the score did not rank 30m outcomes, and the caps are not why. Whether the score SHOULD rank returns, and whether a longer or multi-symbol sample would show an edge this one cannot, remain human decisions. No weights were changed, because tuning them against the sample that exposed the failure is curve-fitting. THREE-WINDOW RESULT, which supersedes any single-run reading. The ranking verdict flips with the window: NOT SUPPORTED on 48.8 days (80+ -0.095 R vs 60+ -0.093 R) and on 730 days (80+ -0.073 vs 60+ -0.026), then SUPPORTED on 2900 days (80+ -0.139 vs 60+ -0.165). The 8-year 'supported' is a technicality of comparing two negative averages, not evidence of an edge: its bucket hit rates are flat at 34.4-35.3% and its PF is 0.78. WHAT IS STABLE ACROSS ALL THREE: no populated bucket reaches the 41.2% break-even rate in any window, on 6 symbols. That is the robust finding and it is the one that matters for a go-live decision - the score is not what stands between this configuration and profitability. ALSO STABLE, and a defect in how the gate is used: the default 90-day window is badly unrepresentative. The same strategy scores PF 0.75 / AvgR30 -0.162 on 48.8 days, PF 0.90 / -0.063 on 730 days and PF 0.78 / -0.137 on 2900 days. A single default-window validation can read as 'clearly losing' when two years of the same rules are close to break-even, so the window must be stated alongside any such number.
 
 ### F-055 (S2, verification) — Phase E needed root for no reason: a LaunchAgent in the user's own GUI domain works
 
@@ -526,6 +529,45 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 - **Fix:** A LaunchAgent with LimitLoadToSessionType=Aqua bootstrapped into the caller's OWN gui/<uid> domain runs in the Aqua session and needs no privilege: a non-root user may read and bootstrap into gui/<uid> when they are the console user. AUDIT/environment.md now documents this as the preferred method and keeps the root method as a fallback.
 - **Evidence (after):** The complete Phase E gate set ran on node2 as user 501 with no sudo and no credential, at commit 14b8253: contracts 0 violations across 9, census 0 findings/0 allowed, compile 'Result: 0 errors, 0 warnings', self-test '218 passed, 0 failed of 218', all seven scanners PASS, coverage 83%, exit 0.
 - **Notes:** A misleading probe is recorded with it: 'launchctl managername' reports Background from INSIDE such a job, so it looks like the trick failed when it has worked. The test that matters is whether the terminal starts. The first attempt was written off on the strength of managername alone and only rewritten after testing the terminal directly - the same mistake as E-5's wrong broker-authorization hypothesis, in miniature.
+
+### F-056 (S2, engine) — The whole-window M1 load is a memory bound on usable lookback - measured, and higher than feared
+
+- **Status:** DONE  |  **Category:** perf  |  **Host:** node3  |  **Commit:** a4382fd
+- **Location:** `FXNews.mq5 (LoadHistoricalM1Rates)`
+- **Discovered by:** F-053's need for a longer window
+- **Evidence (before):**
+
+  > HistoricalLookbackDays was capped at 365 days and LoadHistoricalM1Rates asks CopyRates for the WHOLE window in one call, so a multi-year window is millions of MqlRates held at once. The boundary sub-sampling bounds the EVALUATION, not the load, so the ceiling in the source was never the real limit.
+
+- **Fix:** No engine change. The ceiling was raised to 3650 and the real bound was MEASURED rather than assumed: a 2900-day window loaded 2.95 million M1 bars per symbol (17.7 million across 6 symbols) with no failure.
+- **Evidence (after):** 2 953 804 M1 bars for GBPUSD and 2 952 143 for AUDUSD in single calls, 17 710 198 bars total across the run, 21 477 boundaries evaluated, exit 0. So the load is not the limit at ~3M bars per symbol; the bound above that is unmeasured and the code comment says so instead of guessing.
+- **Notes:** Recorded because I had flagged the memory bound as a likely blocker before measuring it, and the measurement did not bear that out at the sizes actually available (the broker's M1 starts in 2018, so ~3M bars per symbol is the practical maximum anyway). The full 2000-2017 range the operator expected does not exist on this terminal: the .hcc files begin at 2018.
+
+### F-057 (S2, testing) — The harness passes only its first three inputs, so no historical run can use a non-default configuration
+
+- **Status:** DONE  |  **Category:** tests  |  **Host:** node3  |  **Commit:** a4382fd
+- **Location:** `tools/mql5/FXNewsSelfTest.mq5:58-60`
+- **Discovered by:** an override that silently did nothing
+- **Evidence (before):**
+
+  > The gate script was given FXNEWS_HISTORICAL_LOOKBACK_DAYS, which writes HistoricalLookbackDays into the preset. The run still reported '48.8 of 90 days', so the value never reached the indicator: the harness calls iCustom(_Symbol, _Period, PATH, HarnessMode) or iCustom(..., HarnessMode, HarnessSymbols, HarnessTimeframes), and every other indicator input keeps its default.
+
+- **Fix:** Documented rather than worked around in place, because passing the remaining ~80 inputs positionally would be fragile and would silently mis-bind the moment an input is inserted. The gate script now says which variables it forwards and which it cannot, and MAX_HISTORICAL_LOOKBACK_DAYS carries the same note. A non-default historical run is done for now by changing the input default in a scratch copy of the source, which is what setting the input dialog does.
+- **Evidence (after):** The limitation is stated in tools/selftest-macos.sh next to the overrides and in the ledger. The measurements in F-053 that needed a non-default window were produced that way and the source was reverted immediately afterwards, verified with 'git status' reporting 0 modified.
+- **Notes:** The override that did nothing is the reason this was found: it produced a plausible-looking run with default settings rather than an error, which is exactly the kind of silent no-op this audit has been hunting. Anyone adding a historical input to the gate script needs to know it will not take effect.
+
+### F-058 (S2, verification) — The terminal's MaxBars=50000 silently capped every historical window at 48.8 days
+
+- **Status:** DONE  |  **Category:** deps  |  **Host:** node3  |  **Commit:** a4382fd
+- **Location:** `MetaTrader terminal config/common.ini (MaxBars)`
+- **Discovered by:** a round 50000 bars for five different symbols
+- **Evidence (before):**
+
+  > Every --validation run reported the same thing: '50000 M1 bars, 48.8 days' and a window of '48.8 of 90 days', for every symbol, whatever was requested. Five different pairs returning exactly 50000 bars pointed at a cap rather than at the data.
+
+- **Fix:** The cap is the terminal's own setting: config/common.ini contained MaxBars=50000, the 'Max bars in chart' option. Raised it (backup at ~/common.ini.backup) and the window became what was asked for.
+- **Evidence (after):** With MaxBars raised, the same request produced 744 131 M1 bars over 729.9 days for GBPUSD and then 2 953 804 bars over 2899.9 days, against 50 000 bars over 48.8 days before. The report's Window line now matches the request instead of silently truncating.
+- **Notes:** Found by pattern rather than by reading code: five different symbols returning exactly 50000 bars is not a property of the market. The gate reported '48.8 of 90 days' on every run since the audit began and the number was never questioned - a documented limit that looks like data is worse than an error. The terminal's MaxBars is now 5000000 and the original file is backed up at ~/common.ini.backup; that is a setting on the audit machine, not something the repository controls, so it is recorded here rather than fixed in code.
 
 ### F-010 (S3, historical) — The 85+ bucket in the historical report is unreachable (now empirically confirmed; the wiki already documents the empty bucket, so only the unannotated report row remains)
 

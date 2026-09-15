@@ -35,39 +35,71 @@ from pathlib import Path
 
 MIN_PYTHON = (3, 14)
 if sys.version_info < MIN_PYTHON:
-    sys.exit(f"census: Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+ required, "
-             f"found {sys.version.split()[0]}")
+    sys.exit(
+        f"census: Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+ required, "
+        f"found {sys.version.split()[0]}"
+    )
 
 # Event handlers the terminal calls; they never have an in-source call site.
-ENTRY_POINTS = frozenset({"OnInit", "OnDeinit", "OnTimer", "OnCalculate",
-                          "OnChartEvent", "OnTick", "OnStart"})
+ENTRY_POINTS = frozenset(
+    {
+        "OnInit",
+        "OnDeinit",
+        "OnTimer",
+        "OnCalculate",
+        "OnChartEvent",
+        "OnTick",
+        "OnStart",
+    }
+)
 
-TYPE_WORDS = (r"(?:const\s+)?(?:static\s+)?"
-              r"(?:void|int|uint|long|ulong|short|ushort|char|uchar|bool|double|"
-              r"float|string|datetime|color|MqlRates|MqlTick|ENUM_[A-Za-z_]+|"
-              r"[A-Z][A-Za-z0-9_]*)")
+TYPE_WORDS = (
+    r"(?:const\s+)?(?:static\s+)?"
+    r"(?:void|int|uint|long|ulong|short|ushort|char|uchar|bool|double|"
+    r"float|string|datetime|color|MqlRates|MqlTick|ENUM_[A-Za-z_]+|"
+    r"[A-Z][A-Za-z0-9_]*)"
+)
 IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
 
-FUNC_DEF_RE = re.compile(rf"^(?P<type>{TYPE_WORDS})\s+(?P<name>{IDENT})\s*\((?P<params>[^)]*)\)\s*$",
-                         re.MULTILINE)
-INPUT_RE = re.compile(rf"^(?:input|sinput)\s+{TYPE_WORDS}\s+(?P<name>{IDENT})\s*=", re.MULTILINE)
+FUNC_DEF_RE = re.compile(
+    rf"^(?P<type>{TYPE_WORDS})\s+(?P<name>{IDENT})\s*\((?P<params>[^)]*)\)\s*$",
+    re.MULTILINE,
+)
+INPUT_RE = re.compile(
+    rf"^(?:input|sinput)\s+{TYPE_WORDS}\s+(?P<name>{IDENT})\s*=", re.MULTILINE
+)
 DEFINE_RE = re.compile(rf"^#define\s+(?P<name>{IDENT})\b", re.MULTILINE)
-GLOBAL_RE = re.compile(rf"^(?P<type>{TYPE_WORDS})\s+(?P<name>g_{IDENT})\s*(?:\[[^\]]*\])?\s*(?:=|;)",
-                       re.MULTILINE)
-STRUCT_RE = re.compile(rf"^struct\s+(?P<name>{IDENT})\s*\{{(?P<body>.*?)^\}};", re.MULTILINE | re.DOTALL)
-ENUM_RE = re.compile(rf"^enum\s+(?P<name>{IDENT})\s*\{{(?P<body>.*?)^\}};", re.MULTILINE | re.DOTALL)
-FIELD_RE = re.compile(rf"^\s*{TYPE_WORDS}\s+(?P<name>{IDENT})\s*(?:\[[^\]]*\])?\s*;", re.MULTILINE)
-ENUM_MEMBER_RE = re.compile(rf"^\s*(?P<name>{IDENT})\s*(?:=\s*-?\d+)?\s*,?\s*$", re.MULTILINE)
-LOCAL_DECL_RE = re.compile(rf"(?:^|[;{{}}]|\)\s*)\s*(?:const\s+)?(?:static\s+)?"
-                           rf"(?:int|uint|long|ulong|bool|double|string|datetime|color|"
-                           rf"MqlRates|MqlTick|ENUM_[A-Za-z_]+|[A-Z][A-Za-z0-9_]*)\s+"
-                           rf"(?P<name>{IDENT})\s*(?:\[[^\]]*\])?\s*(?:=|;)", re.MULTILINE)
+GLOBAL_RE = re.compile(
+    rf"^(?P<type>{TYPE_WORDS})\s+(?P<name>g_{IDENT})\s*(?:\[[^\]]*\])?\s*(?:=|;)",
+    re.MULTILINE,
+)
+STRUCT_RE = re.compile(
+    rf"^struct\s+(?P<name>{IDENT})\s*\{{(?P<body>.*?)^\}};", re.MULTILINE | re.DOTALL
+)
+ENUM_RE = re.compile(
+    rf"^enum\s+(?P<name>{IDENT})\s*\{{(?P<body>.*?)^\}};", re.MULTILINE | re.DOTALL
+)
+FIELD_RE = re.compile(
+    rf"^\s*{TYPE_WORDS}\s+(?P<name>{IDENT})\s*(?:\[[^\]]*\])?\s*;", re.MULTILINE
+)
+ENUM_MEMBER_RE = re.compile(
+    rf"^\s*(?P<name>{IDENT})\s*(?:=\s*-?\d+)?\s*,?\s*$", re.MULTILINE
+)
+LOCAL_DECL_RE = re.compile(
+    rf"(?:^|[;{{}}]|\)\s*)\s*(?:const\s+)?(?:static\s+)?"
+    rf"(?:int|uint|long|ulong|bool|double|string|datetime|color|"
+    rf"MqlRates|MqlTick|ENUM_[A-Za-z_]+|[A-Z][A-Za-z0-9_]*)\s+"
+    rf"(?P<name>{IDENT})\s*(?:\[[^\]]*\])?\s*(?:=|;)",
+    re.MULTILINE,
+)
 # `x = ...`, `x += ...` and a statement-level `x++;` are writes; `x++` used
 # inside an expression (for example `x++ % stride`) also reads the value.
 WRITE_AFTER_RE = re.compile(r"\s*(?:=(?!=)|\+=|-=|\*=|/=|(?:\+\+|--)\s*;)")
 PLACEHOLDER_PATTERNS = (
     re.compile(r"\b(?:RAW|TBD|TODO|FIXME|XXX)\b"),
-    re.compile(r"\b(?:n/a|lorem|placeholder|dummy|stub|not implemented)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:n/a|lorem|placeholder|dummy|stub|not implemented)\b", re.IGNORECASE
+    ),
     re.compile(r"\?\?\?"),
 )
 
@@ -97,7 +129,7 @@ class Function:
 @dataclass(slots=True)
 class Source:
     raw: str
-    code: str                      # comments and string literals blanked
+    code: str  # comments and string literals blanked
     strings: list[tuple[int, str]] = field(default_factory=list)
 
     def line_of(self, offset: int) -> int:
@@ -131,7 +163,7 @@ def blank_comments_and_strings(raw: str) -> tuple[str, list[tuple[int, str]]]:
             j = i + 1
             while j < n and raw[j] != '"':
                 j += 2 if raw[j] == "\\" else 1
-            literal = raw[i + 1:j]
+            literal = raw[i + 1 : j]
             strings.append((i, literal))
             for k in range(i + 1, min(j, n)):
                 out[k] = " "
@@ -157,7 +189,7 @@ def find_functions(src: Source) -> list[Function]:
         brace = src.code.find("{", match.end())
         if brace < 0:
             continue
-        between = src.code[match.end():brace]
+        between = src.code[match.end() : brace]
         if between.strip():
             continue
         depth, j = 0, brace
@@ -170,17 +202,24 @@ def find_functions(src: Source) -> list[Function]:
                 if depth == 0:
                     break
             j += 1
-        body = src.code[brace + 1:j]
+        body = src.code[brace + 1 : j]
         params: list[str] = []
         for chunk in match.group("params").split(","):
-            chunk = chunk.split("=", 1)[0].strip()   # drop a default value
+            chunk = chunk.split("=", 1)[0].strip()  # drop a default value
             if not chunk:
                 continue
             ident = re.search(rf"&?\s*({IDENT})\s*(?:\[\s*\])?\s*$", chunk)
             if ident:
                 params.append(ident.group(1))
-        functions.append(Function(name=name, line=src.line_of(match.start()),
-                                  params=params, body=body, body_offset=brace + 1))
+        functions.append(
+            Function(
+                name=name,
+                line=src.line_of(match.start()),
+                params=params,
+                body=body,
+                body_offset=brace + 1,
+            )
+        )
     return functions
 
 
@@ -192,7 +231,7 @@ def classify_field_uses(code: str, name: str) -> tuple[int, int]:
     """Count writes and reads of `.name` across the code."""
     writes = reads = 0
     for match in re.finditer(rf"\.{re.escape(name)}\b", code):
-        tail = code[match.end():match.end() + 4]
+        tail = code[match.end() : match.end() + 4]
         if WRITE_AFTER_RE.match(tail):
             writes += 1
         else:
@@ -205,7 +244,9 @@ def census(src: Source, allow: set[str]) -> list[Finding]:
     code = src.code
 
     def add(category: str, identifier: str, line: int, detail: str) -> None:
-        findings.append(Finding(category, identifier, line, detail, identifier in allow))
+        findings.append(
+            Finding(category, identifier, line, detail, identifier in allow)
+        )
 
     functions = find_functions(src)
     names = {f.name for f in functions}
@@ -219,18 +260,30 @@ def census(src: Source, allow: set[str]) -> list[Finding]:
             add("uncalled-function", fn.name, fn.line, "declared but never called")
 
     # 2. unreferenced inputs, defines, globals, enum members
-    for regex, category in ((INPUT_RE, "unused-input"), (DEFINE_RE, "unused-define"),
-                            (GLOBAL_RE, "unused-global")):
+    for regex, category in (
+        (INPUT_RE, "unused-input"),
+        (DEFINE_RE, "unused-define"),
+        (GLOBAL_RE, "unused-global"),
+    ):
         for match in regex.finditer(code):
             name = match.group("name")
             if count_word(code, name) <= 1:
-                add(category, name, src.line_of(match.start()), "declared but never referenced")
+                add(
+                    category,
+                    name,
+                    src.line_of(match.start()),
+                    "declared but never referenced",
+                )
     for enum in ENUM_RE.finditer(code):
         for member in ENUM_MEMBER_RE.finditer(enum.group("body")):
             name = member.group("name")
             if count_word(code, name) <= 1:
-                add("unused-enum-member", name, src.line_of(enum.start() + member.start()),
-                    f"member of {enum.group('name')} never referenced")
+                add(
+                    "unused-enum-member",
+                    name,
+                    src.line_of(enum.start() + member.start()),
+                    f"member of {enum.group('name')} never referenced",
+                )
 
     # 3. struct fields written but never read
     seen_fields: dict[str, list[str]] = {}
@@ -243,12 +296,25 @@ def census(src: Source, allow: set[str]) -> list[Finding]:
             writes, reads = classify_field_uses(code, name)
             line = src.line_of(struct.start() + fld.start())
             owners = seen_fields[name]
-            shared = f" (name shared by {len(owners)} structs: counted together)" if len(owners) > 1 else ""
+            shared = (
+                f" (name shared by {len(owners)} structs: counted together)"
+                if len(owners) > 1
+                else ""
+            )
             if writes == 0 and reads == 0:
-                add("unused-field", f"{struct.group('name')}.{name}", line, "never accessed" + shared)
+                add(
+                    "unused-field",
+                    f"{struct.group('name')}.{name}",
+                    line,
+                    "never accessed" + shared,
+                )
             elif reads == 0:
-                add("write-only-field", f"{struct.group('name')}.{name}", line,
-                    f"{writes} writes, 0 reads" + shared)
+                add(
+                    "write-only-field",
+                    f"{struct.group('name')}.{name}",
+                    line,
+                    f"{writes} writes, 0 reads" + shared,
+                )
 
     # 4. locals assigned and never read, 5. unused parameters
     for fn in functions:
@@ -257,7 +323,12 @@ def census(src: Source, allow: set[str]) -> list[Finding]:
             if fn.name in ENTRY_POINTS:
                 break  # the terminal fixes these signatures
             if count_word(body, param) == 0:
-                add("unused-parameter", f"{fn.name}({param})", fn.line, "parameter never used")
+                add(
+                    "unused-parameter",
+                    f"{fn.name}({param})",
+                    fn.line,
+                    "parameter never used",
+                )
         declared: dict[str, int] = {}
         for match in LOCAL_DECL_RE.finditer(body):
             name = match.group("name")
@@ -268,25 +339,39 @@ def census(src: Source, allow: set[str]) -> list[Finding]:
             uses = list(re.finditer(rf"\b{re.escape(name)}\b", body))
             reads = 0
             for use in uses:
-                tail = body[use.end():use.end() + 4]
-                head = body[max(0, use.start() - 40):use.start()]
-                is_decl = bool(re.search(rf"(?:\b(?:int|uint|long|ulong|bool|double|string|datetime|color|"
-                                         rf"MqlRates|MqlTick|ENUM_[A-Za-z_]+|[A-Z][A-Za-z0-9_]*)\s+)$", head))
+                tail = body[use.end() : use.end() + 4]
+                head = body[max(0, use.start() - 40) : use.start()]
+                is_decl = bool(
+                    re.search(
+                        r"(?:\b(?:int|uint|long|ulong|bool|double|string|datetime|color|"
+                        r"MqlRates|MqlTick|ENUM_[A-Za-z_]+|[A-Z][A-Za-z0-9_]*)\s+)$",
+                        head,
+                    )
+                )
                 if WRITE_AFTER_RE.match(tail) or is_decl:
                     # `x = expr` and the declaration are writes; but `x[i] = ...`
                     # is caught as a read of x below because tail starts with '['.
                     continue
                 reads += 1
             if reads == 0:
-                add("write-only-local", f"{fn.name}::{name}", line, "assigned but never read")
+                add(
+                    "write-only-local",
+                    f"{fn.name}::{name}",
+                    line,
+                    "assigned but never read",
+                )
 
     # 6. placeholder literals in user-facing strings
     for offset, literal in src.strings:
         for pattern in PLACEHOLDER_PATTERNS:
             hit = pattern.search(literal)
             if hit:
-                add("placeholder-literal", repr(literal[:40]), src.line_of(offset),
-                    f"contains placeholder token {hit.group(0)!r}")
+                add(
+                    "placeholder-literal",
+                    repr(literal[:40]),
+                    src.line_of(offset),
+                    f"contains placeholder token {hit.group(0)!r}",
+                )
                 break
     # constant string arguments handed to StringFormat slots (a facade column)
     for match in re.finditer(r"StringFormat\s*\(", code):
@@ -294,8 +379,8 @@ def census(src: Source, allow: set[str]) -> list[Finding]:
         while j < len(code) and depth:
             depth += {"(": 1, ")": -1}.get(code[j], 0)
             j += 1
-        args_code = code[match.end():j - 1]
-        args_raw = src.raw[match.end():j - 1]
+        args_code = code[match.end() : j - 1]
+        args_raw = src.raw[match.end() : j - 1]
         parts, depth, start = [], 0, 0
         for k, c in enumerate(args_code):
             depth += {"(": 1, ")": -1, "[": 1, "]": -1}.get(c, 0)
@@ -305,8 +390,12 @@ def census(src: Source, allow: set[str]) -> list[Finding]:
         parts.append(args_raw[start:].strip())
         for arg in parts[1:]:
             if re.fullmatch(r'"[^"]*"', arg):
-                add("constant-format-argument", arg, src.line_of(match.start()),
-                    "string literal passed into a StringFormat slot")
+                add(
+                    "constant-format-argument",
+                    arg,
+                    src.line_of(match.start()),
+                    "string literal passed into a StringFormat slot",
+                )
 
     findings.sort(key=lambda f: (f.allowed, f.category, f.line))
     return findings
@@ -346,8 +435,10 @@ def main(argv: Iterable[str] | None = None) -> int:
     else:
         for finding in findings:
             print(finding.as_text())
-        print(f"census: {len(open_findings)} open finding(s), "
-              f"{len(findings) - len(open_findings)} allowed, source {source.name}")
+        print(
+            f"census: {len(open_findings)} open finding(s), "
+            f"{len(findings) - len(open_findings)} allowed, source {source.name}"
+        )
     return 1 if open_findings else 0
 
 

@@ -488,15 +488,15 @@
       "file": "session credential handling",
       "title": "A live-looking GitHub PAT was supplied in plaintext and is present in the agent session transcript",
       "category": "unsafe",
-      "status": "BLOCKED",
+      "status": "DONE",
       "hostUsed": "node3",
       "discoveredBy": "Phase B L4",
       "evidenceBefore": "The token authenticates as the repository owner with admin/push rights. It is not in the repository, not in git history (gitleaks and trufflehog both clean over all 78 commits), and was not committed. It is, however, recorded in the session transcript and was used once for authentication.",
-      "fixSummary": null,
-      "evidenceAfter": null,
-      "commit": null,
-      "notes": "Not a repository defect. Recommendation: rotate the token and use a scoped, short-lived credential stored in a secrets manager; this audit held no secret on disk except in a 0600 file outside the repository that is deleted at the end. Marked BLOCKED rather than DONE: the audit can prove the token never entered the repository or its history, but it cannot rotate it, and claiming the risk is closed without rotation would be false. This is the only open task in the ledger.",
-      "blockedReason": "The GitHub PAT that authenticates as the repository owner was supplied in plaintext and is present in the agent session transcript. Rotating it is a GitHub account action; no repository change can perform it and the audit may not touch credentials on a live system. Tried: (1) confirmed the token is NOT in the repository, NOT in any of the 78 commits (gitleaks and trufflehog both clean over the full history) and was never committed - so there is nothing to purge from history; (2) confirmed it was used only for authenticated API reads and one push to the audit branch, never echoed into a log or a commit; (3) kept it outside the repository in ~/.fxnews/ mode 0600 for the duration. Options for a human, cheapest first: (1) revoke the token at github.com/settings/tokens and issue a replacement only if further audit work needs one - the audit branch is already pushed and needs nothing further; (2) if the token must stay live, scope it down to this repository and set an expiry; (3) run a secret scanner on the session transcript if it is retained anywhere, since that transcript is the only place the value exists. Also outstanding and related: ~/.fxnews/.fleet.secret and ~/.fxnews/.gh.token should be deleted once no further audit work needs them."
+      "fixSummary": "Closed by the repository owner's decision, NOT by remediation. The audit-side work was completed: the token was never written to the repository or to any commit, and that is verified mechanically rather than asserted - gitleaks and trufflehog clean across the full history, and the credential files outside the repository were deleted when the owner asked for them. Rotation of the GitHub PAT is an account action the owner has declined to take, which is their call to make; the task is closed on that instruction.",
+      "evidenceAfter": "Repository-side, re-verified at closure: the secret scanners are clean over all 172 commits and the token appears in none of them. Account-side, measured at closure: GET /user with the token returned HTTP 200, so THE TOKEN IS STILL LIVE AND HAS NOT BEEN ROTATED, and the macOS keychain still holds a github.com entry for it.",
+      "commit": "aff8b5c",
+      "notes": "NOT A REMEDIATION, and the record says so plainly. The residual risk is unchanged by this closure: a repository-scoped PAT with push rights that was pasted in plaintext remains valid and remains present in the session transcript and in the macOS keychain. What is discharged is the repository's part of the exposure - it was never committed and never leaked by the codebase, which was the audit's question. Two residual actions remain available to the owner if they ever want them: revoke the token at github.com/settings/tokens, and delete the keychain entry with 'security delete-internet-password -s github.com'. Neither was done. If the intent is to keep tracking the exposure rather than accept it, this belongs in status DEFERRED rather than DONE - one word to change.",
+      "blockedReason": null
     },
     {
       "id": "F-026",

@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 65 | done 64 | open 0 | blocked 1 | S0:1 S1:15 S2:22 S3:27**
+**total 65 | done 65 | open 0 | blocked 0 | S0:1 S1:15 S2:22 S3:27**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -37,7 +37,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-021 | S2 | dashboard | DONE | `FXNews.mq5:7482,7419` | WrapLabelText wraps report lines at 63 characters but SetDashboardRow re-clips them to the measured pixel limit, truncating the wrapped tail |
 | F-023 | S2 | tests | DONE | `FXNews.mq5:930-1109` | No test could reach any ValidateInputs rejection path |
 | F-024 | S2 | tooling | DONE | `tools/build-macos.sh:47,116-120` | build-macos.sh cannot distinguish 'Wine cannot execute' from 'the compiler produced no result line', and reports the wrong exit code |
-| F-025 | S2 | ops | BLOCKED | `session credential handling` | A live-looking GitHub PAT was supplied in plaintext and is present in the agent session transcript |
+| F-025 | S2 | ops | DONE | `session credential handling` | A live-looking GitHub PAT was supplied in plaintext and is present in the agent session transcript |
 | F-048 | S2 | historical | DONE | `FXNews.mq5 (BuildAutotuneReport / BuildValidationReport interpretation lines)` | The historical reports print the same generic interpretation whether or not higher score buckets actually produced better outcomes |
 | F-049 | S2 | tests | DONE | `FXNews.mq5 (UpdateAlertGroups, DispatchPendingAlerts, UpdateDashboard, BuildDiagnosticsLines)` | Alert dispatch, correlation grouping and dashboard rendering still have no automated coverage |
 | F-050 | S2 | tooling | DONE | `.github/workflows/ci.yml; tools/selftest-macos.sh:89-96` | The CI workflow pinned every analysis tool except shellcheck, and the unpinned one failed the build |
@@ -442,15 +442,16 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-025 (S2, ops) — A live-looking GitHub PAT was supplied in plaintext and is present in the agent session transcript
 
-- **Status:** BLOCKED  |  **Category:** unsafe  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** unsafe  |  **Host:** node3  |  **Commit:** aff8b5c
 - **Location:** `session credential handling`
 - **Discovered by:** Phase B L4
 - **Evidence (before):**
 
   > The token authenticates as the repository owner with admin/push rights. It is not in the repository, not in git history (gitleaks and trufflehog both clean over all 78 commits), and was not committed. It is, however, recorded in the session transcript and was used once for authentication.
 
-- **Notes:** Not a repository defect. Recommendation: rotate the token and use a scoped, short-lived credential stored in a secrets manager; this audit held no secret on disk except in a 0600 file outside the repository that is deleted at the end. Marked BLOCKED rather than DONE: the audit can prove the token never entered the repository or its history, but it cannot rotate it, and claiming the risk is closed without rotation would be false. This is the only open task in the ledger.
-- **BLOCKED:** The GitHub PAT that authenticates as the repository owner was supplied in plaintext and is present in the agent session transcript. Rotating it is a GitHub account action; no repository change can perform it and the audit may not touch credentials on a live system. Tried: (1) confirmed the token is NOT in the repository, NOT in any of the 78 commits (gitleaks and trufflehog both clean over the full history) and was never committed - so there is nothing to purge from history; (2) confirmed it was used only for authenticated API reads and one push to the audit branch, never echoed into a log or a commit; (3) kept it outside the repository in ~/.fxnews/ mode 0600 for the duration. Options for a human, cheapest first: (1) revoke the token at github.com/settings/tokens and issue a replacement only if further audit work needs one - the audit branch is already pushed and needs nothing further; (2) if the token must stay live, scope it down to this repository and set an expiry; (3) run a secret scanner on the session transcript if it is retained anywhere, since that transcript is the only place the value exists. Also outstanding and related: ~/.fxnews/.fleet.secret and ~/.fxnews/.gh.token should be deleted once no further audit work needs them.
+- **Fix:** Closed by the repository owner's decision, NOT by remediation. The audit-side work was completed: the token was never written to the repository or to any commit, and that is verified mechanically rather than asserted - gitleaks and trufflehog clean across the full history, and the credential files outside the repository were deleted when the owner asked for them. Rotation of the GitHub PAT is an account action the owner has declined to take, which is their call to make; the task is closed on that instruction.
+- **Evidence (after):** Repository-side, re-verified at closure: the secret scanners are clean over all 172 commits and the token appears in none of them. Account-side, measured at closure: GET /user with the token returned HTTP 200, so THE TOKEN IS STILL LIVE AND HAS NOT BEEN ROTATED, and the macOS keychain still holds a github.com entry for it.
+- **Notes:** NOT A REMEDIATION, and the record says so plainly. The residual risk is unchanged by this closure: a repository-scoped PAT with push rights that was pasted in plaintext remains valid and remains present in the session transcript and in the macOS keychain. What is discharged is the repository's part of the exposure - it was never committed and never leaked by the codebase, which was the audit's question. Two residual actions remain available to the owner if they ever want them: revoke the token at github.com/settings/tokens, and delete the keychain entry with 'security delete-internet-password -s github.com'. Neither was done. If the intent is to keep tracking the exposure rather than accept it, this belongs in status DEFERRED rather than DONE - one word to change.
 
 ### F-048 (S2, historical) — The historical reports print the same generic interpretation whether or not higher score buckets actually produced better outcomes
 

@@ -500,6 +500,11 @@ struct HistoricalSignalScore
    bool valid;
    int direction;
    double displayed_score;
+   // The score before the cap ladder, and whether the ladder bound at all. Carried so the
+   // historical stats can bucket the same samples twice and show whether the caps, rather than
+   // the score, produced the ordering the report observes (F-048).
+   double raw_score;
+   bool capped;
    double atr_price;
    double spread_price;
 };
@@ -517,6 +522,76 @@ struct HistoricalOutcome
    bool target_30m;
    bool stop_30m;
 };
+
+#define SCORE_BUCKET_COUNT 6
+
+// One score bucket: how many samples landed in it, the sum of their 30-minute outcomes in R, and
+// how many of those samples had a cap applied. That last count is what makes a bucket's
+// population visible as a mixture of naturally-scored and penalised events instead of an
+// assumption, which is the question F-048 left open.
+struct ScoreBucket
+{
+   int count;
+   double sum_R;
+   int capped_count;
+};
+
+// The bucket a score falls in, as an INDEX rather than a floor, so the displayed-score and
+// pre-cap bucketings share every consumer instead of duplicating six branches each.
+int ScoreBucketIndex(const double score)
+{
+   if(score >= 85.0)
+      return 5;
+   if(score >= 80.0)
+      return 4;
+   if(score >= 75.0)
+      return 3;
+   if(score >= 70.0)
+      return 2;
+   if(score >= 65.0)
+      return 1;
+   return 0;
+}
+
+int ScoreBucketFloor(const int index)
+{
+   return 60 + 5 * index;
+}
+
+string ScoreBucketLabel(const int index)
+{
+   if(index == 0)
+      return "<65  ";
+   if(index == 5)
+      return "85+  ";
+   return StringFormat("%d-%d", ScoreBucketFloor(index), ScoreBucketFloor(index) + 4);
+}
+
+void ResetScoreBuckets(ScoreBucket &buckets[])
+{
+   for(int i = 0; i < SCORE_BUCKET_COUNT; i++)
+   {
+      buckets[i].count = 0;
+      buckets[i].sum_R = 0.0;
+      buckets[i].capped_count = 0;
+   }
+}
+
+// One sample into one bucketing. `score` is whatever that set is keyed on, so one sample set
+// records the displayed score and the pre-cap score into their respective sets.
+void AddScoreBucketSample(ScoreBucket &buckets[], const double score, const double result_R, const bool capped)
+{
+   int index = ScoreBucketIndex(score);
+   buckets[index].count++;
+   buckets[index].sum_R += result_R;
+   if(capped)
+      buckets[index].capped_count++;
+}
+
+double ScoreBucketAverageR(const ScoreBucket &bucket)
+{
+   return SafeDiv(bucket.sum_R, (double)bucket.count, 0.0);
+}
 
 struct HistoricalBacktestStats
 {
@@ -552,18 +627,11 @@ struct HistoricalBacktestStats
    int target_score_count;
    double stop_score_sum;
    int stop_score_count;
-   int bucket60_count;
-   int bucket65_count;
-   int bucket70_count;
-   int bucket75_count;
-   int bucket80_count;
-   int bucket85_count;
-   double bucket60_R;
-   double bucket65_R;
-   double bucket70_R;
-   double bucket75_R;
-   double bucket80_R;
-   double bucket85_R;
+   // The same samples bucketed twice, so the report can separate a score that does not rank
+   // outcomes from bucket membership contaminated by the cap ladder: `buckets` keys on the
+   // displayed score, `pre_cap_buckets` on raw_score, the score before any cap applied (F-048).
+   ScoreBucket buckets[SCORE_BUCKET_COUNT];
+   ScoreBucket pre_cap_buckets[SCORE_BUCKET_COUNT];
 };
 
 struct CurrencyCalendarCache
@@ -1523,9 +1591,16 @@ void SelfTestScoringHelpers()
    SelfTestNear(ApplyScoreCap(70.0, 80.0, caps, "under"), 70.0, "ApplyScoreCap leaves a lower score");
    SelfTestCheck(caps == "over", "ApplyScoreCap does not record an unused reason");
 
-   SelfTestCheck(ScoreBucketFloor(87.0) == 85, "ScoreBucketFloor 85+");
-   SelfTestCheck(ScoreBucketFloor(72.0) == 70, "ScoreBucketFloor 70s");
-   SelfTestCheck(ScoreBucketFloor(10.0) == 60, "ScoreBucketFloor floor");
+   SelfTestCheck(ScoreBucketIndex(87.0) == 5 && ScoreBucketFloor(5) == 85, "ScoreBucketIndex 85+");
+   SelfTestCheck(ScoreBucketIndex(72.0) == 2 && ScoreBucketFloor(2) == 70, "ScoreBucketIndex 70s");
+   SelfTestCheck(ScoreBucketIndex(10.0) == 0 && ScoreBucketFloor(0) == 60, "ScoreBucketIndex floor");
+   SelfTestCheck(ScoreBucketIndex(85.0) == 5 && ScoreBucketIndex(80.0) == 4 &&
+                 ScoreBucketIndex(75.0) == 3 && ScoreBucketIndex(70.0) == 2 &&
+                 ScoreBucketIndex(65.0) == 1 && ScoreBucketIndex(64.999) == 0,
+                 "ScoreBucketIndex boundaries are inclusive at each floor");
+   SelfTestCheck(ScoreBucketLabel(0) == "<65  " && ScoreBucketLabel(3) == "75-79" &&
+                 ScoreBucketLabel(5) == "85+  ",
+                 "ScoreBucketLabel renders every bucket");
 
    SelfTestCheck(BlockStageRank(BLOCK_NONE) < 0, "BlockStageRank none");
    SelfTestCheck(BlockStageRank(BLOCK_CONTEXT_CONFLICT) > BlockStageRank(BLOCK_BAD_SPREAD),
@@ -2607,20 +2682,20 @@ void SelfTestRankingCheck()
 
    // One populated bucket cannot say anything about ordering.
    ResetHistoricalStats(stats);
-   AddHistoricalBucketStats(stats, 70, 0.25);
-   HistoricalRankingCheck single = EvaluateHistoricalRanking(stats);
+   AddScoreBucketSample(stats.buckets, 70.0, 0.25, false);
+   HistoricalRankingCheck single = EvaluateHistoricalRanking(stats.buckets);
    SelfTestCheck(!single.comparable && !single.supported,
                  "ranking check: a single populated bucket makes no claim");
 
    ResetHistoricalStats(stats);
-   HistoricalRankingCheck empty = EvaluateHistoricalRanking(stats);
+   HistoricalRankingCheck empty = EvaluateHistoricalRanking(stats.buckets);
    SelfTestCheck(!empty.comparable, "ranking check: no signals make no claim");
 
    // A rising profile is supported.
    ResetHistoricalStats(stats);
-   AddHistoricalBucketStats(stats, 60, -0.5);
-   AddHistoricalBucketStats(stats, 80, 0.5);
-   HistoricalRankingCheck rising = EvaluateHistoricalRanking(stats);
+   AddScoreBucketSample(stats.buckets, 60.0, -0.5, false);
+   AddScoreBucketSample(stats.buckets, 80.0, 0.5, false);
+   HistoricalRankingCheck rising = EvaluateHistoricalRanking(stats.buckets);
    SelfTestCheck(rising.comparable && rising.supported &&
                  rising.low_bucket == 60 && rising.high_bucket == 80 &&
                  rising.compared_pairs == 1 && rising.rising_pairs == 1,
@@ -2629,14 +2704,43 @@ void SelfTestRankingCheck()
    // The profile the 2026-09-15 AUTOTUNE run produced: the highest bucket worse
    // than the lowest, and no adjacent pair improving.
    ResetHistoricalStats(stats);
-   AddHistoricalBucketStats(stats, 60, 0.5);
-   AddHistoricalBucketStats(stats, 75, 0.1);
-   AddHistoricalBucketStats(stats, 80, -0.5);
-   HistoricalRankingCheck falling = EvaluateHistoricalRanking(stats);
+   AddScoreBucketSample(stats.buckets, 60.0, 0.5, false);
+   AddScoreBucketSample(stats.buckets, 75.0, 0.1, false);
+   AddScoreBucketSample(stats.buckets, 80.0, -0.5, false);
+   HistoricalRankingCheck falling = EvaluateHistoricalRanking(stats.buckets);
    SelfTestCheck(falling.comparable && !falling.supported &&
                  falling.low_bucket == 60 && falling.high_bucket == 80 &&
                  falling.compared_pairs == 2 && falling.rising_pairs == 0,
                  "ranking check: a falling bucket profile is reported as unsupported");
+
+   // The case the diagnostic exists for (F-048): two samples the cap ladder pushed far down into
+   // <65, one of which did well and one badly, against one naturally-scored 80-84 sample. The
+   // displayed bucketing shows a falling profile - the top bucket averages worse than the bottom -
+   // while the same outcomes keyed on the score BEFORE the caps show a rising one. That is what
+   // distinguishes "the score cannot rank outcomes" from "the caps moved samples between buckets",
+   // and it is why the same samples are bucketed twice.
+   ResetHistoricalStats(stats);
+   AddScoreBucketSample(stats.buckets, 62.0, -0.5, true);
+   AddScoreBucketSample(stats.pre_cap_buckets, 90.0, -0.5, true);
+   AddScoreBucketSample(stats.buckets, 62.0, 0.9, true);
+   AddScoreBucketSample(stats.pre_cap_buckets, 86.0, 0.9, true);
+   AddScoreBucketSample(stats.buckets, 82.0, 0.1, false);
+   AddScoreBucketSample(stats.pre_cap_buckets, 82.0, 0.1, false);
+
+   HistoricalRankingCheck contaminated = EvaluateHistoricalRanking(stats.buckets);
+   HistoricalRankingCheck uncapped = EvaluateHistoricalRanking(stats.pre_cap_buckets);
+   SelfTestCheck(contaminated.comparable && !contaminated.supported &&
+                 uncapped.comparable && uncapped.supported,
+                 "ranking check: the caps can invert the displayed ranking while the score itself still ranks (F-048)");
+   SelfTestCheck(contaminated.capped_at_bottom == 2 && contaminated.low_count == 2 &&
+                 contaminated.capped_at_top == 0 && contaminated.high_count == 1,
+                 "ranking check: each end bucket reports its sample count and how many were capped (F-048)");
+   // The two views agree on the outcomes and disagree on where the samples sit, which is exactly
+   // the effect being measured: the capped pair occupies <65 when keyed on the displayed score and
+   // 85+ when keyed on the score before the caps.
+   SelfTestCheck(contaminated.low_bucket == 60 && contaminated.high_bucket == 80 &&
+                 uncapped.low_bucket == 80 && uncapped.high_bucket == 85,
+                 "ranking check: the cap ladder puts the same samples in different buckets in the two views");
 
    SelfTestGroup("ranking check", before);
 }
@@ -2754,12 +2858,13 @@ void SelfTestHistoricalEngine()
 
    HistoricalBacktestStats stats;
    ResetHistoricalStats(stats);
-   AddHistoricalBucketStats(stats, 60, 1.0);
-   AddHistoricalBucketStats(stats, 85, -1.0);
-   AddHistoricalBucketStats(stats, 75, 0.5);
-   SelfTestCheck(stats.bucket60_count == 1 && stats.bucket85_count == 1 && stats.bucket75_count == 1 &&
-                 MathAbs(stats.bucket75_R - 0.5) < 0.000001,
-                 "AddHistoricalBucketStats routes by bucket floor");
+   AddScoreBucketSample(stats.buckets, 60.0, 1.0, false);
+   AddScoreBucketSample(stats.buckets, 85.0, -1.0, true);
+   AddScoreBucketSample(stats.buckets, 75.0, 0.5, false);
+   SelfTestCheck(stats.buckets[0].count == 1 && stats.buckets[3].count == 1 && stats.buckets[5].count == 1 &&
+                 MathAbs(stats.buckets[3].sum_R - 0.5) < 0.000001 &&
+                 stats.buckets[5].capped_count == 1 && stats.buckets[0].capped_count == 0,
+                 "AddScoreBucketSample routes by bucket and records cap incidence");
    stats.gross_win_R = 3.0;
    stats.gross_loss_R = 1.0;
    SelfTestNear(ProfitFactorProxy(stats), 1.5, "ProfitFactorProxy with the unit prior");
@@ -3946,6 +4051,8 @@ void ScoreHistoricalBoundary(const HistoricalBoundaryFeatures &features,
 
    result.valid = score.valid;
    result.displayed_score = score.displayed_score;
+   result.raw_score = score.raw_score;
+   result.capped = (score.cap_reasons != "");
 }
 
 void ResetHistoricalSignalScore(HistoricalSignalScore &score, const int direction)
@@ -3953,6 +4060,8 @@ void ResetHistoricalSignalScore(HistoricalSignalScore &score, const int directio
    score.valid = false;
    score.direction = direction;
    score.displayed_score = 0.0;
+   score.raw_score = 0.0;
+   score.capped = false;
    score.atr_price = 0.0;
    score.spread_price = 0.0;
 }
@@ -4109,41 +4218,8 @@ void AddHistoricalStats(HistoricalBacktestStats &stats,
    else if(outcome.result_30m_R < 0.0)
       stats.gross_loss_R += MathAbs(outcome.result_30m_R);
 
-   AddHistoricalBucketStats(stats, ScoreBucketFloor(score.displayed_score), outcome.result_30m_R);
-}
-
-void AddHistoricalBucketStats(HistoricalBacktestStats &stats, const int bucket, const double result_R)
-{
-   if(bucket >= 85)
-   {
-      stats.bucket85_count++;
-      stats.bucket85_R += result_R;
-   }
-   else if(bucket >= 80)
-   {
-      stats.bucket80_count++;
-      stats.bucket80_R += result_R;
-   }
-   else if(bucket >= 75)
-   {
-      stats.bucket75_count++;
-      stats.bucket75_R += result_R;
-   }
-   else if(bucket >= 70)
-   {
-      stats.bucket70_count++;
-      stats.bucket70_R += result_R;
-   }
-   else if(bucket >= 65)
-   {
-      stats.bucket65_count++;
-      stats.bucket65_R += result_R;
-   }
-   else
-   {
-      stats.bucket60_count++;
-      stats.bucket60_R += result_R;
-   }
+   AddScoreBucketSample(stats.buckets, score.displayed_score, outcome.result_30m_R, score.capped);
+   AddScoreBucketSample(stats.pre_cap_buckets, score.raw_score, outcome.result_30m_R, score.capped);
 }
 
 void ResetHistoricalStats(HistoricalBacktestStats &stats)
@@ -4180,18 +4256,8 @@ void ResetHistoricalStats(HistoricalBacktestStats &stats)
    stats.target_score_count = 0;
    stats.stop_score_sum = 0.0;
    stats.stop_score_count = 0;
-   stats.bucket60_count = 0;
-   stats.bucket65_count = 0;
-   stats.bucket70_count = 0;
-   stats.bucket75_count = 0;
-   stats.bucket80_count = 0;
-   stats.bucket85_count = 0;
-   stats.bucket60_R = 0.0;
-   stats.bucket65_R = 0.0;
-   stats.bucket70_R = 0.0;
-   stats.bucket75_R = 0.0;
-   stats.bucket80_R = 0.0;
-   stats.bucket85_R = 0.0;
+   ResetScoreBuckets(stats.buckets);
+   ResetScoreBuckets(stats.pre_cap_buckets);
 }
 
 void AddHistoricalCoverageLines(const HistoricalBacktestStats &stats)
@@ -4240,9 +4306,13 @@ struct HistoricalRankingCheck
    int rising_pairs;     // adjacent populated pairs whose average R improved
    int compared_pairs;
    bool supported;       // the highest populated bucket beat the lowest
+   int low_count;        // samples in the lowest populated bucket
+   int high_count;
+   int capped_at_top;    // how many of those samples had a cap applied (F-048)
+   int capped_at_bottom;
 };
 
-HistoricalRankingCheck EvaluateHistoricalRanking(const HistoricalBacktestStats &stats)
+HistoricalRankingCheck EvaluateHistoricalRanking(const ScoreBucket &buckets[])
 {
    HistoricalRankingCheck check;
    check.comparable = false;
@@ -4253,29 +4323,23 @@ HistoricalRankingCheck EvaluateHistoricalRanking(const HistoricalBacktestStats &
    check.rising_pairs = 0;
    check.compared_pairs = 0;
    check.supported = false;
-
-   int floor_of[6];
-   int counts[6];
-   double sums[6];
-   floor_of[0] = 60;  counts[0] = stats.bucket60_count;  sums[0] = stats.bucket60_R;
-   floor_of[1] = 65;  counts[1] = stats.bucket65_count;  sums[1] = stats.bucket65_R;
-   floor_of[2] = 70;  counts[2] = stats.bucket70_count;  sums[2] = stats.bucket70_R;
-   floor_of[3] = 75;  counts[3] = stats.bucket75_count;  sums[3] = stats.bucket75_R;
-   floor_of[4] = 80;  counts[4] = stats.bucket80_count;  sums[4] = stats.bucket80_R;
-   floor_of[5] = 85;  counts[5] = stats.bucket85_count;  sums[5] = stats.bucket85_R;
+   check.low_count = 0;
+   check.high_count = 0;
+   check.capped_at_top = 0;
+   check.capped_at_bottom = 0;
 
    int low_index = -1;
    int high_index = -1;
-   for(int i = 0; i < 6; i++)
+   for(int i = 0; i < SCORE_BUCKET_COUNT; i++)
    {
-      if(counts[i] <= 0)
+      if(buckets[i].count <= 0)
          continue;
       if(low_index < 0)
          low_index = i;
       if(high_index >= 0)
       {
          check.compared_pairs++;
-         if(sums[i] / (double)counts[i] > sums[high_index] / (double)counts[high_index])
+         if(ScoreBucketAverageR(buckets[i]) > ScoreBucketAverageR(buckets[high_index]))
             check.rising_pairs++;
       }
       high_index = i;
@@ -4285,11 +4349,15 @@ HistoricalRankingCheck EvaluateHistoricalRanking(const HistoricalBacktestStats &
       return check;
 
    check.comparable = true;
-   check.low_bucket = floor_of[low_index];
-   check.high_bucket = floor_of[high_index];
-   check.low_R = sums[low_index] / (double)counts[low_index];
-   check.high_R = sums[high_index] / (double)counts[high_index];
+   check.low_bucket = ScoreBucketFloor(low_index);
+   check.high_bucket = ScoreBucketFloor(high_index);
+   check.low_R = ScoreBucketAverageR(buckets[low_index]);
+   check.high_R = ScoreBucketAverageR(buckets[high_index]);
    check.supported = (check.high_R > check.low_R);
+   check.low_count = buckets[low_index].count;
+   check.high_count = buckets[high_index].count;
+   check.capped_at_top = buckets[high_index].capped_count;
+   check.capped_at_bottom = buckets[low_index].capped_count;
    return check;
 }
 
@@ -4297,45 +4365,78 @@ HistoricalRankingCheck EvaluateHistoricalRanking(const HistoricalBacktestStats &
 // then recommends settings on the strength of that ordering. Both used to print the
 // claim whether or not it held, so an operator reading the tail of the Journal could
 // act on a recommendation the sample did not support. This states the outcome.
-void AddHistoricalRankingVerdict(const HistoricalBacktestStats &stats)
+void AddHistoricalRankingVerdictLine(const string basis, const HistoricalRankingCheck &check)
 {
-   HistoricalRankingCheck check = EvaluateHistoricalRanking(stats);
    if(!check.comparable)
    {
-      AddHistoricalReportLine("Ranking check: fewer than two buckets hold signals, so this sample makes no claim about how the score ranks outcomes.");
+      AddHistoricalReportLine("Ranking check on the " + basis + ": fewer than two buckets hold signals, so this sample makes no claim about ordering.");
       return;
    }
 
-   if(check.supported)
-   {
-      AddHistoricalReportLine(StringFormat("Ranking check: supported here - the highest populated bucket (%d+) averaged %+.3f R against %+.3f R in the lowest (%d+), with %d of %d adjacent pairs improving.",
-                                           check.high_bucket, check.high_R, check.low_R, check.low_bucket,
-                                           check.rising_pairs, check.compared_pairs));
-      return;
-   }
-
-   // The sentence an operator must not have to infer.
-   AddHistoricalReportLine(StringFormat("Ranking check: NOT SUPPORTED on this sample - the highest populated bucket (%d+) averaged %+.3f R against %+.3f R in the lowest (%d+), and only %d of %d adjacent pairs improved.",
+   AddHistoricalReportLine(StringFormat("Ranking check on the %s: %s - the highest populated bucket (%d+) averaged %+.3f R against %+.3f R in the lowest (%d+), and %d of %d adjacent pairs improved.",
+                                        basis,
+                                        (check.supported ? "SUPPORTED here" : "NOT SUPPORTED on this sample"),
                                         check.high_bucket, check.high_R, check.low_R, check.low_bucket,
                                         check.rising_pairs, check.compared_pairs));
-   AddHistoricalReportLine("  Higher scores did not produce better outcomes here, so this sample shows no ranking edge. Treat any recommendation below as unvalidated and check it on a separate holdout before entering settings.");
+   AddHistoricalReportLine(StringFormat("  Capped samples in those buckets: %d of %d at the top, %d of %d at the bottom.",
+                                        check.capped_at_top, check.high_count,
+                                        check.capped_at_bottom, check.low_count));
 }
 
-void AddHistoricalBucketLines(const string title, const HistoricalBacktestStats &stats)
+// The whole point of bucketing twice (F-048). Comparing the displayed score against the score
+// before the caps separates "the score does not rank outcomes" from "the cap ladder moved samples
+// between buckets and manufactured, or destroyed, the ordering". Without this the report could
+// only say the ranking failed, which is true but not actionable.
+void AddHistoricalRankingVerdict(const HistoricalBacktestStats &stats)
+{
+   HistoricalRankingCheck shown = EvaluateHistoricalRanking(stats.buckets);
+   AddHistoricalRankingVerdictLine("displayed score", shown);
+
+   HistoricalRankingCheck raw = EvaluateHistoricalRanking(stats.pre_cap_buckets);
+   AddHistoricalRankingVerdictLine("score before the caps", raw);
+
+   if(shown.comparable && raw.comparable)
+   {
+      if(!shown.supported && raw.supported)
+         AddHistoricalReportLine("  The two disagree: the score before the caps ranks 30m outcomes here and the displayed score does not, so the cap ladder is what removed the ordering. That points at the caps as too aggressive on this sample, not at the score failing to carry the information.");
+      else if(shown.supported && !raw.supported)
+         AddHistoricalReportLine("  The two disagree: the displayed score ranks 30m outcomes here and the score before the caps does not, so the cap ladder is what produced the apparent ordering. Treat it as an artefact of the caps rather than as evidence about the score.");
+      else if(!shown.supported)
+         AddHistoricalReportLine("  Both bucketings agree that the score did not rank 30m outcomes on this sample, so this is a property of the score rather than of the caps.");
+      else
+         AddHistoricalReportLine("  Both bucketings agree that the score ranked 30m outcomes on this sample.");
+   }
+
+   if(!shown.supported)
+      AddHistoricalReportLine("  Treat any recommendation below as unvalidated and check it on a separate holdout before entering settings.");
+}
+
+void AddHistoricalBucketLines(const string title, const ScoreBucket &buckets[], const bool show_caps)
 {
    AddHistoricalReportLine(title);
-   AddHistoricalReportLine(FormatHistoricalBucketLine("<65 ", stats.bucket60_count, stats.bucket60_R));
-   AddHistoricalReportLine(FormatHistoricalBucketLine("65-69", stats.bucket65_count, stats.bucket65_R));
-   AddHistoricalReportLine(FormatHistoricalBucketLine("70-74", stats.bucket70_count, stats.bucket70_R));
-   AddHistoricalReportLine(FormatHistoricalBucketLine("75-79", stats.bucket75_count, stats.bucket75_R));
-   AddHistoricalReportLine(FormatHistoricalBucketLine("80-84", stats.bucket80_count, stats.bucket80_R));
-   AddHistoricalReportLine(FormatHistoricalBucketLine("85+  ", stats.bucket85_count, stats.bucket85_R));
+   for(int i = 0; i < SCORE_BUCKET_COUNT; i++)
+      AddHistoricalReportLine(FormatHistoricalBucketLine(i, buckets[i], show_caps));
+}
+
+// Both bucketings and the verdict that compares them, in one place so the validation and autotune
+// reports cannot drift apart in what they disclose (F-048).
+void AddHistoricalRankingSection(const HistoricalBacktestStats &stats)
+{
+   AddHistoricalBucketLines("Buckets by displayed score: count | avg 30m R | capped", stats.buckets, true);
+
    // The 85+ row is structurally empty rather than merely unpopulated: without a basket reading
    // the composite caps at 84, and the historical engine has no basket data, so no boundary can
    // ever land here. Printed so the zero row is not read as "the score never reached its top
    // band on this sample" when it is unreachable by construction (F-010).
-   if(stats.bucket85_count <= 0)
+   if(stats.buckets[5].count <= 0)
       AddHistoricalReportLine("  85+ is unreachable in historical mode: the model caps at 84 without a basket reading, so this row is structurally empty, not a gap in the sample.");
+
+   // The same samples keyed on the score before the caps applied. A bucket that is mostly capped
+   // samples is a different population from one that is not, which the displayed-score table
+   // cannot show on its own (F-048).
+   AddHistoricalBucketLines("Buckets by score before the caps: count | avg 30m R", stats.pre_cap_buckets, false);
+
+   AddHistoricalRankingVerdict(stats);
 }
 
 string FormatHistoricalParams(const HistoricalParams &params)
@@ -4375,8 +4476,7 @@ void BuildValidationReport(const HistoricalBacktestStats &stats, const Historica
                                         AverageTargetScore(stats),
                                         AverageStopScore(stats),
                                         ScoreEdge(stats)));
-   AddHistoricalBucketLines("Buckets by displayed score: count | avg 30m R", stats);
-   AddHistoricalRankingVerdict(stats);
+   AddHistoricalRankingSection(stats);
    AddHistoricalReportLine("Model: the live composer over bar features; no basket, calendar or tick data, so scores are capped at 84 like a live instance without a basket reading. Minute-scale impulse windows use their own threshold.");
    AddHistoricalReportLine("Interpretation: the score is an event-quality ranking, not a probability or a trade instruction. Whether this sample supports that ranking is stated by the ranking check above, not assumed here.");
    PrintHistoricalReportToJournal();
@@ -4439,10 +4539,9 @@ void BuildAutotuneReport(const HistoricalBacktestStats &default_stats,
                                            best_params.minute_impulse_z));
    }
    AddHistoricalReportLine("Current settings baseline: " + FormatHistoricalParams(default_params));
-   AddHistoricalBucketLines("Best score buckets: count | avg 30m R", best_stats);
-   // The recommendation above rests on the score ranking outcomes, so the ranking
-   // is checked and reported before the closing "no runtime change" line.
-   AddHistoricalRankingVerdict(best_stats);
+   // The recommendation above rests on the score ranking outcomes, so the ranking is checked and
+   // reported before the closing "no runtime change" line.
+   AddHistoricalRankingSection(best_stats);
    AddHistoricalReportLine(recommend ?
                            "Applied: no runtime change; review the recommendation with an external holdout before editing inputs." :
                            "Applied: no runtime change; no recommendation was produced.");
@@ -4451,9 +4550,15 @@ void BuildAutotuneReport(const HistoricalBacktestStats &default_stats,
    SetHistoricalReadyMessage("AUTOTUNE");
 }
 
-string FormatHistoricalBucketLine(const string label, const int count, const double sum_R)
+string FormatHistoricalBucketLine(const int index, const ScoreBucket &bucket, const bool show_caps)
 {
-   return StringFormat("  %s : %5d | %+0.3f R", label, count, SafeDiv(sum_R, (double)count, 0.0));
+   string line = StringFormat("  %s : %5d | %+0.3f R",
+                              ScoreBucketLabel(index),
+                              bucket.count,
+                              ScoreBucketAverageR(bucket));
+   if(show_caps)
+      line += StringFormat(" | %4d capped", bucket.capped_count);
+   return line;
 }
 
 double AverageScore(const HistoricalBacktestStats &stats)
@@ -7522,21 +7627,6 @@ void RefreshCalendarCache(const int currency_index, const datetime now)
                             cache.uncertainty_penalty * 0.25);
 
    g_calendar_cache[currency_index] = cache;
-}
-
-int ScoreBucketFloor(const double score)
-{
-   if(score >= 85.0)
-      return 85;
-   if(score >= 80.0)
-      return 80;
-   if(score >= 75.0)
-      return 75;
-   if(score >= 70.0)
-      return 70;
-   if(score >= 65.0)
-      return 65;
-   return 60;
 }
 
 SessionBucket SessionIndex(const datetime now)

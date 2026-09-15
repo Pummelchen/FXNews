@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 55 | done 51 | open 4 | blocked 0 | S0:1 S1:13 S2:16 S3:25**
+**total 56 | done 54 | open 2 | blocked 0 | S0:1 S1:13 S2:16 S3:26**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -37,7 +37,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-024 | S2 | tooling | DONE | `tools/build-macos.sh:47,116-120` | build-macos.sh cannot distinguish 'Wine cannot execute' from 'the compiler produced no result line', and reports the wrong exit code |
 | F-025 | S2 | ops | START | `session credential handling` | A live-looking GitHub PAT was supplied in plaintext and is present in the agent session transcript |
 | F-048 | S2 | historical | DONE | `FXNews.mq5 (BuildAutotuneReport / BuildValidationReport interpretation lines)` | The historical reports print the same generic interpretation whether or not higher score buckets actually produced better outcomes |
-| F-049 | S2 | tests | START | `FXNews.mq5 (UpdateAlertGroups, DispatchPendingAlerts, UpdateDashboard, BuildDiagnosticsLines)` | Alert dispatch, correlation grouping and dashboard rendering still have no automated coverage |
+| F-049 | S2 | tests | DONE | `FXNews.mq5 (UpdateAlertGroups, DispatchPendingAlerts, UpdateDashboard, BuildDiagnosticsLines)` | Alert dispatch, correlation grouping and dashboard rendering still have no automated coverage |
 | F-050 | S2 | tooling | DONE | `.github/workflows/ci.yml; tools/selftest-macos.sh:89-96` | The CI workflow pinned every analysis tool except shellcheck, and the unpinned one failed the build |
 | F-010 | S3 | historical | DONE | `FXNews.mq5:2926-2930,3039` | The 85+ bucket in the historical report is unreachable (now empirically confirmed; the wiki already documents the empty bucket, so only the unannotated report row remains) |
 | F-012 | S3 | scoring | DONE | `FXNews.mq5:5330-5331` | DISPROVED: the wick penalty's missing denominator entry is the correct arrangement |
@@ -54,8 +54,8 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-033 | S3 | docs | DONE | `_fxnews-wiki/Testing-and-Validation.md:11,30` | The wiki Testing page hard-codes the assertion total on the same page that promises it never has to |
 | F-034 | S3 | docs | DONE | `_fxnews-wiki/Known-Limitations.md:7` | Known-Limitations calls all three gates macOS-only, but census.py is cross-platform |
 | F-035 | S3 | docs | DONE | `_fxnews-wiki/Development-Guide.md:23` | Development-Guide both denies and documents the release process, and lists 'test' among commands that do not exist |
-| F-036 | S3 | docs | START | `_fxnews-wiki/Project-Tracker.md:3,7,9` | The tracker describes itself as open tasks and known bugs while showing 120/120 done, and its line-number baseline still says version 2.3 |
-| F-037 | S3 | docs | START | `CLAUDE.md:24-30` | The documented version-bump procedure requires a deployment clone at MQL5/Indicators/FXNews/ that does not exist on this machine |
+| F-036 | S3 | docs | DONE | `_fxnews-wiki/Project-Tracker.md:3,7,9` | The tracker describes itself as open tasks and known bugs while showing 120/120 done, and its line-number baseline still says version 2.3 |
+| F-037 | S3 | docs | DONE | `CLAUDE.md:24-30` | The documented version-bump procedure requires a deployment clone at MQL5/Indicators/FXNews/ that does not exist on this machine |
 | F-038 | S3 | scoring | DONE | `FXNews.mq5:4948-4949` | Unreachable guard: total_weight can never be zero |
 | F-039 | S3 | docs | DONE | `FXNews.mq5:396,5012-5041` | The age_free_score field comment understates what the value excludes |
 | F-040 | S3 | logic | DONE | `FXNews.mq5:5044-5045` | The hard 95 ceiling is the only cap that records no reason string |
@@ -64,6 +64,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-043 | S3 | logic | DONE | `FXNews.mq5:8198-8208` | DISPROVED: SmoothStep's edge re-orientation is a tested fix for a pre-1.4 defect |
 | F-044 | S3 | docs | DONE | `FXNews.mq5:4401-4425` | The ATR definition (simple mean of true range, not Wilder smoothing) is undocumented |
 | F-045 | S3 | tooling | DONE | `tools/build-macos.sh:150-156` | --install creates the destination directory silently and never verifies the terminal can load the binary |
+| F-051 | S3 | testing | START | `FXNews.mq5 (UpdateDashboard, SetDashboardRow, DeleteDashboardRowsFrom)` | Dashboard row rendering and the signal-history eviction dwell still have no automated coverage |
 
 ## Detail
 
@@ -430,14 +431,16 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-049 (S2, tests) — Alert dispatch, correlation grouping and dashboard rendering still have no automated coverage
 
-- **Status:** START  |  **Category:** test  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** test  |  **Host:** node3  |  **Commit:** b208a92
 - **Location:** `FXNews.mq5 (UpdateAlertGroups, DispatchPendingAlerts, UpdateDashboard, BuildDiagnosticsLines)`
 - **Discovered by:** Phase C - scope split out of F-008, which is complete for the lifecycle only
 - **Evidence (before):**
 
   > F-008's original scope named four areas and CLAUDE.md records that all four were verified only by manual runtime observation. The lifecycle is now covered by the self-test group 'signal lifecycle'. Still uncovered: UpdateAlertGroups (group binding and leader election with hysteresis), DispatchPendingAlerts (the 10/minute, 2/scan and 30 s/profile rate limits, bounded retries, and the downgrade of a faded strong upgrade), and the dashboard (row composition to the 63-character budget, stale-row deletion, the ShowActiveSignalRows path, and the signal-history eviction dwell). Two of this audit's findings - F-011 (g_signal_history_dirty never cleared) and F-013 (every timeframe of a symbol shares a group) - live in that uncovered region.
 
-- **Notes:** Alert dispatch can be tested without a terminal if the notification side effects are separated from the decision logic: extract the rate-limit and leader-election decisions into pure predicates taking the current time, then assert them the way the lifecycle test asserts UpdateSignalState. Dashboard rendering is harder because it writes chart objects; the tractable part is the pure text composition (DashboardRowText, FitDashboardText, WrapLabelText, FormatSignalHistoryText), which already has partial coverage, plus the eviction rule in PushSignalHistory operating on a synthetic history array. Rejected alternative: drive the harness to assert chart objects through the terminal - it would catch real rendering regressions but makes the gate depend on chart state and is far more brittle.
+- **Fix:** AlertRateLimitsAllow and GroupLeaderIndex extracted as pure functions and covered by seven assertions on their boundaries; UpdateAlertGroups now marks non-members with a sentinel so the election cannot pick one. The dashboard-rendering half is re-homed to F-051, not dropped.
+- **Evidence (after):** BEFORE A (tie broken with >=): 189 passed, 2 failed of 191, exit 1. BEFORE B (60 s window dropped): 190 passed, 1 failed of 191, exit 1. AFTER: 191 passed, 0 failed of 191. Assertions 182 -> 191. Build 0/0; census 0; contracts 0/9.
+- **Notes:** SCOPE CHANGE, recorded explicitly as the brief requires: F-049 originally named alert dispatch, correlation grouping AND dashboard rendering. The first two are covered here. Dashboard rendering (stale-row deletion, the ShowActiveSignalRows path, eviction dwell) needs a live chart and is re-homed to F-051 rather than considered closed. F-011's ordering invariant and F-021's wrap width are already covered - the first structurally by contracts.py, the second by the self-test. One assertion of mine failed first against correct code because the 'tie' case was not a tie; the test was fixed, not the code.
 
 ### F-050 (S2, tooling) — The CI workflow pinned every analysis tool except shellcheck, and the unpinned one failed the build
 
@@ -646,23 +649,29 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-036 (S3, docs) — The tracker describes itself as open tasks and known bugs while showing 120/120 done, and its line-number baseline still says version 2.3
 
-- **Status:** START  |  **Category:** docs  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** wiki
 - **Location:** `_fxnews-wiki/Project-Tracker.md:3,7,9`
 - **Discovered by:** Phase B docs audit
 - **Evidence (before):**
 
   > ':3' calls the page 'Open tasks and known bugs'; ':7' records 'Progress: 120 of 120 done'; ':9' states line numbers refer to commit 9069ca3 (version 2.3) although the page was rewritten for 3.0.
 
+- **Fix:** The Project-Tracker header no longer describes the page as 'open tasks and known bugs' beneath a stale '120 of 120 done' line and a 2.3 line-number baseline. It now separates the finished 2026-09-13 audit from the current one, points at AUDIT/ledger.json as the authoritative count, adds Blocked to the status list and contracts.py to the done criteria, and states which commit the line numbers refer to.
+- **Evidence (after):** The wiki page header reads as above; the generated audit section beneath it is unchanged and still produced from AUDIT/ledger.json.
+- **Notes:** The stale lines were hand-written outside the generated section, which is why regenerating the tracker never touched them.
 
 ### F-037 (S3, docs) — The documented version-bump procedure requires a deployment clone at MQL5/Indicators/FXNews/ that does not exist on this machine
 
-- **Status:** START  |  **Category:** docs  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** 38fe455
 - **Location:** `CLAUDE.md:24-30`
 - **Discovered by:** Phase B L0
 - **Evidence (before):**
 
   > CLAUDE.md step 2 tells the developer to fetch and reset a separate clone at MQL5/Indicators/FXNews/. That directory does not exist in the WINEPREFIX and no FXNews artifact exists anywhere in the MT5 tree; 'build-macos.sh --install' would create it.
 
+- **Fix:** CLAUDE.md's version-bump step no longer tells the developer to fetch and reset a clone that may not exist. It states that the directory is the terminal's separate clone, that it is not guaranteed to exist, how to bootstrap it with git clone, and explicitly that --install creates the directory and verifies the copy but does NOT clone.
+- **Evidence (after):** Verified against the machine rather than assumed, after F-045's --install created the directory: ls -a shows only FXNews.ex5 and no .git, and 'git -C .../FXNews fetch' reports 'fatal: not a git repository' - so the documented fetch/reset step would indeed have failed there.
+- **Notes:** The finding was filed when the directory did not exist at all; F-045 then created it as an empty directory, which turns the missing-clone problem into a subtler one - a binary with no source beside it.
 
 ### F-038 (S3, scoring) — Unreachable guard: total_weight can never be zero
 
@@ -767,3 +776,14 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 - **Fix:** --install now reports whether the target directory existed or was created, compares the installed file's length with the source's and exits 2 on a mismatch, and warns when a stale .mq5 sits beside the fresh .ex5. The size mismatch message names both lengths.
 - **Evidence (after):** Against the real prefix: first run 'install target absent, creating: ...' then 'installed FXNews.ex5 ... (246424 bytes, verified)' with the installed file measuring 246424 bytes against a 246424-byte source; second run reports 'install target exists' and verifies again. The size guard was reproduced in isolation with a 3-byte file against a 10-byte source and reports REJECTED, exiting 2. shfmt -d and shellcheck tools/*.sh are clean.
 - **Notes:** shellcheck on a SINGLE file reports SC1091 because it cannot follow the lib-mt5.sh source; that is an artefact of the invocation, not a regression - it appears twice on the previous version under the same call - and the gate's own invocation over tools/*.sh is clean.
+
+### F-051 (S3, testing) — Dashboard row rendering and the signal-history eviction dwell still have no automated coverage
+
+- **Status:** START  |  **Category:** tests  |  **Host:** None  |  **Commit:** -
+- **Location:** `FXNews.mq5 (UpdateDashboard, SetDashboardRow, DeleteDashboardRowsFrom)`
+- **Discovered by:** scope re-homed from F-049, as the audit brief requires
+- **Evidence (before):**
+
+  > Re-homed from F-049, which named alert dispatch, correlation grouping and dashboard rendering together. The first two are now covered by the 'alert dispatch' self-test group. Still uncovered: stale-row deletion when the dashboard shrinks, the ShowActiveSignalRows path, and the signal-history eviction dwell introduced with F-042. Rendering needs a live chart, which is why the whole area was manual-only. F-011's refresh-ordering invariant is already pinned structurally by tools/contracts.py (dashboard-refresh) and F-021's wrap width by the self-test, so this task is the remainder, not the whole area.
+
+- **Notes:** Opened rather than leaving F-049 open with a narrowed scope, because the brief forbids closing a task by narrowing it and requires the remainder to become its own task with a note on the original.

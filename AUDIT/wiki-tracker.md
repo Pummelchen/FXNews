@@ -2,14 +2,13 @@
 
 Independent pre-production audit of the whole repository, run on branch `audit/2026-09-15` from base commit `71ce980`, and merged by pull request only after the final phase passed. The authoritative ledger lives in the repository at `AUDIT/ledger.md` / `AUDIT/ledger.json`; this page mirrors it and the ledger wins on any conflict.
 
-**total 50 | done 15 | open 35 | blocked 0 | S0:1 S1:11 S2:18 S3:20**
+**total 51 | done 15 | open 36 | blocked 0 | S0:1 S1:11 S2:18 S3:21**
 
 ### Open items
 
 | # | Sev | Status | Area | What |
 | --- | --- | --- | --- | --- |
 | F-008 | S1 | START | tests | The live signal lifecycle, correlation grouping, alert dispatch and dashboard rendering have no automated coverage |
-| F-010 | S2 | START | historical | The 85+ bucket in the historical report is unreachable dead code |
 | F-011 | S2 | START | dashboard | g_signal_history_dirty is never cleared while active signal rows are rendered, forcing a full dashboard rebuild every scan |
 | F-012 | S2 | START | scoring | wick_rejection_penalty is subtracted from the breakout blend without its weight being added to the normaliser |
 | F-013 | S2 | START | dashboard | DominantCurrencyFlow's own_group key makes every timeframe of one symbol share a correlation group, so at most one of them can ever alert |
@@ -25,6 +24,8 @@ Independent pre-production audit of the whole repository, run on branch `audit/2
 | F-023 | S2 | START | tests | No test exercises any ValidateInputs rejection path |
 | F-024 | S2 | START | tooling | build-macos.sh cannot distinguish 'Wine cannot execute' from 'the compiler produced no result line', and reports the wrong exit code |
 | F-025 | S2 | START | ops | A live-looking GitHub PAT was supplied in plaintext and is present in the agent session transcript |
+| F-048 | S2 | START | historical | The historical reports print the same generic interpretation whether or not higher score buckets actually produced better outcomes |
+| F-010 | S3 | START | historical | The 85+ bucket in the historical report is unreachable (now empirically confirmed; the wiki already documents the empty bucket, so only the unannotated report row remains) |
 | F-026 | S3 | START | tooling | ruff F541: two f-strings without placeholders |
 | F-027 | S3 | START | tooling | ruff format drift: the only Python file is not formatted to the formatter's standard |
 | F-028 | S3 | START | tooling | shfmt drift in both shell scripts |
@@ -54,7 +55,7 @@ _None._
 | --- | --- | --- | --- | --- |
 | E-1 | S0 | tooling | Build and self-test gates cannot execute: bundled wine64 is x86_64 and Rosetta 2 was absent on all four Macs | Rosetta install finished successfully; arch -x86_64 /usr/bin/true OK; wine64 --version -> wine-9.14; ./tools/build-macos.sh -> 0 errors, 0 warnings, exit 0; ./tools/selftest-macos.sh -> 117 passed, 0 failed |
 | E-2 | S1 | tooling | No MQL5 formatter, linter, static analyzer, SAST scanner or coverage tool exists | AUDIT/environment.md section 2 records the gap and the compensating controls |
-| E-3 | S1 | verification | The historical end-to-end gates cannot reach green in this environment until M1 history is available at run time | ./tools/selftest-macos.sh --validation exit 0 with 'M1 bars=50000', 'Boundaries: evaluated 2589 of ~10683', 'Signals=601', reproduced on a second consecutive run (2589 boundaries, 601 signals). EURUSD still reports unavailable after its 60 s budget while GBPUSD loads, so the timeout branch is exercised as well as the success branch; the report's 'Symbols 1/2' line discloses the coverage shortfall. |
+| E-3 | S1 | verification | The historical end-to-end gates cannot reach green in this environment until M1 history is available at run time | Both historical modes now run end to end on real broker history. --validation exit 0: 50000 M1 bars, 2589 boundaries evaluated, Signals=601 (reproduced twice). --autotune exit 0: 9 candidates over 2584 boundaries, 'Current: signals=603 avgScore=74.7 PF=0.79 AvgR30=-0.134 Hit30=35.7%', a ranked best candidate, recommended settings printed, and 'Applied: no runtime change' - the advisory boundary holds. The AUTOTUNE wait also exercised the timeout branch: EURUSD consumed its full 60 s budget and was skipped while GBPUSD loaded ('2/2 symbols processed (GBPUSD, 50000 M1 bars, 48.8 days)'). |
 | F-002 | S1 | scoring | UpdateSessionBaseline folds active_trigger_tick_volume into the tick-volume baseline unguarded, while the adjacent line explicitly guards the tick rate | New self-test group 'session baselines'. BEFORE (temporary restore of shared-counter readiness): 'session baseline: a single rate sample is not yet a baseline' FAILED; RESULT 122 passed, 1 failed of 123 assertions; selftest exit 1. AFTER: RESULT 123 passed, 0 failed of 123; exit 0. Build 0 errors/0 warnings; census 0 findings; shellcheck clean; ruff/mypy --strict/bandit clean. |
 | F-003 | S1 | scoring | movement_5m_pips falls back to a 0.0 sentinel when the M1 copy fails and is then consumed as a measured value by three components | New self-test group 'exhaustion availability'. BEFORE (availability gate removed): 1 assertion FAILED - 'ComposeSignalScore ignores an overextension reading that was not measured'; RESULT 134 passed, 1 failed of 135; exit 1. AFTER: RESULT 135 passed, 0 failed of 135; exit 0. Historical regression: --validation still reports 50000 bars, 2589 boundaries, Signals=601, Avg score=74.7, PF=0.79 - identical to before the change, confirming the live path was the one affected. Build 0/0; census 0 findings; shellcheck clean. |
 | F-004 | S1 | historical | Historical impulse evaluation forces acceleration_available and continuation_available to true, hard-coding weights for inputs that may be unmeasurable | New self-test group 'impulse availability'. BEFORE (forced flags restored): 1 assertion FAILED - 'impulse blend: unavailable terms leave the normaliser (got 0.600000, expected 1.000000)'; RESULT 129 passed, 1 failed of 130; exit 1. AFTER: RESULT 130 passed, 0 failed of 130; exit 0. Build 0/0; census 0 findings; shellcheck clean. |

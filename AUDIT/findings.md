@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 50 | done 15 | open 35 | blocked 0 | S0:1 S1:11 S2:18 S3:20**
+**total 51 | done 15 | open 36 | blocked 0 | S0:1 S1:11 S2:18 S3:21**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -23,7 +23,6 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-047 | S1 | historical | DONE | `FXNews.mq5:2140 (LoadHistoricalM1Rates), 2060 (ProcessHistoricalProfile)` | The historical modes treat the first empty M1 copy as final, so a history download in progress yields an empty report |
 | F-001 | S2 | scoring | DONE | `FXNews.mq5:5222,5310,5324` | ComputeBreakoutStructure did not initialise its own output, so the documented pure shared function returned garbage to a direct caller (originally filed as a hold_score imputation) |
 | F-009 | S2 | scoring | DONE | `FXNews.mq5:4476-4477,7956-7957` | session_baseline_ready is a single flag for three independent baselines, so a z-score can be reported as measured when its own baseline never received samples |
-| F-010 | S2 | historical | START | `FXNews.mq5:2926-2930,3039` | The 85+ bucket in the historical report is unreachable dead code |
 | F-011 | S2 | dashboard | START | `FXNews.mq5:3788,6802-6804,7182` | g_signal_history_dirty is never cleared while active signal rows are rendered, forcing a full dashboard rebuild every scan |
 | F-012 | S2 | scoring | START | `FXNews.mq5:5330-5331` | wick_rejection_penalty is subtracted from the breakout blend without its weight being added to the normaliser |
 | F-013 | S2 | dashboard | START | `FXNews.mq5:6325,6246` | DominantCurrencyFlow's own_group key makes every timeframe of one symbol share a correlation group, so at most one of them can ever alert |
@@ -39,6 +38,8 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-023 | S2 | tests | START | `FXNews.mq5:930-1109` | No test exercises any ValidateInputs rejection path |
 | F-024 | S2 | tooling | START | `tools/build-macos.sh:47,116-120` | build-macos.sh cannot distinguish 'Wine cannot execute' from 'the compiler produced no result line', and reports the wrong exit code |
 | F-025 | S2 | ops | START | `session credential handling` | A live-looking GitHub PAT was supplied in plaintext and is present in the agent session transcript |
+| F-048 | S2 | historical | START | `FXNews.mq5 (BuildAutotuneReport / BuildValidationReport interpretation lines)` | The historical reports print the same generic interpretation whether or not higher score buckets actually produced better outcomes |
+| F-010 | S3 | historical | START | `FXNews.mq5:2926-2930,3039` | The 85+ bucket in the historical report is unreachable (now empirically confirmed; the wiki already documents the empty bucket, so only the unannotated report row remains) |
 | F-026 | S3 | tooling | START | `tools/census.py:273,274` | ruff F541: two f-strings without placeholders |
 | F-027 | S3 | tooling | START | `tools/census.py` | ruff format drift: the only Python file is not formatted to the formatter's standard |
 | F-028 | S3 | tooling | START | `tools/build-macos.sh; tools/selftest-macos.sh` | shfmt drift in both shell scripts |
@@ -98,8 +99,8 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
   > After F-046 the gate correctly fails any VALIDATION or AUTOTUNE run that reads no history. In this environment every such run reads zero bars because of the download race described in F-047, so the historical end-to-end gates are red for a truthful reason rather than passing falsely.
 
 - **Fix:** Resolved by the F-047 fix. The historical end-to-end gates now reach green in this environment and the historical engine was exercised on real broker history for the first time in this audit.
-- **Evidence (after):** ./tools/selftest-macos.sh --validation exit 0 with 'M1 bars=50000', 'Boundaries: evaluated 2589 of ~10683', 'Signals=601', reproduced on a second consecutive run (2589 boundaries, 601 signals). EURUSD still reports unavailable after its 60 s budget while GBPUSD loads, so the timeout branch is exercised as well as the success branch; the report's 'Symbols 1/2' line discloses the coverage shortfall.
-- **Notes:** Was filed BLOCKED with three options for a human. Option (1) - fix F-047 - was implemented and removed the blocker, so no human decision is outstanding. Residual, not blocking: a symbol needing more than the budget still reports unavailable; HistoricalHistoryWaitSeconds is tunable to 600.
+- **Evidence (after):** Both historical modes now run end to end on real broker history. --validation exit 0: 50000 M1 bars, 2589 boundaries evaluated, Signals=601 (reproduced twice). --autotune exit 0: 9 candidates over 2584 boundaries, 'Current: signals=603 avgScore=74.7 PF=0.79 AvgR30=-0.134 Hit30=35.7%', a ranked best candidate, recommended settings printed, and 'Applied: no runtime change' - the advisory boundary holds. The AUTOTUNE wait also exercised the timeout branch: EURUSD consumed its full 60 s budget and was skipped while GBPUSD loaded ('2/2 symbols processed (GBPUSD, 50000 M1 bars, 48.8 days)').
+- **Notes:** Was filed BLOCKED with three options for a human. Option (1) - fix F-047 - was implemented and removed the blocker, so no human decision is outstanding. Residual, not blocking: a symbol needing more than the budget still reports unavailable; HistoricalHistoryWaitSeconds is tunable to 600. Observation for a human, outside code-correctness scope: on this single-symbol 48.8-day sample the score does not rank outcomes - bucket AvgR30 is -0.068, -0.105, -0.075, -0.237, -0.110 across <65 to 80-84, i.e. higher scores did not produce better R, and no candidate beat CURRENT. The report's own interpretation line says a useful score should show better R/PF in higher buckets, yet it prints the same text whether or not that holds. Filed as F-048. A go-live decision should treat the absence of a demonstrated ranking edge on this sample as material.
 
 ### F-002 (S1, scoring) — UpdateSessionBaseline folds active_trigger_tick_volume into the tick-volume baseline unguarded, while the adjacent line explicitly guards the tick rate
 
@@ -240,17 +241,6 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 - **Fix:** SessionBaseline now carries spread_samples / tick_rate_samples / tick_volume_samples instead of one shared sample_count, and SymbolProfile carries session_spread_z_ready / session_tick_rate_z_ready / session_tick_volume_z_ready instead of one session_baseline_ready. Each series' EWMA uses its own counter and each counter advances only when that series was actually folded; a z-score is published only when its own series is ready. All reset paths and all three consumers updated.
 - **Evidence (after):** New self-test group 'session baselines'. BEFORE (temporary restore of shared-counter readiness): 'session baseline: a single rate sample is not yet a baseline' FAILED; RESULT 122 passed, 1 failed of 123 assertions; selftest exit 1. AFTER: RESULT 123 passed, 0 failed of 123; exit 0. Build 0 errors/0 warnings; census 0 findings; shellcheck clean; ruff/mypy --strict/bandit clean.
 - **Notes:** Shares one root cause with F-002 and is fixed by the same change, committed once under audit(F-002,F-009).
-
-### F-010 (S2, historical) — The 85+ bucket in the historical report is unreachable dead code
-
-- **Status:** START  |  **Category:** dead  |  **Host:** node3  |  **Commit:** -
-- **Location:** `FXNews.mq5:2926-2930,3039`
-- **Discovered by:** Phase B L1 + historical audit
-- **Evidence (before):**
-
-  > Flow is never populated in a historical run, so ComposeSignalScore always applies flow_absent_cap at 84.0 (:4969-4972); ScoreBucketFloor can therefore never return 85 for a historical score, AddHistoricalBucketStats never increments bucket85_count (:2926-2930), and the report row (:3039) always prints zero.
-
-- **Notes:** Either remove the bucket from the report or state the 84 ceiling explicitly next to it.
 
 ### F-011 (S2, dashboard) — g_signal_history_dirty is never cleared while active signal rows are rendered, forcing a full dashboard rebuild every scan
 
@@ -412,6 +402,28 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
   > The token authenticates as the repository owner with admin/push rights. It is not in the repository, not in git history (gitleaks and trufflehog both clean over all 78 commits), and was not committed. It is, however, recorded in the session transcript and was used once for authentication.
 
 - **Notes:** Not a repository defect. Recommendation: rotate the token and use a scoped, short-lived credential stored in a secrets manager; this audit held no secret on disk except in a 0600 file outside the repository that is deleted at the end.
+
+### F-048 (S2, historical) — The historical reports print the same generic interpretation whether or not higher score buckets actually produced better outcomes
+
+- **Status:** START  |  **Category:** docs  |  **Host:** node3  |  **Commit:** -
+- **Location:** `FXNews.mq5 (BuildAutotuneReport / BuildValidationReport interpretation lines)`
+- **Discovered by:** Phase D - the first successful AUTOTUNE run in this audit
+- **Evidence (before):**
+
+  > The report prints 'Interpretation: score is a ranking metric. A useful score should show better R/PF in higher buckets.' unconditionally. On the 2026-09-15 AUTOTUNE run (GBPUSD, 2584 boundaries, 603 signals, 48.8 days) the observed bucket AvgR30 was <65 -0.068, 65-69 -0.105, 70-74 -0.075, 75-79 -0.237, 80-84 -0.110 - i.e. no monotone improvement, and the 75-79 bucket was the worst. All buckets were negative and no candidate beat CURRENT (improvement +0.000 on every metric). The report nevertheless ended with 'Recommended settings: ...' and the same generic interpretation, so an operator reading only the tail of the Journal would not learn that the ranking failed to hold on the very sample the recommendation came from.
+
+- **Notes:** Correct fix is to compute the bucket monotonicity the report already assembles and state the outcome explicitly: whether higher buckets produced better R, and if not, that the score showed no ranking edge on this sample and the recommendation rests on an unvalidated ordering. Rejected alternative: suppress the recommendation entirely - the product deliberately keeps Autotune advisory and never writes settings, and there is no principled threshold for suppression; disclosure is the honest change. Note this is a reporting gap, not a scoring defect: whether the score *should* rank better is a strategy question for a human, and this audit does not claim the score is wrong, only that the report does not tell the truth about what it observed.
+
+### F-010 (S3, historical) — The 85+ bucket in the historical report is unreachable (now empirically confirmed; the wiki already documents the empty bucket, so only the unannotated report row remains)
+
+- **Status:** START  |  **Category:** dead  |  **Host:** node3  |  **Commit:** -
+- **Location:** `FXNews.mq5:2926-2930,3039`
+- **Discovered by:** Phase B L1 + historical audit
+- **Evidence (before):**
+
+  > Flow is never populated in a historical run, so ComposeSignalScore always applies flow_absent_cap at 84.0 (:4969-4972); ScoreBucketFloor can therefore never return 85 for a historical score, AddHistoricalBucketStats never increments bucket85_count (:2926-2930), and the report row (:3039) always prints zero. Empirically confirmed on 2026-09-15: the AUTOTUNE report prints '85+ : 0 | +0.000 R' across 2584 evaluated boundaries and 603 signals.
+
+- **Notes:** SCOPE NOTE on the original finding: the code claim is unchanged and now has runtime evidence, but the wiki already states 'the 85+ bucket stays empty by construction' (Validation-and-Autotune.md:15), so the *fact* was disclosed. What remains is that the report still prints a permanently-zero row with no annotation, which reads as an absent measurement rather than a structural ceiling. Severity lowered from S2 to S3 for that residual scope; the original scope is recorded here rather than dropped.
 
 ### F-026 (S3, tooling) — ruff F541: two f-strings without placeholders
 

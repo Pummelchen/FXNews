@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 55 | done 38 | open 17 | blocked 0 | S0:1 S1:13 S2:17 S3:24**
+**total 55 | done 39 | open 16 | blocked 0 | S0:1 S1:13 S2:16 S3:25**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -26,7 +26,6 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-001 | S2 | scoring | DONE | `FXNews.mq5:5222,5310,5324` | ComputeBreakoutStructure did not initialise its own output, so the documented pure shared function returned garbage to a direct caller (originally filed as a hold_score imputation) |
 | F-009 | S2 | scoring | DONE | `FXNews.mq5:4476-4477,7956-7957` | session_baseline_ready is a single flag for three independent baselines, so a z-score can be reported as measured when its own baseline never received samples |
 | F-011 | S2 | dashboard | DONE | `FXNews.mq5:3788,6802-6804,7182` | g_signal_history_dirty is never cleared while active signal rows are rendered, forcing a full dashboard rebuild every scan |
-| F-013 | S2 | dashboard | START | `FXNews.mq5:6325,6246` | DominantCurrencyFlow's own_group key makes every timeframe of one symbol share a correlation group, so at most one of them can ever alert |
 | F-014 | S2 | tooling | DONE | `tools/build-macos.sh:40-43; tools/selftest-macos.sh:38-40` | The Wine path, WINEPREFIX and MT5 path constants are duplicated across the two gate scripts and can drift |
 | F-015 | S2 | tooling | DONE | `FXNews.mq5:1725; tools/mql5/FXNewsSelfTest.mq5:14,32-34; tools/selftest-macos.sh:72,139,159-163` | The indicator, the harness and the gate script are coupled by undocumented string literals with no contract test |
 | F-016 | S2 | ops | DONE | `.github/` | No CI workflow: the three release gates are never run automatically |
@@ -42,6 +41,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-050 | S2 | tooling | DONE | `.github/workflows/ci.yml; tools/selftest-macos.sh:89-96` | The CI workflow pinned every analysis tool except shellcheck, and the unpinned one failed the build |
 | F-010 | S3 | historical | START | `FXNews.mq5:2926-2930,3039` | The 85+ bucket in the historical report is unreachable (now empirically confirmed; the wiki already documents the empty bucket, so only the unannotated report row remains) |
 | F-012 | S3 | scoring | DONE | `FXNews.mq5:5330-5331` | DISPROVED: the wick penalty's missing denominator entry is the correct arrangement |
+| F-013 | S3 | dashboard | DONE | `FXNews.mq5:6325,6246` | DOMINANT FLOW's fallback group id is shared by every timeframe of a symbol - deliberate, not a defect |
 | F-020 | S3 | scoring | DONE | `FXNews.mq5:8266-8270,4661,5114-5116` | RobustZ returning 0 on degenerate dispersion is the correct z, not an imputation (filed as a false-measured spread_z; disproved) |
 | F-022 | S3 | dashboard | DONE | `FXNews.mq5:6817-6825,6747` | BuildDiagnosticsLines recounts the dashboard objects on every scan, including the light path |
 | F-026 | S3 | tooling | DONE | `tools/census.py:273,274` | ruff F541: two f-strings without placeholders |
@@ -287,17 +287,6 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 - **Evidence (after):** BEFORE (refresh moved back inside the display branch): tools/contracts.py FAILS with 'UpdateDashboard refreshes the history only after if(ShowActiveSignalRows); with active rows enabled the dirty flag is then never cleared and the dashboard rebuilds every scan (F-011)', exit 1. AFTER: 0 violations, exit 0. New self-test group 'history refresh' asserts the flag-consume contract directly; full gate 145 passed, 0 failed of 145. Build 0/0; census 0 findings; shellcheck clean.
 - **Notes:** The call-site part of this fix has no runtime unit test by design: driving UpdateDashboard inside the self-test creates chart objects and could overwrite the harness's own verdict label. It is machine-checked structurally by tools/contracts.py instead, which is what makes the regression guard real rather than a comment.
 
-### F-013 (S2, dashboard) — DominantCurrencyFlow's own_group key makes every timeframe of one symbol share a correlation group, so at most one of them can ever alert
-
-- **Status:** START  |  **Category:** logic  |  **Host:** node3  |  **Commit:** -
-- **Location:** `FXNews.mq5:6325,6246`
-- **Discovered by:** Phase B L2 + dashboard audit
-- **Evidence (before):**
-
-  > The comment at ':6318-6320' says a signal with no basket reading 'groups only with itself', but own_group is symbol + '_' + direction (:6325), which is identical across the timeframes of that symbol. CanDispatchAlert (:6246) admits only the group leader, so the remaining same-symbol timeframes stay pending for the life of the signal (:6642-6646).
-
-- **Notes:** Grouping is in the manually-verified region (F-008). Confirm intended behaviour before changing; the comment at minimum is wrong.
-
 ### F-014 (S2, tooling) — The Wine path, WINEPREFIX and MT5 path constants are duplicated across the two gate scripts and can drift
 
 - **Status:** DONE  |  **Category:** dead  |  **Host:** node3  |  **Commit:** 970f8e5
@@ -486,6 +475,19 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 - **Fix:** No scoring change. The blend was extracted into the pure BlendBreakoutScore() and documented: the penalty is deducted after normalisation on purpose, so a flawless measured candle reaches 1.00 like every other component. Adding the 0.15 to total_weight, which the finding implied, would cap this component at 0.86 for every candle.
 - **Evidence (after):** New self-test group 'breakout blend' (3 assertions) pins the ceiling. Applying the proposed fix (total_weight += 0.15) gives '170 passed, 2 failed of 172' with the ceiling assertions failing - the disproof. Current code: 172 passed, 0 failed of 172. Build 0/0; census 0; contracts 0.
 - **Notes:** DISPROVED, like F-020, F-010 and F-001's original framing. The arithmetic was checked before the code was touched: 0.95/0.95 = 1.00 at zero penalty, and 0.95/1.10 = 0.86 if the 0.15 were folded in. Severity corrected S2 -> S3: the only real defect was legibility, and the disproof is now recorded in the code so it is not re-filed.
+
+### F-013 (S3, dashboard) — DOMINANT FLOW's fallback group id is shared by every timeframe of a symbol - deliberate, not a defect
+
+- **Status:** DONE  |  **Category:** logic  |  **Host:** node3  |  **Commit:** HEAD
+- **Location:** `FXNews.mq5:6325,6246`
+- **Discovered by:** Phase B L2 + dashboard audit
+- **Evidence (before):**
+
+  > The comment at ':6318-6320' says a signal with no basket reading 'groups only with itself', but own_group is symbol + '_' + direction (:6325), which is identical across the timeframes of that symbol. CanDispatchAlert (:6246) admits only the group leader, so the remaining same-symbol timeframes stay pending for the life of the signal (:6642-6646).
+
+- **Fix:** No behavioural change. own_group moved into a named OwnAlertGroup(symbol, direction) and the comment now states that same-symbol timeframes deliberately share a group, that the leader is elected by the highest DirectionSortScore, and that suppressed members show as '(N)' on the dashboard. The comment saying a signal 'groups only with itself' was the actual defect.
+- **Evidence (after):** Four self-test assertions pin the identity, including that opposite directions on one symbol do NOT share a group. BEFORE (direction dropped from the id): 176 passed, 1 failed of 177, exit 1. AFTER: 177 passed, 0 failed of 177. Build 0/0; census 0; contracts 0. Verified that group_member_count is rendered as '(N)' at FXNews.mq5:8259, so suppressed members are visible.
+- **Notes:** Severity S2 -> S3: the finding's premise ('stay pending for the life of the signal', implying a silent swallow) is false, because the group size is displayed. What remained was a wrong comment and no test, which is an S3 legibility defect. The one part worth keeping under test is that opposite directions never share a group, since that would let a long suppress a short.
 
 ### F-020 (S3, scoring) — RobustZ returning 0 on degenerate dispersion is the correct z, not an imputation (filed as a false-measured spread_z; disproved)
 

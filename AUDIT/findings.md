@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 57 | done 56 | open 0 | blocked 1 | S0:1 S1:14 S2:16 S3:26**
+**total 59 | done 58 | open 0 | blocked 1 | S0:1 S1:14 S2:18 S3:26**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -40,6 +40,8 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-048 | S2 | historical | DONE | `FXNews.mq5 (BuildAutotuneReport / BuildValidationReport interpretation lines)` | The historical reports print the same generic interpretation whether or not higher score buckets actually produced better outcomes |
 | F-049 | S2 | tests | DONE | `FXNews.mq5 (UpdateAlertGroups, DispatchPendingAlerts, UpdateDashboard, BuildDiagnosticsLines)` | Alert dispatch, correlation grouping and dashboard rendering still have no automated coverage |
 | F-050 | S2 | tooling | DONE | `.github/workflows/ci.yml; tools/selftest-macos.sh:89-96` | The CI workflow pinned every analysis tool except shellcheck, and the unpinned one failed the build |
+| F-052 | S2 | reporting | DONE | `FXNews.mq5 (historical bucket aggregation and ranking verdict)` | The ranking evaluation could not say WHY the ranking failed - caps or the score |
+| F-053 | S2 | scoring | DONE | `FXNews.mq5 (rank evaluation, measured not changed)` | MEASURED: the score does not rank 30m outcomes on the audit sample, and the caps are not the cause |
 | F-010 | S3 | historical | DONE | `FXNews.mq5:2926-2930,3039` | The 85+ bucket in the historical report is unreachable (now empirically confirmed; the wiki already documents the empty bucket, so only the unannotated report row remains) |
 | F-012 | S3 | scoring | DONE | `FXNews.mq5:5330-5331` | DISPROVED: the wick penalty's missing denominator entry is the correct arrangement |
 | F-013 | S3 | dashboard | DONE | `FXNews.mq5:6325,6246` | DOMINANT FLOW's fallback group id is shared by every timeframe of a symbol - deliberate, not a defect |
@@ -470,6 +472,32 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 - **Evidence (after):** shfmt -d clean and shellcheck 0.11.0 clean on all three scripts, with zero 'shellcheck disable' directives remaining in them except the two pre-existing SC1003 lexical notes. The pinned URL returns HTTP 200. The EXIT trap was verified to still clean up: after a full gate run the harness install directory, the harness script and the preset are all removed, and the gate reports 145 passed, 0 failed of 145. The workflow YAML still parses with six pinned versions.
 - **Notes:** This is the failure mode F-016 exists to prevent, occurring in F-016's own deliverable within minutes of it being pushed, and caught by CI rather than by review. Recorded rather than quietly fixed, because it is also the strongest available evidence that the workflow does something.
 
+### F-052 (S2, reporting) — The ranking evaluation could not say WHY the ranking failed - caps or the score
+
+- **Status:** DONE  |  **Category:** tests  |  **Host:** node3  |  **Commit:** 6e59498
+- **Location:** `FXNews.mq5 (historical bucket aggregation and ranking verdict)`
+- **Discovered by:** F-048's open strategy question
+- **Evidence (before):**
+
+  > F-048 made the reports disclose that the ranking failed, but the report could only report the fact. It could not distinguish a score that does not rank outcomes from bucket membership that the cap ladder had contaminated, which was the actionable question and the one a hypothesis of mine had already guessed at.
+
+- **Fix:** The samples are now bucketed twice from one recording: on the displayed score and on raw_score, the score before any cap applied. ScoreBucket{count, sum_R, capped_count} replaces the twelve loose bucket fields, so both bucketings share every consumer. The report prints both tables with cap incidence per bucket and a verdict on each, then states what their agreement or disagreement means, including which failure direction it implies. The ranking-disclosure contract pins the whole chain.
+- **Evidence (after):** --validation (2589 boundaries, 605 signals): displayed NOT SUPPORTED (80+ -0.082 R vs 60+ -0.068 R), pre-cap NOT SUPPORTED (85+ -0.141 R vs 60+ -0.068 R); the report concludes both bucketings agree so it is a property of the score, not of the caps. --autotune (2584 boundaries): displayed NOT SUPPORTED (80+ -0.229 R vs 60+ -0.004 R), pre-cap NOT SUPPORTED (85+ -0.256 R vs 60+ -0.004 R), same conclusion. Fail-before: removing the pre-cap comparison fails the ranking-disclosure contract with a message naming F-048. Assertions 199 -> 204. Build 0/0; census 0; contracts 0/9.
+- **Notes:** The cap incidence is new information in its own right: of 605 signals the pre-cap bucketing puts 198 in the 85+ band and EVERY one of them was capped down, and 150 of the 164 samples in the 80-84 displayed bucket are capped samples. The displayed score is dominated by penalised events in exactly the bands a reader would read as strongest.
+
+### F-053 (S2, scoring) — MEASURED: the score does not rank 30m outcomes on the audit sample, and the caps are not the cause
+
+- **Status:** DONE  |  **Category:** tests  |  **Host:** node3  |  **Commit:** 6e59498
+- **Location:** `FXNews.mq5 (rank evaluation, measured not changed)`
+- **Discovered by:** F-052's diagnostic, run on real broker history
+- **Evidence (before):**
+
+  > F-048 left the question open: on the 2026-09-15 runs the bucket average 30m R was negative in every bucket and no candidate beat CURRENT, but the audit could not say whether the score or the cap ladder was responsible.
+
+- **Fix:** No code change: this is the measured answer, recorded because it is material to a go-live decision and because it disproves a hypothesis this audit had advanced.
+- **Evidence (after):** Both bucketings fail in the same direction on both runs. VALIDATION: displayed 80+ -0.082 R vs 60+ -0.068 R; pre-cap 85+ -0.141 R vs 60+ -0.068 R. AUTOTUNE: displayed 80+ -0.229 R vs 60+ -0.004 R; pre-cap 85+ -0.256 R vs 60+ -0.004 R. The report states that both bucketings agree, so the failure is a property of the score rather than of the caps.
+- **Notes:** DISPROVES A HYPOTHESIS OF MINE. I had suggested the 75-79 bucket looked inverted because events capped down by weak_hold_cap (74) and overextended_cap (75) concentrate there. That does not explain the result: bucketing on the score before ANY cap applied fails in the same direction and by a larger margin. The lead was wrong and is recorded as wrong. WHAT THIS DOES NOT ESTABLISH: that the score is broken. The product documents the score as an event-quality ranking, not a probability or a trade instruction, and nothing here tests event quality - only whether it ranks forward return. The measured statement is narrower: on one symbol over 48.8 days the score did not rank 30m outcomes, and the caps are not why. Whether the score SHOULD rank returns, and whether a longer or multi-symbol sample would show an edge this one cannot, remain human decisions. No weights were changed, because tuning them against the sample that exposed the failure is curve-fitting.
+
 ### F-010 (S3, historical) — The 85+ bucket in the historical report is unreachable (now empirically confirmed; the wiki already documents the empty bucket, so only the unannotated report row remains)
 
 - **Status:** DONE  |  **Category:** dead  |  **Host:** node3  |  **Commit:** ba05024
@@ -794,7 +822,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-051 (S3, testing) — Dashboard row rendering and the signal-history eviction dwell still have no automated coverage
 
-- **Status:** DONE  |  **Category:** tests  |  **Host:** None  |  **Commit:** 2dcd832
+- **Status:** DONE  |  **Category:** tests  |  **Host:** None  |  **Commit:** 0a39984
 - **Location:** `FXNews.mq5 (UpdateDashboard, SetDashboardRow, DeleteDashboardRowsFrom)`
 - **Discovered by:** scope re-homed from F-049, as the audit brief requires
 - **Evidence (before):**
@@ -802,5 +830,5 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
   > Re-homed from F-049, which named alert dispatch, correlation grouping and dashboard rendering together. The first two are now covered by the 'alert dispatch' self-test group. Still uncovered: stale-row deletion when the dashboard shrinks, the ShowActiveSignalRows path, and the signal-history eviction dwell introduced with F-042. Rendering needs a live chart, which is why the whole area was manual-only. F-011's refresh-ordering invariant is already pinned structurally by tools/contracts.py (dashboard-refresh) and F-021's wrap width by the self-test, so this task is the remainder, not the whole area.
 
 - **Fix:** Dashboard row creation, the label budget and stale-row deletion are covered by running against the harness's real chart; the history eviction rule moved into a pure SignalHistoryEvictionSlot with four boundary assertions. The F-042 contract was repointed at the new function.
-- **Evidence (after):** BEFORE A (deletion off-by-one): 197 passed, 2 failed of 199, exit 1. BEFORE B (dwell ignored): 198 passed, 1 failed of 199, exit 1. AFTER: 199 passed, 0 failed of 199. Assertions 191 -> 199. Build 0/0; census 0; contracts 0/9.
-- **Notes:** The ShowActiveSignalRows path is not covered by a new test and the ledger says so: it needs a running scan. Its defect-prone property - refresh before the branch on display mode - is already pinned structurally by the dashboard-refresh contract added with F-011. Two fixtures of mine failed first against correct code (a non-tie 'tie' in F-049, and a non-monotonic eviction fixture here); both were test errors and are recorded in the tests.
+- **Evidence (after):** BEFORE A (deletion off-by-one): 197 passed, 2 failed of 199, exit 1. BEFORE B (dwell ignored): 198 passed, 1 failed of 199, exit 1. AFTER: 199 passed, 0 failed of 199. Assertions 191 -> 199. Build 0/0; census 0; contracts 0/9. SECOND PASS: new self-test group 'active signal rows', 14 assertions, three mutations each failing exactly one assertion (217/1 of 218). Assertions 204 -> 218.
+- **Notes:** The ShowActiveSignalRows path is not covered by a new test and the ledger says so: it needs a running scan. Its defect-prone property - refresh before the branch on display mode - is already pinned structurally by the dashboard-refresh contract added with F-011. Two fixtures of mine failed first against correct code (a non-tie 'tie' in F-049, and a non-monotonic eviction fixture here); both were test errors and are recorded in the tests. RESOLVED PROPERLY in a second pass: the two decisions the branch makes are now pure functions with fourteen assertions and three separate fail-before mutations, so the gap this entry recorded is closed for selection and ordering. Still uncovered and stated as such: the row text and tooltip builders, which read profile globals and are exercised only by rendering.

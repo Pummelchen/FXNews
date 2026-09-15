@@ -211,7 +211,12 @@ input int AutotuneMinSignals = 100;
 #define MAX_QUOTE_AGE_SECONDS 3600
 #define MAX_FULL_HOLD_SCORE_SECONDS 3600
 #define MAX_CALENDAR_WINDOW_MINUTES 1440
-#define MAX_HISTORICAL_LOOKBACK_DAYS 365
+#define MAX_HISTORICAL_LOOKBACK_DAYS 3650
+// Raised from 365 so the broker history the terminal actually holds is usable. Note the real
+// bound is memory, not this number: LoadHistoricalM1Rates asks CopyRates for the WHOLE window in
+// one call, so a multi-year window is millions of MqlRates and will fail long before the ceiling
+// is reached. The sub-sampling in HistoricalMaxBoundariesPerProfile bounds the EVALUATION, not
+// the load (F-056).
 #define MAX_HISTORICAL_WARMUP_BARS 10000
 #define MAX_HISTORICAL_BOUNDARIES_PER_PROFILE 20000
 // Upper bound on the on-demand history wait, so a mistyped value cannot stall a
@@ -534,7 +539,34 @@ struct ScoreBucket
    int count;
    double sum_R;
    int capped_count;
+   // The 30-minute outcome counts. Average R alone cannot answer whether a bucket clears the
+   // hit rate its target/stop geometry needs, and that is the question F-053 left open: a bucket
+   // can average negative R and still be the only one above break-even.
+   int target_count;
+   int stop_count;
 };
+
+// The hit rate the outcome geometry needs to break even, ignoring spread and commission:
+// a win is target_atr and a loss is stop_atr, so p*target = (1-p)*stop.
+double BreakEvenHitRate(const double target_atr, const double stop_atr)
+{
+   if(target_atr <= 0.0 || stop_atr <= 0.0)
+      return 0.0;
+   return stop_atr / (target_atr + stop_atr);
+}
+
+double ScoreBucketHitRate(const ScoreBucket &bucket)
+{
+   return SafeDiv((double)bucket.target_count, (double)bucket.count, 0.0);
+}
+
+// Reported beside the hit rate because target and stop do not have to sum to the bucket count: a
+// signal that reaches neither barrier by the horizon resolves at the close, and a bucket dominated
+// by those behaves differently from one where the outcome is decided early.
+double ScoreBucketStopRate(const ScoreBucket &bucket)
+{
+   return SafeDiv((double)bucket.stop_count, (double)bucket.count, 0.0);
+}
 
 // The bucket a score falls in, as an INDEX rather than a floor, so the displayed-score and
 // pre-cap bucketings share every consumer instead of duplicating six branches each.
@@ -574,18 +606,29 @@ void ResetScoreBuckets(ScoreBucket &buckets[])
       buckets[i].count = 0;
       buckets[i].sum_R = 0.0;
       buckets[i].capped_count = 0;
+      buckets[i].target_count = 0;
+      buckets[i].stop_count = 0;
    }
 }
 
 // One sample into one bucketing. `score` is whatever that set is keyed on, so one sample set
 // records the displayed score and the pre-cap score into their respective sets.
-void AddScoreBucketSample(ScoreBucket &buckets[], const double score, const double result_R, const bool capped)
+void AddScoreBucketSample(ScoreBucket &buckets[],
+                          const double score,
+                          const double result_R,
+                          const bool capped,
+                          const bool target_30m = false,
+                          const bool stop_30m = false)
 {
    int index = ScoreBucketIndex(score);
    buckets[index].count++;
    buckets[index].sum_R += result_R;
    if(capped)
       buckets[index].capped_count++;
+   if(target_30m)
+      buckets[index].target_count++;
+   if(stop_30m)
+      buckets[index].stop_count++;
 }
 
 double ScoreBucketAverageR(const ScoreBucket &bucket)
@@ -2820,6 +2863,28 @@ void SelfTestRankingCheck()
                  uncapped.low_bucket == 80 && uncapped.high_bucket == 85,
                  "ranking check: the cap ladder puts the same samples in different buckets in the two views");
 
+   // Break-even and per-bucket outcome rates: the measurement that says whether any bucket could
+   // have been profitable, which average R alone cannot answer.
+   SelfTestNear(BreakEvenHitRate(0.50, 0.35), 0.35 / 0.85,
+                "break-even: target 0.50 against stop 0.35 needs 41.2% (F-053)");
+   SelfTestNear(BreakEvenHitRate(0.35, 0.35), 0.5, "break-even: equal barriers need 50%");
+   SelfTestNear(BreakEvenHitRate(0.70, 0.35), 1.0 / 3.0,
+                "break-even: a target twice the stop needs 33.3%");
+   SelfTestCheck(BreakEvenHitRate(0.0, 0.35) == 0.0 && BreakEvenHitRate(0.50, 0.0) == 0.0,
+                 "break-even: a missing barrier makes no claim rather than dividing by zero");
+
+   ResetHistoricalStats(stats);
+   AddScoreBucketSample(stats.buckets, 70.0, 1.0, false, true, false);
+   AddScoreBucketSample(stats.buckets, 70.0, -1.0, false, false, true);
+   AddScoreBucketSample(stats.buckets, 70.0, 0.0, false, false, false);
+   AddScoreBucketSample(stats.buckets, 70.0, 1.0, false, true, false);
+   SelfTestNear(ScoreBucketHitRate(stats.buckets[2]), 0.5,
+                "bucket outcome rates: two targets in four count as a 50% hit rate (F-053)");
+   SelfTestNear(ScoreBucketStopRate(stats.buckets[2]), 0.25,
+                "bucket outcome rates: the stop rate is counted separately from the hit rate");
+   SelfTestCheck(stats.buckets[2].target_count == 2 && stats.buckets[2].stop_count == 1,
+                 "bucket outcome rates: a sample that hits neither barrier counts as neither");
+
    SelfTestGroup("ranking check", before);
 }
 
@@ -4305,8 +4370,10 @@ void AddHistoricalStats(HistoricalBacktestStats &stats,
    else if(outcome.result_30m_R < 0.0)
       stats.gross_loss_R += MathAbs(outcome.result_30m_R);
 
-   AddScoreBucketSample(stats.buckets, score.displayed_score, outcome.result_30m_R, score.capped);
-   AddScoreBucketSample(stats.pre_cap_buckets, score.raw_score, outcome.result_30m_R, score.capped);
+   AddScoreBucketSample(stats.buckets, score.displayed_score, outcome.result_30m_R, score.capped,
+                        outcome.target_30m, outcome.stop_30m);
+   AddScoreBucketSample(stats.pre_cap_buckets, score.raw_score, outcome.result_30m_R, score.capped,
+                        outcome.target_30m, outcome.stop_30m);
 }
 
 void ResetHistoricalStats(HistoricalBacktestStats &stats)
@@ -4509,7 +4576,7 @@ void AddHistoricalBucketLines(const string title, const ScoreBucket &buckets[], 
 // reports cannot drift apart in what they disclose (F-048).
 void AddHistoricalRankingSection(const HistoricalBacktestStats &stats)
 {
-   AddHistoricalBucketLines("Buckets by displayed score: count | avg 30m R | capped", stats.buckets, true);
+   AddHistoricalBucketLines("Buckets by displayed score: count | avg 30m R | 30m target/stop rate | capped", stats.buckets, true);
 
    // The 85+ row is structurally empty rather than merely unpopulated: without a basket reading
    // the composite caps at 84, and the historical engine has no basket data, so no boundary can
@@ -4521,7 +4588,42 @@ void AddHistoricalRankingSection(const HistoricalBacktestStats &stats)
    // The same samples keyed on the score before the caps applied. A bucket that is mostly capped
    // samples is a different population from one that is not, which the displayed-score table
    // cannot show on its own (F-048).
-   AddHistoricalBucketLines("Buckets by score before the caps: count | avg 30m R", stats.pre_cap_buckets, false);
+   AddHistoricalBucketLines("Buckets by score before the caps: count | avg 30m R | 30m target/stop rate", stats.pre_cap_buckets, false);
+
+   // The other half of the question, and the one a decision turns on: a bucket can rank badly on
+   // average R and still be the only one above the hit rate its own geometry needs. A score that
+   // ranks no bucket above break-even cannot be rescued by reordering, because every ordering of
+   // signals that all lose money still loses money (F-053).
+   double break_even = BreakEvenHitRate(OutcomeTargetAtr, OutcomeStopAtr);
+   AddHistoricalReportLine(StringFormat("Break-even 30m hit rate for target %.2f / stop %.2f ATR is %.1f%% before costs; spread and commission raise it.",
+                                        OutcomeTargetAtr, OutcomeStopAtr, break_even * 100.0));
+
+   int populated = 0;
+   int clearing = 0;
+   string clearing_labels = "";
+   for(int i = 0; i < SCORE_BUCKET_COUNT; i++)
+   {
+      if(stats.buckets[i].count <= 0)
+         continue;
+      populated++;
+      if(ScoreBucketHitRate(stats.buckets[i]) >= break_even)
+      {
+         clearing++;
+         if(clearing_labels != "")
+            clearing_labels += ", ";
+         clearing_labels += StringFormat("%s at %.1f%% on %d signals", ScoreBucketLabel(i),
+                                         ScoreBucketHitRate(stats.buckets[i]) * 100.0,
+                                         stats.buckets[i].count);
+      }
+   }
+   if(populated <= 0)
+      AddHistoricalReportLine("  No bucket holds signals, so this sample cannot compare against break-even.");
+   else if(clearing <= 0)
+      AddHistoricalReportLine(StringFormat("  None of the %d populated buckets reaches break-even, so no ordering of these signals would have been profitable on this sample under this geometry: the score is not what stands between it and break-even.",
+                                           populated));
+   else
+      AddHistoricalReportLine(StringFormat("  %d of %d populated buckets reach break-even: %s. Compare them against how the ranking check orders the same buckets.",
+                                           clearing, populated, clearing_labels));
 
    AddHistoricalRankingVerdict(stats);
 }
@@ -4639,10 +4741,12 @@ void BuildAutotuneReport(const HistoricalBacktestStats &default_stats,
 
 string FormatHistoricalBucketLine(const int index, const ScoreBucket &bucket, const bool show_caps)
 {
-   string line = StringFormat("  %s : %5d | %+0.3f R",
+   string line = StringFormat("  %s : %5d | %+0.3f R | hit %5.1f%% | stop %5.1f%%",
                               ScoreBucketLabel(index),
                               bucket.count,
-                              ScoreBucketAverageR(bucket));
+                              ScoreBucketAverageR(bucket),
+                              ScoreBucketHitRate(bucket) * 100.0,
+                              ScoreBucketStopRate(bucket) * 100.0);
    if(show_caps)
       line += StringFormat(" | %4d capped", bucket.capped_count);
    return line;

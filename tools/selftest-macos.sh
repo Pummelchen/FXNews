@@ -96,15 +96,29 @@ trap 'rm -rf "$WORK"; rm -rf "$INSTALL_DIR"; rm -f "$SCRIPT_DIR/FXNewsSelfTest.e
 
 # The script's inputs travel through a preset file; the historical modes get a
 # small basket so a run finishes in minutes rather than the full default sweep.
+# Both are overridable, because a conclusion about how the score ranks outcomes
+# needs more than one symbol and more than one market regime to rest on:
+#   FXNEWS_HISTORICAL_SYMBOLS        comma-separated, e.g. EURUSD,GBPUSD,USDJPY
+#   FXNEWS_HISTORICAL_LOOKBACK_DAYS  calendar days, up to MAX_HISTORICAL_LOOKBACK_DAYS
+#   FXNEWS_HISTORICAL_MAX_BOUNDARIES boundaries evaluated per profile
+HIST_SYMBOLS="${FXNEWS_HISTORICAL_SYMBOLS:-EURUSD,GBPUSD}"
+HIST_EXTRA=""
+[ -n "${FXNEWS_HISTORICAL_LOOKBACK_DAYS:-}" ] &&
+  HIST_EXTRA="${HIST_EXTRA}HistoricalLookbackDays=${FXNEWS_HISTORICAL_LOOKBACK_DAYS}\r\n"
+[ -n "${FXNEWS_HISTORICAL_MAX_BOUNDARIES:-}" ] &&
+  HIST_EXTRA="${HIST_EXTRA}HistoricalMaxBoundariesPerProfile=${FXNEWS_HISTORICAL_MAX_BOUNDARIES}\r\n"
+
 case "$MODE" in
   selftest)
     printf 'HarnessMode=3\r\nHarnessSymbols=\r\nHarnessTimeframes=\r\nHarnessTimeoutSeconds=90\r\n' >"$PRESET"
     ;;
   validation)
-    printf 'HarnessMode=1\r\nHarnessSymbols=EURUSD,GBPUSD\r\nHarnessTimeframes=M5,H1\r\nHarnessTimeoutSeconds=%d\r\n' "$((TIMEOUT_SECONDS - 60))" >"$PRESET"
+    printf 'HarnessMode=1\r\nHarnessSymbols=%s\r\nHarnessTimeframes=M5,H1\r\nHarnessTimeoutSeconds=%d\r\n%b' \
+      "$HIST_SYMBOLS" "$((TIMEOUT_SECONDS - 60))" "$HIST_EXTRA" >"$PRESET"
     ;;
   autotune)
-    printf 'HarnessMode=2\r\nHarnessSymbols=EURUSD,GBPUSD\r\nHarnessTimeframes=M5,H1\r\nHarnessTimeoutSeconds=%d\r\n' "$((TIMEOUT_SECONDS - 60))" >"$PRESET"
+    printf 'HarnessMode=2\r\nHarnessSymbols=%s\r\nHarnessTimeframes=M5,H1\r\nHarnessTimeoutSeconds=%d\r\n%b' \
+      "$HIST_SYMBOLS" "$((TIMEOUT_SECONDS - 60))" "$HIST_EXTRA" >"$PRESET"
     ;;
 esac
 

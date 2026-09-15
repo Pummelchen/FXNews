@@ -4128,6 +4128,12 @@ void AddHistoricalBucketLines(const string title, const HistoricalBacktestStats 
    AddHistoricalReportLine(FormatHistoricalBucketLine("75-79", stats.bucket75_count, stats.bucket75_R));
    AddHistoricalReportLine(FormatHistoricalBucketLine("80-84", stats.bucket80_count, stats.bucket80_R));
    AddHistoricalReportLine(FormatHistoricalBucketLine("85+  ", stats.bucket85_count, stats.bucket85_R));
+   // The 85+ row is structurally empty rather than merely unpopulated: without a basket reading
+   // the composite caps at 84, and the historical engine has no basket data, so no boundary can
+   // ever land here. Printed so the zero row is not read as "the score never reached its top
+   // band on this sample" when it is unreachable by construction (F-010).
+   if(stats.bucket85_count <= 0)
+      AddHistoricalReportLine("  85+ is unreachable in historical mode: the model caps at 84 without a basket reading, so this row is structurally empty, not a gap in the sample.");
 }
 
 string FormatHistoricalParams(const HistoricalParams &params)

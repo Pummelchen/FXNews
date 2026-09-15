@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 55 | done 34 | open 21 | blocked 0 | S0:1 S1:13 S2:18 S3:23**
+**total 55 | done 36 | open 19 | blocked 0 | S0:1 S1:13 S2:18 S3:23**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -31,11 +31,11 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-014 | S2 | tooling | DONE | `tools/build-macos.sh:40-43; tools/selftest-macos.sh:38-40` | The Wine path, WINEPREFIX and MT5 path constants are duplicated across the two gate scripts and can drift |
 | F-015 | S2 | tooling | DONE | `FXNews.mq5:1725; tools/mql5/FXNewsSelfTest.mq5:14,32-34; tools/selftest-macos.sh:72,139,159-163` | The indicator, the harness and the gate script are coupled by undocumented string literals with no contract test |
 | F-016 | S2 | ops | DONE | `.github/` | No CI workflow: the three release gates are never run automatically |
-| F-017 | S2 | validation | START | `FXNews.mq5:942,988-995` | MaxQuoteAgeSeconds and FullHoldScoreSeconds have no upper bound, so extreme values silently disable the freshness gate or make the HYBRID hold clause unreachable |
+| F-017 | S2 | validation | DONE | `FXNews.mq5:942,988-995` | MaxQuoteAgeSeconds and FullHoldScoreSeconds have no upper bound, so extreme values silently disable the freshness gate or make the HYBRID hold clause unreachable |
 | F-018 | S2 | scoring | DONE | `FXNews.mq5:5026-5031` | single_feature_cap is applied without checking that the feature it measures was evaluated |
 | F-019 | S2 | scoring | DONE | `FXNews.mq5:4958-4959` | The +0.05 synergy bonus is awarded on component scores without checking that either engine passed or was measured |
 | F-021 | S2 | dashboard | START | `FXNews.mq5:7482,7419` | WrapLabelText wraps report lines at 63 characters but SetDashboardRow re-clips them to the measured pixel limit, truncating the wrapped tail |
-| F-023 | S2 | tests | START | `FXNews.mq5:930-1109` | No test exercises any ValidateInputs rejection path |
+| F-023 | S2 | tests | DONE | `FXNews.mq5:930-1109` | No test could reach any ValidateInputs rejection path |
 | F-024 | S2 | tooling | DONE | `tools/build-macos.sh:47,116-120` | build-macos.sh cannot distinguish 'Wine cannot execute' from 'the compiler produced no result line', and reports the wrong exit code |
 | F-025 | S2 | ops | START | `session credential handling` | A live-looking GitHub PAT was supplied in plaintext and is present in the agent session transcript |
 | F-048 | S2 | historical | DONE | `FXNews.mq5 (BuildAutotuneReport / BuildValidationReport interpretation lines)` | The historical reports print the same generic interpretation whether or not higher score buckets actually produced better outcomes |
@@ -350,14 +350,16 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-017 (S2, validation) — MaxQuoteAgeSeconds and FullHoldScoreSeconds have no upper bound, so extreme values silently disable the freshness gate or make the HYBRID hold clause unreachable
 
-- **Status:** START  |  **Category:** logic  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** logic  |  **Host:** node3  |  **Commit:** HEAD
 - **Location:** `FXNews.mq5:942,988-995`
 - **Discovered by:** Phase B L2 + dashboard audit
 - **Evidence (before):**
 
   > ValidateInputs checks only MaxQuoteAgeSeconds >= 1 (:942) and FullHoldScoreSeconds >= MinHoldSecondsForHighScore (:988-995). A very large MaxQuoteAgeSeconds disables quote-freshness enforcement (:4116, :5201); a very large FullHoldScoreSeconds drives hold_score below the 0.35 HYBRID clause (:6196) while weak_hold_cap (:4984) penalises every profile.
 
-- **Notes:** Every other numeric input in this file has both bounds; these two are the outliers.
+- **Fix:** MaxQuoteAgeSeconds and FullHoldScoreSeconds gained an upper bound of 3600 s (MAX_QUOTE_AGE_SECONDS, MAX_FULL_HOLD_SCORE_SECONDS), matching the other time-shaped inputs, so neither can be set large enough to make its gate vacuous. The two messages were extended to state the ceiling.
+- **Evidence (after):** Two new self-test cases. BEFORE (new ceiling neutralised, syntax kept valid): 168 passed, 1 failed of 169, exit 1, and the failing case is the quote-age ceiling. AFTER: 169 passed, 0 failed of 169. Build 0/0; census 0; contracts 0.
+- **Notes:** The first mutation attempt simply deleted the comparison and left 'if(... || )', which does not compile - recorded because a mutation that fails to build is not evidence of anything, so it was redone as a syntactically valid neutralisation.
 
 ### F-018 (S2, scoring) — single_feature_cap is applied without checking that the feature it measures was evaluated
 
@@ -396,16 +398,18 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 - **Notes:** Tracker task 118 introduced the 63-character budget; the pixel fit and the character wrap disagree.
 
-### F-023 (S2, tests) — No test exercises any ValidateInputs rejection path
+### F-023 (S2, tests) — No test could reach any ValidateInputs rejection path
 
-- **Status:** START  |  **Category:** test  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** test  |  **Host:** node3  |  **Commit:** HEAD
 - **Location:** `FXNews.mq5:930-1109`
 - **Discovered by:** Phase B L6
 - **Evidence (before):**
 
   > ValidateInputs contains roughly 20 distinct rejection blocks and is invoked only from OnInit (:809). The self-test does not call it at all, and SELFTEST mode still runs it, so an input-validation regression can only be observed by attaching the indicator interactively.
 
-- **Notes:** A pure-function refactor of the bound checks would make this testable without a terminal.
+- **Fix:** The numeric validation was extracted into a pure ValidateInputsCore(const ValidationInputs&, string&) over a 55-field struct filled by CurrentValidationInputs(). ValidateInputs keeps the string-length and engine-enablement checks and maps a core failure to its message. All 20 guard blocks and their exact messages are preserved, verified by asserting the 18/2 split and the return counts during the splice.
+- **Evidence (after):** New self-test group 'input validation': one baseline acceptance plus 18 single-field rejections with non-empty messages, covering every extracted guard. Removing any one guard fails its own case: the ATR-period guard and the F-017 quote-age ceiling were each removed in turn and each produced '168 passed, 1 failed of 169'. Assertions 149 -> 169. Build 0/0; census 0; contracts 0.
+- **Notes:** The two checks that remain in ValidateInputs are the string-length check and the engine-enablement check; both are covered by the same reasoning but not by this group, which is stated rather than implied. The cross-field numeric rules (hold ordering, outcome ordering, baseline ordering, calendar ordering, rollover equality) ARE covered, because they moved with the numeric half.
 
 ### F-024 (S2, tooling) — build-macos.sh cannot distinguish 'Wine cannot execute' from 'the compiler produced no result line', and reports the wrong exit code
 

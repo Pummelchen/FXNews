@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 55 | done 44 | open 11 | blocked 0 | S0:1 S1:13 S2:16 S3:25**
+**total 55 | done 47 | open 8 | blocked 0 | S0:1 S1:13 S2:16 S3:25**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -56,12 +56,12 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-035 | S3 | docs | DONE | `_fxnews-wiki/Development-Guide.md:23` | Development-Guide both denies and documents the release process, and lists 'test' among commands that do not exist |
 | F-036 | S3 | docs | START | `_fxnews-wiki/Project-Tracker.md:3,7,9` | The tracker describes itself as open tasks and known bugs while showing 120/120 done, and its line-number baseline still says version 2.3 |
 | F-037 | S3 | docs | START | `CLAUDE.md:24-30` | The documented version-bump procedure requires a deployment clone at MQL5/Indicators/FXNews/ that does not exist on this machine |
-| F-038 | S3 | scoring | START | `FXNews.mq5:4948-4949` | Unreachable guard: total_weight can never be zero |
+| F-038 | S3 | scoring | DONE | `FXNews.mq5:4948-4949` | Unreachable guard: total_weight can never be zero |
 | F-039 | S3 | docs | DONE | `FXNews.mq5:396,5012-5041` | The age_free_score field comment understates what the value excludes |
 | F-040 | S3 | logic | DONE | `FXNews.mq5:5044-5045` | The hard 95 ceiling is the only cap that records no reason string |
 | F-041 | S3 | logic | START | `FXNews.mq5:6187,6410` | Redundant threshold re-check in IsConfirmedSignal for CONFIRM_BAR_CLOSE |
-| F-042 | S3 | dashboard | START | `FXNews.mq5:7261-7262` | PushSignalHistory's shift loop copies empty slots when the list is not yet full |
-| F-043 | S3 | logic | START | `FXNews.mq5:8198-8208` | SmoothStep silently re-orients reversed edges instead of surfacing a configuration error |
+| F-042 | S3 | dashboard | DONE | `FXNews.mq5:7261-7262` | PushSignalHistory's shift loop copies empty slots when the list is not yet full |
+| F-043 | S3 | logic | DONE | `FXNews.mq5:8198-8208` | DISPROVED: SmoothStep's edge re-orientation is a tested fix for a pre-1.4 defect |
 | F-044 | S3 | docs | START | `FXNews.mq5:4401-4425` | The ATR definition (simple mean of true range, not Wilder smoothing) is undocumented |
 | F-045 | S3 | tooling | START | `tools/build-macos.sh:150-156` | --install creates the destination directory silently and never verifies the terminal can load the binary |
 
@@ -664,14 +664,16 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-038 (S3, scoring) — Unreachable guard: total_weight can never be zero
 
-- **Status:** START  |  **Category:** dead  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** dead  |  **Host:** node3  |  **Commit:** 0fa4053
 - **Location:** `FXNews.mq5:4948-4949`
 - **Discovered by:** Phase B L3 + scoring audit
 - **Evidence (before):**
 
   > execution_weight (0.18) and regime_weight (0.14) are unconditional (:4941, :4943), so total_weight is at least 0.32 and the 'if(total_weight <= 0.0) total_weight = 1.0' branch at ':4948-4949' cannot be taken.
 
-- **Notes:** Defensive but provably dead; census.py does not have an unreachable-branch category, which is why it was not caught.
+- **Fix:** Documented why the guard is retained instead of deleted: execution_weight (0.18) and regime_weight (0.14) are unconditional, so the sum cannot be zero, and deleting the guard would turn a silent rescale into a silent divide-by-zero if a later edit made both conditional.
+- **Evidence (after):** No observable test exists for this branch and none is claimed: the branch cannot be taken, so nothing can fail before or pass after. The invariant it protects is covered by the composer's existing 'all optional components unmeasured' assertions, which exercise the smallest total_weight.
+- **Notes:** Recorded as documentation-only with the reason deletion was rejected, because deleting dead defensive code is the obvious move and is the riskier one here.
 
 ### F-039 (S3, docs) — The age_free_score field comment understates what the value excludes
 
@@ -711,23 +713,29 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-042 (S3, dashboard) — PushSignalHistory's shift loop copies empty slots when the list is not yet full
 
-- **Status:** START  |  **Category:** perf  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** perf  |  **Host:** node3  |  **Commit:** 09e1c5e
 - **Location:** `FXNews.mq5:7261-7262`
 - **Discovered by:** Phase B L5 + dashboard audit
 - **Evidence (before):**
 
   > ':7261-7262' shifts from evict down to index 1 even when evict is far beyond the used count, copying unused entries. Correct but wasted work; the loop should start at min(evict, count).
 
+- **Fix:** PushSignalHistory now finds the first unused slot from the front, so the eviction index is the list's own end when there is a free one, and the tail dwell scan runs only when the list is full and something must be dropped. Used entries shift by one either way, so the resulting list is unchanged.
+- **Evidence (after):** New contract 'signal-history-shift' pins the property that is checkable. BEFORE (free-slot search removed): contracts fails with the F-042 message, exit 1. AFTER: 0 violations across 9 contracts. Stated limit: the resulting list is identical before and after, so no behavioural test can distinguish them - which is why the finding survived review.
+- **Notes:** The shift copied empty slots into empty slots; the waste was real but invisible in state. Closed with a structural contract because a behavioural one is impossible, and that impossibility is recorded rather than papered over.
 
-### F-043 (S3, logic) — SmoothStep silently re-orients reversed edges instead of surfacing a configuration error
+### F-043 (S3, logic) — DISPROVED: SmoothStep's edge re-orientation is a tested fix for a pre-1.4 defect
 
-- **Status:** START  |  **Category:** logic  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** logic  |  **Host:** node3  |  **Commit:** 2868784
 - **Location:** `FXNews.mq5:8198-8208`
 - **Discovered by:** Phase B L3 + scoring audit
 - **Evidence (before):**
 
   > ':8198-8208' swaps the edges when edge0 > edge1. Every caller derives edges from validated inputs today, but a future reversed bound would silently invert a scoring ramp rather than failing — the exact defect class the self-test was created for.
 
+- **Fix:** No behavioural change. The comment now records that reversed edges are oriented on purpose, that every reversed call in the file is a self-test assertion pinning it, and that this was filed, examined and found correct.
+- **Evidence (after):** Grepping every call site found exactly three reversed literal pairs, all of them self-test assertions (SmoothStep(0.50,0.35,0.20) < ...(0.60), and ...(1.0,0.0,0.5) == 0.5). No production caller passes reversed edges, and the adjacent comment already recorded that before the fix the ramp ran backwards and scored 1.00 for moves against the signal. Build 0/0; census 0; contracts 0/9; selftest 177/0.
+- **Notes:** DISPROVED, like F-012, F-013, F-020, F-010 and F-001's original framing. The proposed change would have re-introduced a severe scoring inversion, which is the opposite of a fix.
 
 ### F-044 (S3, docs) — The ATR definition (simple mean of true range, not Wilder smoothing) is undocumented
 

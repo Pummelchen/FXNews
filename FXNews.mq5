@@ -6053,6 +6053,13 @@ void ComposeSignalScore(CompositeSignalScore &score, const CompositeContext &con
 
    double total_weight = breakout_weight + impulse_weight + execution_weight +
                          flow_weight + regime_weight + calendar_weight;
+   // Unreachable, and deliberately kept rather than deleted. execution_weight (0.18) and
+   // regime_weight (0.14) are unconditional literals, so this sum is at least 0.32 and can
+   // never be zero; the composer's "all optional components unmeasured" assertions cover
+   // that minimal case. It is not removed because deletion would trade a silent rescale for
+   // a silent divide-by-zero if a later edit made both weights conditional, and the fallback
+   // is the only thing standing between that edit and a fabricated maximum score (F-038).
+   // There is no observable test for this branch precisely because it cannot be taken.
    if(total_weight <= 0.0)
       total_weight = 1.0;
 

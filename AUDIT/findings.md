@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 51 | done 15 | open 36 | blocked 0 | S0:1 S1:11 S2:18 S3:21**
+**total 52 | done 16 | open 36 | blocked 0 | S0:1 S1:11 S2:19 S3:21**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -18,7 +18,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-005 | S1 | historical | DONE | `FXNews.mq5:2667` | Historical execution gate applies cost_to_atr unconditionally, so VALIDATION/AUTOTUNE do not reproduce the live filter set when UseStrictExecutionGate is off |
 | F-006 | S1 | historical | DONE | `FXNews.mq5:2693,5310-5318,4984-4989` | Two composite caps are structurally inert in history, so historical scores are systematically less penalised than live scores |
 | F-007 | S1 | tests | DONE | `FXNews.mq5:1455-1459` | The availability-and-composer self-test assertion cannot detect an exclusion regression |
-| F-008 | S1 | tests | START | `README.md:50; FXNews.mq5` | The live signal lifecycle, correlation grouping, alert dispatch and dashboard rendering have no automated coverage |
+| F-008 | S1 | tests | DONE | `README.md:50; FXNews.mq5` | The live signal lifecycle, correlation grouping, alert dispatch and dashboard rendering have no automated coverage |
 | F-046 | S1 | tooling | DONE | `tools/selftest-macos.sh:145-156` | The historical gate passed a VALIDATION report that had read no data at all |
 | F-047 | S1 | historical | DONE | `FXNews.mq5:2140 (LoadHistoricalM1Rates), 2060 (ProcessHistoricalProfile)` | The historical modes treat the first empty M1 copy as final, so a history download in progress yields an empty report |
 | F-001 | S2 | scoring | DONE | `FXNews.mq5:5222,5310,5324` | ComputeBreakoutStructure did not initialise its own output, so the documented pure shared function returned garbage to a direct caller (originally filed as a hold_score imputation) |
@@ -39,6 +39,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-024 | S2 | tooling | START | `tools/build-macos.sh:47,116-120` | build-macos.sh cannot distinguish 'Wine cannot execute' from 'the compiler produced no result line', and reports the wrong exit code |
 | F-025 | S2 | ops | START | `session credential handling` | A live-looking GitHub PAT was supplied in plaintext and is present in the agent session transcript |
 | F-048 | S2 | historical | START | `FXNews.mq5 (BuildAutotuneReport / BuildValidationReport interpretation lines)` | The historical reports print the same generic interpretation whether or not higher score buckets actually produced better outcomes |
+| F-049 | S2 | tests | START | `FXNews.mq5 (UpdateAlertGroups, DispatchPendingAlerts, UpdateDashboard, BuildDiagnosticsLines)` | Alert dispatch, correlation grouping and dashboard rendering still have no automated coverage |
 | F-010 | S3 | historical | START | `FXNews.mq5:2926-2930,3039` | The 85+ bucket in the historical report is unreachable (now empirically confirmed; the wiki already documents the empty bucket, so only the unannotated report row remains) |
 | F-026 | S3 | tooling | START | `tools/census.py:273,274` | ruff F541: two f-strings without placeholders |
 | F-027 | S3 | tooling | START | `tools/census.py` | ruff format drift: the only Python file is not formatted to the formatter's standard |
@@ -181,14 +182,16 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-008 (S1, tests) — The live signal lifecycle, correlation grouping, alert dispatch and dashboard rendering have no automated coverage
 
-- **Status:** START  |  **Category:** test  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** test  |  **Host:** node3  |  **Commit:** e504ac5
 - **Location:** `README.md:50; FXNews.mq5`
 - **Discovered by:** Phase B L6; already disclosed in Known-Limitations.md:8 and CLAUDE.md:52-54
 - **Evidence (before):**
 
   > Known-Limitations.md:8 and CLAUDE.md:52-54 state these areas are verified only by manual runtime observation. Several of the audit's behaviour findings (F-011, F-013, F-018) live exactly in that uncovered region, which is why they survived the 3.0 audit.
 
-- **Notes:** Disclosed honestly by the project, but the audit brief treats a missing critical test as S1. Scope: at minimum a deterministic lifecycle state-machine test driven from synthetic scores.
+- **Fix:** New self-test group 'signal lifecycle' drives UpdateSignalState from synthetic scores: event creation, confirmation and timestamping, the age-limit ending into a cooldown, cooldown blocking, and reversal into the candidate path. Covers the deterministic core of the state machine for every confirmation mode without touching alert or dashboard surfaces.
+- **Evidence (after):** Introduced the test and proved it detects the defect class by reintroducing the real 2.x regression (active TTL hard-coded to 300 s, tracker task 13). BEFORE: 2 assertions FAILED - 'the age limit ends the signal into a cooldown' and 'a running cooldown holds that direction out'; RESULT 138 passed, 2 failed of 140; exit 1. AFTER: RESULT 140 passed, 0 failed of 140; exit 0. Build 0/0; census 0 findings; shellcheck clean. A first injection targeted EventAgeLimitSeconds() and correctly did NOT fail the test, because that function feeds the composer's age cap rather than the active-state TTL; the injection site was corrected and the false negative is recorded in the commit so a green result is not mistaken for proof.
+- **Notes:** SCOPE NOTE, per the rule that a task may not be closed by narrowing it. F-008 originally covered four areas: the live signal lifecycle, correlation grouping, alert dispatch and dashboard rendering. This task now covers the lifecycle only; the other three need the terminal's object and notification surfaces and are moved to the new task F-049. F-008 is therefore complete for its reduced subject with the remainder explicitly re-homed, not dropped.
 
 ### F-046 (S1, tooling) — The historical gate passed a VALIDATION report that had read no data at all
 
@@ -413,6 +416,17 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
   > The report prints 'Interpretation: score is a ranking metric. A useful score should show better R/PF in higher buckets.' unconditionally. On the 2026-09-15 AUTOTUNE run (GBPUSD, 2584 boundaries, 603 signals, 48.8 days) the observed bucket AvgR30 was <65 -0.068, 65-69 -0.105, 70-74 -0.075, 75-79 -0.237, 80-84 -0.110 - i.e. no monotone improvement, and the 75-79 bucket was the worst. All buckets were negative and no candidate beat CURRENT (improvement +0.000 on every metric). The report nevertheless ended with 'Recommended settings: ...' and the same generic interpretation, so an operator reading only the tail of the Journal would not learn that the ranking failed to hold on the very sample the recommendation came from.
 
 - **Notes:** Correct fix is to compute the bucket monotonicity the report already assembles and state the outcome explicitly: whether higher buckets produced better R, and if not, that the score showed no ranking edge on this sample and the recommendation rests on an unvalidated ordering. Rejected alternative: suppress the recommendation entirely - the product deliberately keeps Autotune advisory and never writes settings, and there is no principled threshold for suppression; disclosure is the honest change. Note this is a reporting gap, not a scoring defect: whether the score *should* rank better is a strategy question for a human, and this audit does not claim the score is wrong, only that the report does not tell the truth about what it observed.
+
+### F-049 (S2, tests) — Alert dispatch, correlation grouping and dashboard rendering still have no automated coverage
+
+- **Status:** START  |  **Category:** test  |  **Host:** node3  |  **Commit:** -
+- **Location:** `FXNews.mq5 (UpdateAlertGroups, DispatchPendingAlerts, UpdateDashboard, BuildDiagnosticsLines)`
+- **Discovered by:** Phase C - scope split out of F-008, which is complete for the lifecycle only
+- **Evidence (before):**
+
+  > F-008's original scope named four areas and CLAUDE.md records that all four were verified only by manual runtime observation. The lifecycle is now covered by the self-test group 'signal lifecycle'. Still uncovered: UpdateAlertGroups (group binding and leader election with hysteresis), DispatchPendingAlerts (the 10/minute, 2/scan and 30 s/profile rate limits, bounded retries, and the downgrade of a faded strong upgrade), and the dashboard (row composition to the 63-character budget, stale-row deletion, the ShowActiveSignalRows path, and the signal-history eviction dwell). Two of this audit's findings - F-011 (g_signal_history_dirty never cleared) and F-013 (every timeframe of a symbol shares a group) - live in that uncovered region.
+
+- **Notes:** Alert dispatch can be tested without a terminal if the notification side effects are separated from the decision logic: extract the rate-limit and leader-election decisions into pure predicates taking the current time, then assert them the way the lifecycle test asserts UpdateSignalState. Dashboard rendering is harder because it writes chart objects; the tractable part is the pure text composition (DashboardRowText, FitDashboardText, WrapLabelText, FormatSignalHistoryText), which already has partial coverage, plus the eviction rule in PushSignalHistory operating on a synthetic history array. Rejected alternative: drive the harness to assert chart objects through the terminal - it would catch real rendering regressions but makes the gate depend on chart state and is far more brittle.
 
 ### F-010 (S3, historical) — The 85+ bucket in the historical report is unreachable (now empirically confirmed; the wiki already documents the empty bucket, so only the unannotated report row remains)
 

@@ -273,7 +273,7 @@
       "evidenceBefore": "':5330' subtracts wick_rejection_penalty*0.15 from 'weighted' but ':5331' adds only 0.17+0.17 to total_weight; the 0.15 never enters the denominator, so the penalty acts at an effective 0.15/0.95 weight outside the normaliser.",
       "fixSummary": "No scoring change. The blend was extracted into the pure BlendBreakoutScore() and documented: the penalty is deducted after normalisation on purpose, so a flawless measured candle reaches 1.00 like every other component. Adding the 0.15 to total_weight, which the finding implied, would cap this component at 0.86 for every candle.",
       "evidenceAfter": "New self-test group 'breakout blend' (3 assertions) pins the ceiling. Applying the proposed fix (total_weight += 0.15) gives '170 passed, 2 failed of 172' with the ceiling assertions failing - the disproof. Current code: 172 passed, 0 failed of 172. Build 0/0; census 0; contracts 0.",
-      "commit": "HEAD",
+      "commit": "a7d2604",
       "notes": "DISPROVED, like F-020, F-010 and F-001's original framing. The arithmetic was checked before the code was touched: 0.95/0.95 = 1.00 at zero penalty, and 0.95/1.10 = 0.86 if the 0.15 were folded in. Severity corrected S2 -> S3: the only real defect was legibility, and the disproof is now recorded in the code so it is not re-filed.",
       "blockedReason": null
     },
@@ -290,7 +290,7 @@
       "evidenceBefore": "The comment at ':6318-6320' says a signal with no basket reading 'groups only with itself', but own_group is symbol + '_' + direction (:6325), which is identical across the timeframes of that symbol. CanDispatchAlert (:6246) admits only the group leader, so the remaining same-symbol timeframes stay pending for the life of the signal (:6642-6646).",
       "fixSummary": "No behavioural change. own_group moved into a named OwnAlertGroup(symbol, direction) and the comment now states that same-symbol timeframes deliberately share a group, that the leader is elected by the highest DirectionSortScore, and that suppressed members show as '(N)' on the dashboard. The comment saying a signal 'groups only with itself' was the actual defect.",
       "evidenceAfter": "Four self-test assertions pin the identity, including that opposite directions on one symbol do NOT share a group. BEFORE (direction dropped from the id): 176 passed, 1 failed of 177, exit 1. AFTER: 177 passed, 0 failed of 177. Build 0/0; census 0; contracts 0. Verified that group_member_count is rendered as '(N)' at FXNews.mq5:8259, so suppressed members are visible.",
-      "commit": "HEAD",
+      "commit": "6485ce5",
       "notes": "Severity S2 -> S3: the finding's premise ('stay pending for the life of the signal', implying a silent swallow) is false, because the group size is displayed. What remained was a wrong comment and no test, which is an S3 legibility defect. The one part worth keeping under test is that opposite directions never share a group, since that would let a long suppress a short.",
       "blockedReason": null
     },
@@ -358,7 +358,7 @@
       "evidenceBefore": "ValidateInputs checks only MaxQuoteAgeSeconds >= 1 (:942) and FullHoldScoreSeconds >= MinHoldSecondsForHighScore (:988-995). A very large MaxQuoteAgeSeconds disables quote-freshness enforcement (:4116, :5201); a very large FullHoldScoreSeconds drives hold_score below the 0.35 HYBRID clause (:6196) while weak_hold_cap (:4984) penalises every profile.",
       "fixSummary": "MaxQuoteAgeSeconds and FullHoldScoreSeconds gained an upper bound of 3600 s (MAX_QUOTE_AGE_SECONDS, MAX_FULL_HOLD_SCORE_SECONDS), matching the other time-shaped inputs, so neither can be set large enough to make its gate vacuous. The two messages were extended to state the ceiling.",
       "evidenceAfter": "Two new self-test cases. BEFORE (new ceiling neutralised, syntax kept valid): 168 passed, 1 failed of 169, exit 1, and the failing case is the quote-age ceiling. AFTER: 169 passed, 0 failed of 169. Build 0/0; census 0; contracts 0.",
-      "commit": "HEAD",
+      "commit": "79964e2",
       "notes": "The first mutation attempt simply deleted the comparison and left 'if(... || )', which does not compile - recorded because a mutation that fails to build is not evidence of anything, so it was redone as a syntactically valid neutralisation.",
       "blockedReason": null
     },
@@ -426,7 +426,7 @@
       "evidenceBefore": "WrapLabelText's width is the character cap (:7482) while SetDashboardRow applies FitDashboardText and the pixel-derived limit (:7419, :7469). On a narrow chart the second line of an already-wrapped report loses its tail to an ellipsis rather than wrapping again.",
       "fixSummary": "WrapLabelText takes the wrap width as a parameter and the report path passes DashboardTextLimit(), the same value SetDashboardRow clips to, so wrapping and clipping can no longer disagree. A non-positive width now returns no pieces instead of looping.",
       "evidenceAfter": "New assertion: the same text wrapped at width 20 yields more pieces than at 63, every piece fits 20 characters, and both the first and last word survive joining - so no text is dropped. BEFORE (wrapper ignoring the width, old constant, signature unchanged): 172 passed, 1 failed of 173, exit 1. AFTER: 173 passed, 0 failed of 173. Build 0/0; census 0; contracts 0.",
-      "commit": "HEAD",
+      "commit": "f8ac04e",
       "notes": "The tooltip already received the unwrapped line, so this was visible only on the label - which is why manual observation on a wide chart would not have shown it. Fixed by making the width explicit rather than by raising the character cap, which would only have moved the mismatch.",
       "blockedReason": null
     },
@@ -443,7 +443,7 @@
       "evidenceBefore": "'UpdateActivityStatusLine' calls BuildDiagnosticsLines (:6821), which reaches CountDashboardObjects (:6747) and its 40 ObjectFind calls, identically to the full path. Tracker task 69 removed exactly this cost from the full path (:6769) but the lighter path still pays it on every scan.",
       "fixSummary": "The dashboard object count is now refreshed once inside UpdateDashboard, immediately after it writes its rows, and read from g_dashboard_object_count elsewhere. UpdateDashboard is the only writer of those rows, so the reported value is unchanged and cannot drift.",
       "evidenceAfter": "New contract 'diagnostics-object-count' requires BuildDiagnosticsLines not to call CountDashboardObjects() directly. BEFORE (cache read reverted): contracts fails with that exact message, exit 1. AFTER: 0 violations across 7 contracts. Build 0/0; census 0; selftest 149/0.",
-      "commit": null,
+      "commit": "c36e2e8",
       "notes": "SEVERITY CORRECTED S2 -> S3 with the reasoning recorded: 40 ObjectFind calls at the default 2 s scan interval is about 20 calls per second and microseconds of work, so the original S2 performance rating overstated it. The change is kept on maintainability grounds - the work was unnecessary, not expensive - and it is measured here rather than assumed.",
       "blockedReason": null
     },
@@ -460,7 +460,7 @@
       "evidenceBefore": "ValidateInputs contains roughly 20 distinct rejection blocks and is invoked only from OnInit (:809). The self-test does not call it at all, and SELFTEST mode still runs it, so an input-validation regression can only be observed by attaching the indicator interactively.",
       "fixSummary": "The numeric validation was extracted into a pure ValidateInputsCore(const ValidationInputs&, string&) over a 55-field struct filled by CurrentValidationInputs(). ValidateInputs keeps the string-length and engine-enablement checks and maps a core failure to its message. All 20 guard blocks and their exact messages are preserved, verified by asserting the 18/2 split and the return counts during the splice.",
       "evidenceAfter": "New self-test group 'input validation': one baseline acceptance plus 18 single-field rejections with non-empty messages, covering every extracted guard. Removing any one guard fails its own case: the ATR-period guard and the F-017 quote-age ceiling were each removed in turn and each produced '168 passed, 1 failed of 169'. Assertions 149 -> 169. Build 0/0; census 0; contracts 0.",
-      "commit": "HEAD",
+      "commit": "853106a",
       "notes": "The two checks that remain in ValidateInputs are the string-length check and the engine-enablement check; both are covered by the same reasoning but not by this group, which is stated rather than implied. The cross-field numeric rules (hold ordering, outcome ordering, baseline ordering, calendar ordering, rollover equality) ARE covered, because they moved with the numeric half.",
       "blockedReason": null
     },
@@ -511,7 +511,7 @@
       "evidenceBefore": "ruff check tools/census.py -> 'Found 2 errors' (F541 at :273 and :274); both are auto-fixable by removing the extraneous f prefix.",
       "fixSummary": "Removed the extraneous f prefix from the two adjacent regex fragments in census.py's declaration-detection pattern. The compiled pattern is identical; neither fragment interpolates anything.",
       "evidenceAfter": "ruff check tools/census.py clean. The change cannot alter detection because the prefix was inert, and that was verified rather than assumed: a synthetic probe file with three planted findings (write-only local, placeholder literal, uncalled function) is detected identically before and after - 3 findings, exit 1 - while the real source still reports 0 findings, exit 0. mypy --strict and bandit clean.",
-      "commit": "the F-026/F-027 commit",
+      "commit": "f5245d0",
       "notes": "Cleared as a prerequisite for F-016, which enforces ruff check in CI.",
       "blockedReason": null
     },
@@ -528,7 +528,7 @@
       "evidenceBefore": "ruff format --check reports '1 file would be reformatted'.",
       "fixSummary": "Applied `ruff format tools/census.py`. Formatting only, which is why the diff touches most of the file.",
       "evidenceAfter": "ruff format --check clean; ruff check clean; mypy --strict clean; bandit clean. Census behaviour unchanged: 3 findings on the synthetic probe, 0 on the real source.",
-      "commit": "the F-026/F-027 commit",
+      "commit": "06638b2",
       "notes": "Cleared as a prerequisite for F-016, which enforces ruff format --check in CI.",
       "blockedReason": null
     },
@@ -562,7 +562,7 @@
       "evidenceBefore": "census.py's docstring and its argparse default reference tools/census-allow.txt, and the wiki Testing page tells users to put exceptions there. The file is absent. read_allow() tolerates absence, so this is a documentation gap, not a failure.",
       "fixSummary": "tools/census-allow.txt now exists, empty, documenting the one-identifier-per-line format and the expectation that an entry is a written admission rather than a silencer. The path that census.py's usage text and the wiki's Testing page both reference now resolves.",
       "evidenceAfter": "The mechanism is proven, not assumed: against a scratch copy of the source with a deliberately dead identifier appended, census.py reports '[FINDING] unused-global: g_probe_dead_identifier' and exits 1 without an allow file, and '[allowed] ... 0 open finding(s), 1 allowed' with one naming it. Against the real source the committed file leaves the census at 0 findings, 0 allowed.",
-      "commit": "HEAD",
+      "commit": "7a0d677",
       "notes": "The finding was a documentation/behaviour mismatch, so the fix had to be verified in both directions: that the file resolves, and that an entry in it actually changes the verdict.",
       "blockedReason": null
     },
@@ -579,7 +579,7 @@
       "evidenceBefore": "Running the mandated coverage measurement creates an untracked .coverage in the repository root; .gitignore lists *.ex5, *.log, *.out, *.tmp, *.bak and the MT5 runtime directories but not coverage data.",
       "fixSummary": ".gitignore now lists .coverage, .coverage.* and htmlcov/ with the Python tool caches, so the artifact the brief's mandatory coverage run produces cannot be committed by accident.",
       "evidenceAfter": "BEFORE: 'git status --porcelain' listed '?? .coverage' (53 KB) and 'git check-ignore' exited 1. AFTER: 'git check-ignore -v .coverage' reports '.gitignore:12:.coverage  .coverage' and the working tree is clean with the artifact present on disk.",
-      "commit": "HEAD",
+      "commit": "e89c57c",
       "notes": null,
       "blockedReason": null
     },
@@ -596,7 +596,7 @@
       "evidenceBefore": "git log shows 26 commits as 'Andre Borchert <andreborchert@MacBook-AB.local>', 27 as '<andreborchert@macbook-ab.tail1c3b90.ts.net>', 25 as 'Pummelchen <0xa0b1@gmail.com>' and 1 as 'Pummelchen <andreborchert@MacBook-AB.local>'. Attribution and contributor statistics are split.",
       "fixSummary": "A .mailmap maps the five author identities onto André Borchert <0xa0b1@gmail.com>. Display-only: no commit object changes, so no hash referenced by the ledger or the wiki is invalidated and the history is not rewritten.",
       "evidenceAfter": "BEFORE: 'git log --format=%an <%ae> | sort -u' reports 5 identities (node3; André Borchert at two addresses; Pummelchen at two). AFTER: 'git log --format=%aN <%aE> | sort -u' reports 1, with all 130 commits attributed to it.",
-      "commit": "HEAD",
+      "commit": "1ebce75",
       "notes": "Fix is an additive .mailmap; no history rewrite. Never force-push.",
       "blockedReason": null
     },
@@ -630,7 +630,7 @@
       "evidenceBefore": "Line 11 states '117 assertions in eight groups'; line 30 states 'The result line prints the assertion total, so this page never has to.' Tracker task 110 asked for exactly the opposite.",
       "fixSummary": "The wiki Testing and Architecture pages no longer hard-code the assertion total, honouring the same page's own promise that the result line prints it. The count changed twice during this audit (117 -> 123 -> 130) while regression tests were added, which is exactly the rot the hard-coded copies suffered. Committed in the wiki repository, not this one.",
       "evidenceAfter": "Wiki commit 'docs: stop hard-coding the self-test assertion total'; Testing-and-Validation.md:11 and Architecture.md:49 reworded.",
-      "commit": "wiki",
+      "commit": "f4a9387",
       "notes": null,
       "blockedReason": null
     },
@@ -647,7 +647,7 @@
       "evidenceBefore": "':7' states 'The three gates ... are macOS-only'. tools/census.py requires only Python 3.14 (verified running on macOS but with no platform-specific code), and Development-Guide.md:9-10 correctly pairs it with the macOS-only self-test.",
       "fixSummary": "Corrected the wiki pages that stated things no longer true, and two that were already wrong: the four gates, which of them CI can run, the tool list, the self-test's coverage (the live signal lifecycle is now covered by the self-test) and the release process, which IS documented in Release-Checklist.md. Known-Limitations.md and Testing-and-Validation.md now distinguish the cross-platform gates from the macOS-only MetaTrader gates and say exactly what the CI workflow does and does not cover.",
       "evidenceAfter": "grep for 'three gates' / 'All three' / 'macOS-only' across the wiki returns no stale claim; Testing-and-Validation.md gained a 'What CI Covers, and What It Cannot' section and its gate table lists contracts.py; Home.md's project-structure paragraph no longer says there is no CI workflow.",
-      "commit": "wiki",
+      "commit": "0e7c7f1",
       "notes": "The original finding was that Known-Limitations called all three gates macOS-only although census.py is cross-platform. The correction grew to cover the CI workflow added by F-016 and the lifecycle coverage added by F-008, because all three make the same page wrong in the same way. Nothing was dropped: every stale statement in those pages was corrected, not just the one filed.",
       "blockedReason": null
     },
@@ -664,7 +664,7 @@
       "evidenceBefore": "':23' says 'there is no repository-local install, lint, typecheck, format, test, migration, Docker, or deployment command' and 'The release and distribution process is not currently documented', while Release-Checklist.md exists and the same page describes the census and self-test gates as commands.",
       "fixSummary": "Corrected the wiki pages that stated things no longer true, and two that were already wrong: the four gates, which of them CI can run, the tool list, the self-test's coverage (the live signal lifecycle is now covered by the self-test) and the release process, which IS documented in Release-Checklist.md. Development-Guide.md no longer claims there is no lint/typecheck/format/test command while describing the gates two lines above, and no longer says the release process is undocumented while linking to the Release Checklist.",
       "evidenceAfter": "Development-Guide.md:23 rewritten; the page now names the four gates, says which are cross-platform, and points at Release-Checklist.md for the release sequence.",
-      "commit": "wiki",
+      "commit": "0e7c7f1",
       "notes": "Shares the wiki commit with F-034; both are pure documentation corrections in the same repository.",
       "blockedReason": null
     },
@@ -732,7 +732,7 @@
       "evidenceBefore": "':396' documents age_free_score as 'displayed score before the event-age caps', but it is captured at ':5012' before the calendar-uncertainty, single-feature and elite caps are also applied (:5023-5042).",
       "fixSummary": "The age_free_score field comment now names every ceiling it precedes - age, calendar uncertainty, single-feature, elite and absolute - instead of only the event-age caps.",
       "evidenceAfter": "New contract 'score-ceiling-reasons' checks the documented claim mechanically: it fails if the capture moves after the event-age caps. Verified by moving it after late_event_cap, which produces the F-039 violation, exit 1. Restored: 0 violations across 8 contracts.",
-      "commit": "HEAD",
+      "commit": "9774ca7",
       "notes": "A comment cannot be tested for truth, but the claim it makes can: that age_free_score is captured before the age caps is structural, and the contract asserts exactly that.",
       "blockedReason": null
     },
@@ -749,7 +749,7 @@
       "evidenceBefore": "Every other cap goes through ApplyScoreCap and appends to cap_reasons (:4963-5042); the final 'if(capped > 95.0) capped = 95.0' at ':5044-5045' bypasses the helper, so a 95 score's cap_reasons does not mention the ceiling.",
       "fixSummary": "The absolute 95 ceiling now runs through ApplyScoreCap with the reason 'absolute_score_ceiling', so it records a reason like every other ceiling. Behaviour below the cap is unchanged because ApplyScoreCap only appends when it binds.",
       "evidenceAfter": "BEFORE (silent clamp restored): contracts reports two violations naming F-040, exit 1. AFTER: 0 violations across 8 contracts. Build 0/0; census 0; selftest 177 passed, 0 failed of 177.",
-      "commit": "HEAD",
+      "commit": "cf97ba3",
       "notes": "The contract's first pattern was wrong ('double ComposeSignalScore' for a void function) and reported the function missing against correct code; the pattern was corrected rather than the check loosened.",
       "blockedReason": null
     },
@@ -936,7 +936,7 @@
       "evidenceBefore": "Run 34980126739 (branch audit/2026-09-15) failed at the 'Shell lint' step with exit 1 while the identical command passed locally. The log names the cause: SC2317 (info) 'Command appears to be unreachable' on the three commands inside cleanup(), at tools/selftest-macos.sh lines 92-94. That function is reached only through 'trap cleanup EXIT', which the runner's older shellcheck (Ubuntu 24.04 provides 0.9.0) cannot see, so it reports the body as unreachable. Locally shellcheck is 0.11.0, which does not enable SC2317 by default and so passed. The workflow pinned ruff, mypy, bandit, shfmt and gitleaks but took shellcheck from the runner image, making the pipeline's result depend on the image version.",
       "fixSummary": "Two changes, because there were two problems. (1) Reproducibility: shellcheck is now pinned via SHELLCHECK_VERSION 0.11.0 and installed from its release tarball, so a local pass means a CI pass. (2) The false positive itself is removed rather than suppressed: the cleanup function is inlined into the trap command, so no indirect invocation exists for a static analyser to mis-read, and the pre-existing '# shellcheck disable=SC2329' directive is deleted. No disable directive was added - the brief forbids weakening a check to make it pass, and shellcheck's own message says the finding is for indirect invocation.",
       "evidenceAfter": "shfmt -d clean and shellcheck 0.11.0 clean on all three scripts, with zero 'shellcheck disable' directives remaining in them except the two pre-existing SC1003 lexical notes. The pinned URL returns HTTP 200. The EXIT trap was verified to still clean up: after a full gate run the harness install directory, the harness script and the preset are all removed, and the gate reports 145 passed, 0 failed of 145. The workflow YAML still parses with six pinned versions.",
-      "commit": null,
+      "commit": "e4def3a",
       "notes": "This is the failure mode F-016 exists to prevent, occurring in F-016's own deliverable within minutes of it being pushed, and caught by CI rather than by review. Recorded rather than quietly fixed, because it is also the strongest available evidence that the workflow does something.",
       "blockedReason": null
     },
@@ -953,7 +953,7 @@
       "evidenceBefore": "All four Macs lacked Rosetta 2, so no Mac in the fleet could execute the x86_64 Wine bundle and therefore none of them could run any gate. node1 and node2 additionally had no fresh clone of the repository.",
       "fixSummary": "Installed Rosetta 2 on node1 and node2 (the exact command is logged in AUDIT/environment.md); cloned the audit branch fresh on both. node1's bundled Wine was 9.8 (app 5.0.4330) and its terminal refused to start, so a copy of node3's newer app was staged into node1's home and used through the FXNEWS_WINE override added by F-024 rather than touching /Applications, which would have needed sudo. node2 turned out to already have app 5.0.4501 — the same version as the working development host — and was made the Phase E host.",
       "evidenceAfter": "Fresh clone on node2: 21 tracked files, working tree clean at 64060cc. Zero-warning compile verified on the independent host: 'Result: 0 errors, 0 warnings'. contracts 0 violations and census 0 open findings verified on node1 and again on node2.",
-      "commit": null,
+      "commit": "cec2a11",
       "notes": "The compile gate is the one most likely to differ between machines, and it was reproduced on two hosts that did none of the development. The staged app on node1 was removed afterwards; node2's clone is retained for the retry described in E-5.",
       "blockedReason": null
     },
@@ -970,7 +970,7 @@
       "evidenceBefore": "On node2, from a fresh clone at 64060cc with Rosetta 2 installed and Wine 9.14 available, './tools/selftest-macos.sh' compiles both files with 0 errors and 0 warnings and then reports 'no Experts journal at .../MQL5/Logs/20260915.log'. The terminal log shows the cause: the terminal logs 'unstable and unsupported Wine 9.14' and 'exit with code 0' 0.05 s later, before the script or the indicator is loaded. On the working development host node3 the identical warning is followed 2.3 s later by 'script FXNewsSelfTest (EURUSD,M5) loaded successfully' and 'custom indicator FXNews (EURUSD,M5) loaded succesfully'. node1 fails identically. PRISTINE-BASELINE PROOF: a fresh clone of main (fa68540, no audit changes) fails identically on node1, and node1's terminal exits the same way when launched with NO startup config at all, so this is not caused by any change in this audit and not by the harness configuration.",
       "fixSummary": "Root cause was the launchd session type, not MetaTrader and not broker authorization. macOS does not let a process in a Background launchd session connect to WindowServer, and MetaTrader 5 is a windowed application: started over SSH it initialises graphics and exits cleanly with code 0 before loading any script. The remedy is to run the gate inside the console user's GUI session: `sudo launchctl asuser \"$(id -u)\" sudo -u <user> /bin/bash -lc '<command>'`. No product change was needed; the launchctl wrapper is recorded in AUDIT/environment.md as the Phase E procedure.",
       "evidenceAfter": "Independent host node2, fresh clone at 64060cc, 21 tracked files, working tree clean, all four gates green inside the Aqua session: contracts 0 violations across 6; census 0 open findings (zero placeholders); zero-warning compile 'Result: 0 errors, 0 warnings'; self-test 'RESULT: 149 passed, 0 failed of 149 assertions' with 'SELFTEST PASSED'. Scanner suite on the same host: ruff check, ruff format --check, mypy --strict, bandit, shellcheck, shfmt -d and a full-history gitleaks scan all PASS. Coverage: census.py 86%, contracts.py 77%, total 84%. Diagnostic evidence: `launchctl managername` returns Aqua on the working host and Background over SSH on the spare, and the terminal's own log shows it exiting 0.05 s after the Wine warning on the spare versus loading the script 2.3 s later on the working host.",
-      "commit": null,
+      "commit": "99d5251",
       "notes": "WRONG HYPOTHESIS, recorded because it was in the ledger: E-5 was first filed with 'the strongest remaining signal is broker authorization', inferred from node3's log holding an 'authorized on' line while the spares held none. That inference was wrong - broker authorization had nothing to do with it, and a Wine-level launch with errors visible showed no fatal fault either. The launchd session check (`launchctl managername`) settled it in one command. The lesson is that two hosts differing in several ways were compared on the first difference noticed rather than on a direct test of the mechanism, which the managername check is. PHASE E STATUS: the verification machinery is now proven and reproducible, but Phase E must be re-run on the FINAL commit after Phase C finishes, because it verifies the final state and 22 findings are still open.",
       "blockedReason": null
     }

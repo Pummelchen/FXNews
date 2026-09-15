@@ -108,7 +108,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### E-4 (S1, verification) — Provision an independent macOS host for Phase E
 
-- **Status:** DONE  |  **Category:** deps  |  **Host:** node1, node2  |  **Commit:** -
+- **Status:** DONE  |  **Category:** deps  |  **Host:** node1, node2  |  **Commit:** cec2a11
 - **Location:** `n/a (fleet)`
 - **Discovered by:** Phase E
 - **Evidence (before):**
@@ -121,7 +121,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### E-5 (S1, verification) — Phase E's self-test gate could not run over SSH: the spare Macs' terminal exits when launched outside the Aqua session
 
-- **Status:** DONE  |  **Category:** deps  |  **Host:** node1, node2  |  **Commit:** -
+- **Status:** DONE  |  **Category:** deps  |  **Host:** node1, node2  |  **Commit:** 99d5251
 - **Location:** `n/a (fleet)`
 - **Discovered by:** Phase E
 - **Evidence (before):**
@@ -328,7 +328,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-017 (S2, validation) — MaxQuoteAgeSeconds and FullHoldScoreSeconds have no upper bound, so extreme values silently disable the freshness gate or make the HYBRID hold clause unreachable
 
-- **Status:** DONE  |  **Category:** logic  |  **Host:** node3  |  **Commit:** HEAD
+- **Status:** DONE  |  **Category:** logic  |  **Host:** node3  |  **Commit:** 79964e2
 - **Location:** `FXNews.mq5:942,988-995`
 - **Discovered by:** Phase B L2 + dashboard audit
 - **Evidence (before):**
@@ -367,7 +367,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-021 (S2, dashboard) — WrapLabelText wraps report lines at 63 characters but SetDashboardRow re-clips them to the measured pixel limit, truncating the wrapped tail
 
-- **Status:** DONE  |  **Category:** logic  |  **Host:** node3  |  **Commit:** HEAD
+- **Status:** DONE  |  **Category:** logic  |  **Host:** node3  |  **Commit:** f8ac04e
 - **Location:** `FXNews.mq5:7482,7419`
 - **Discovered by:** Phase B L2 + dashboard audit
 - **Evidence (before):**
@@ -380,7 +380,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-023 (S2, tests) — No test could reach any ValidateInputs rejection path
 
-- **Status:** DONE  |  **Category:** test  |  **Host:** node3  |  **Commit:** HEAD
+- **Status:** DONE  |  **Category:** test  |  **Host:** node3  |  **Commit:** 853106a
 - **Location:** `FXNews.mq5:930-1109`
 - **Discovered by:** Phase B L6
 - **Evidence (before):**
@@ -441,7 +441,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-050 (S2, tooling) — The CI workflow pinned every analysis tool except shellcheck, and the unpinned one failed the build
 
-- **Status:** DONE  |  **Category:** deps  |  **Host:** node3 + GitHub runner  |  **Commit:** -
+- **Status:** DONE  |  **Category:** deps  |  **Host:** node3 + GitHub runner  |  **Commit:** e4def3a
 - **Location:** `.github/workflows/ci.yml; tools/selftest-macos.sh:89-96`
 - **Discovered by:** the first real CI run of F-016 - found by CI, not by review
 - **Evidence (before):**
@@ -467,7 +467,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-012 (S3, scoring) — DISPROVED: the wick penalty's missing denominator entry is the correct arrangement
 
-- **Status:** DONE  |  **Category:** logic  |  **Host:** node3  |  **Commit:** HEAD
+- **Status:** DONE  |  **Category:** logic  |  **Host:** node3  |  **Commit:** a7d2604
 - **Location:** `FXNews.mq5:5330-5331`
 - **Discovered by:** Phase B L3 + scoring audit
 - **Evidence (before):**
@@ -480,7 +480,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-013 (S3, dashboard) — DOMINANT FLOW's fallback group id is shared by every timeframe of a symbol - deliberate, not a defect
 
-- **Status:** DONE  |  **Category:** logic  |  **Host:** node3  |  **Commit:** HEAD
+- **Status:** DONE  |  **Category:** logic  |  **Host:** node3  |  **Commit:** 6485ce5
 - **Location:** `FXNews.mq5:6325,6246`
 - **Discovered by:** Phase B L2 + dashboard audit
 - **Evidence (before):**
@@ -506,7 +506,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-022 (S3, dashboard) — BuildDiagnosticsLines recounts the dashboard objects on every scan, including the light path
 
-- **Status:** DONE  |  **Category:** perf  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** perf  |  **Host:** node3  |  **Commit:** c36e2e8
 - **Location:** `FXNews.mq5:6817-6825,6747`
 - **Discovered by:** Phase B L5 + dashboard audit
 - **Evidence (before):**
@@ -519,7 +519,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-026 (S3, tooling) — ruff F541: two f-strings without placeholders
 
-- **Status:** DONE  |  **Category:** style  |  **Host:** node3  |  **Commit:** the F-026/F-027 commit
+- **Status:** DONE  |  **Category:** style  |  **Host:** node3  |  **Commit:** f5245d0
 - **Location:** `tools/census.py:273,274`
 - **Discovered by:** Phase B baseline (ruff check)
 - **Evidence (before):**
@@ -532,7 +532,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-027 (S3, tooling) — ruff format drift: the only Python file is not formatted to the formatter's standard
 
-- **Status:** DONE  |  **Category:** style  |  **Host:** node3  |  **Commit:** the F-026/F-027 commit
+- **Status:** DONE  |  **Category:** style  |  **Host:** node3  |  **Commit:** 06638b2
 - **Location:** `tools/census.py`
 - **Discovered by:** Phase B baseline (ruff format --check)
 - **Evidence (before):**
@@ -558,7 +558,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-029 (S3, tooling) — tools/census-allow.txt is documented and defaulted to but does not exist
 
-- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** HEAD
+- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** 7a0d677
 - **Location:** `tools/census.py:17,338`
 - **Discovered by:** Phase B L0 + docs audit
 - **Evidence (before):**
@@ -571,7 +571,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-030 (S3, tooling) — .coverage is not ignored, so the coverage artifact required by the audit brief can be committed by accident
 
-- **Status:** DONE  |  **Category:** style  |  **Host:** node3  |  **Commit:** HEAD
+- **Status:** DONE  |  **Category:** style  |  **Host:** node3  |  **Commit:** e89c57c
 - **Location:** `.gitignore`
 - **Discovered by:** Phase B L0
 - **Evidence (before):**
@@ -583,7 +583,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-031 (S3, repo) — One contributor appears under three different author identities
 
-- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** HEAD
+- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** 1ebce75
 - **Location:** `git history`
 - **Discovered by:** Phase B L0
 - **Evidence (before):**
@@ -608,7 +608,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-033 (S3, docs) — The wiki Testing page hard-codes the assertion total on the same page that promises it never has to
 
-- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** wiki
+- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** f4a9387
 - **Location:** `_fxnews-wiki/Testing-and-Validation.md:11,30`
 - **Discovered by:** Phase B docs audit
 - **Evidence (before):**
@@ -620,7 +620,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-034 (S3, docs) — Known-Limitations calls all three gates macOS-only, but census.py is cross-platform
 
-- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** wiki
+- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** 0e7c7f1
 - **Location:** `_fxnews-wiki/Known-Limitations.md:7`
 - **Discovered by:** Phase B docs audit
 - **Evidence (before):**
@@ -633,7 +633,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-035 (S3, docs) — Development-Guide both denies and documents the release process, and lists 'test' among commands that do not exist
 
-- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** wiki
+- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** 0e7c7f1
 - **Location:** `_fxnews-wiki/Development-Guide.md:23`
 - **Discovered by:** Phase B docs audit
 - **Evidence (before):**
@@ -679,7 +679,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-039 (S3, docs) — The age_free_score field comment understates what the value excludes
 
-- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** HEAD
+- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** 9774ca7
 - **Location:** `FXNews.mq5:396,5012-5041`
 - **Discovered by:** Phase B L3 + scoring agent
 - **Evidence (before):**
@@ -692,7 +692,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-040 (S3, logic) — The hard 95 ceiling is the only cap that records no reason string
 
-- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** HEAD
+- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** cf97ba3
 - **Location:** `FXNews.mq5:5044-5045`
 - **Discovered by:** Phase B L3 + scoring audit
 - **Evidence (before):**

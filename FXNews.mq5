@@ -1054,6 +1054,28 @@ void OnTimer()
 
    if(IsHistoricalMode())
    {
+      // Warn BEFORE the run, not after it. The terminal builds M1 history for the chart symbol only
+      // when the chart itself is on M1; on any other timeframe CopyRates returns 4401 for that one
+      // symbol while every other symbol downloads on demand, so the symbol an operator is most
+      // likely to be evaluating is the one silently dropped and the report reads "Symbols 1/2" as
+      // though the data were missing. Measured 2026-09-16 (F-054), including that opening a
+      // temporary M1 chart at runtime does NOT produce the series, which is why this warns instead
+      // of fixing it: the chart has to be M1 when the terminal starts.
+      if(Period() != PERIOD_M1)
+      {
+         for(int p = 0; p < ArraySize(g_profiles); p++)
+         {
+            if(g_profiles[p].symbol == _Symbol)
+            {
+               PrintFormat("FXNews: %s is both the chart symbol and in SymbolsToScan, and this chart is not M1, "
+                           "so its M1 history cannot be loaded and it will be skipped. Run the historical modes on an "
+                           "M1 chart, or on a chart of a symbol you are not evaluating.",
+                           _Symbol);
+               break;
+            }
+         }
+      }
+
       RunHistoricalOperatingMode();
       return;
    }
@@ -3454,17 +3476,18 @@ bool RunHistoricalBacktestSet(HistoricalParams &params_set[],
       int copied = LoadHistoricalM1Rates(symbols[s], rates);
       if(copied <= 0)
       {
-         // The old text said to "open a chart of the symbol so the terminal downloads it". That was
-         // measured on 2026-09-15 and is not sufficient: EURUSD is the chart symbol on the audit
-         // terminal, its M1 .hcc files are present, selecting it explicitly changes nothing, and a
-         // 420 s wait changes nothing, while GBPUSD in the same window returns 50 000 bars. The
-         // advice now names what was actually observed and what the operator can actually check
-         // (F-054).
+         // Reaching here for the chart symbol is a different failure from any other symbol, because
+         // no request form can load it and a chart opened at runtime does not help either, so the
+         // message names the one remedy that was measured to work. The earlier wording told the
+         // operator to open a chart of the symbol; that is exactly what does not work (F-054).
+         bool chart_symbol = (symbols[s] == _Symbol);
          PrintFormat("FXNews %s: %s returned no M1 bars for the %d-day window (error %d) after waiting up to %d s, and is skipped. "
-                     "Check the symbol's history in the terminal's Symbols dialog (Ctrl+U) and re-run; "
-                     "the report's Symbols line names how many were usable.",
+                     "%s The report's Symbols line names how many were usable.",
                      OperatingModeText(), symbols[s], HistoricalLookbackDays, GetLastError(),
-                     HistoricalHistoryWaitSeconds);
+                     HistoricalHistoryWaitSeconds,
+                     (chart_symbol ?
+                      "This is the chart symbol: the terminal loads its M1 history only when the chart itself is on M1, so run the historical modes on an M1 chart or on a chart of a symbol you are not evaluating." :
+                      "Check the symbol's history in the terminal's Symbols dialog (Ctrl+U) and re-run."));
          continue;
       }
 

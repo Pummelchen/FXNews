@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 47 | done 4 | open 43 | blocked 0 | S0:1 S1:9 S2:17 S3:20**
+**total 47 | done 8 | open 39 | blocked 0 | S0:1 S1:9 S2:17 S3:20**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -14,8 +14,8 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-001 | S1 | scoring | START | `FXNews.mq5:5222,5310,5324` | Breakout hold_score is imputed at 0 with a full 0.20 weight when the price is not outside the box, instead of leaving the normaliser |
 | F-002 | S1 | scoring | DONE | `FXNews.mq5:4502` | UpdateSessionBaseline folds active_trigger_tick_volume into the tick-volume baseline unguarded, while the adjacent line explicitly guards the tick rate |
 | F-003 | S1 | scoring | START | `FXNews.mq5:4268,4704,5418,5917` | movement_5m_pips falls back to a 0.0 sentinel when the M1 copy fails and is then consumed as a measured value by three components |
-| F-004 | S1 | historical | START | `FXNews.mq5:2728` | Historical impulse evaluation forces acceleration_available and continuation_available to true, hard-coding weights for inputs that may be unmeasurable |
-| F-005 | S1 | historical | START | `FXNews.mq5:2667` | Historical execution gate applies cost_to_atr unconditionally, so VALIDATION/AUTOTUNE do not reproduce the live filter set when UseStrictExecutionGate is off |
+| F-004 | S1 | historical | DONE | `FXNews.mq5:2728` | Historical impulse evaluation forces acceleration_available and continuation_available to true, hard-coding weights for inputs that may be unmeasurable |
+| F-005 | S1 | historical | DONE | `FXNews.mq5:2667` | Historical execution gate applies cost_to_atr unconditionally, so VALIDATION/AUTOTUNE do not reproduce the live filter set when UseStrictExecutionGate is off |
 | F-006 | S1 | historical | START | `FXNews.mq5:2693,5310-5318,4984-4989` | Two composite caps are structurally inert in history, so historical scores are systematically less penalised than live scores |
 | F-007 | S1 | tests | START | `FXNews.mq5:1455-1459` | The availability-and-composer self-test assertion cannot detect an exclusion regression |
 | F-008 | S1 | tests | START | `README.md:50; FXNews.mq5` | The live signal lifecycle, correlation grouping, alert dispatch and dashboard rendering have no automated coverage |
@@ -42,8 +42,8 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-029 | S3 | tooling | START | `tools/census.py:17,338` | tools/census-allow.txt is documented and defaulted to but does not exist |
 | F-030 | S3 | tooling | START | `.gitignore` | .coverage is not ignored, so the coverage artifact required by the audit brief can be committed by accident |
 | F-031 | S3 | repo | START | `git history` | One contributor appears under three different author identities |
-| F-032 | S3 | docs | START | `tools/selftest-macos.sh:13` | The gate script's header comment states the wrong assertion count (72; actual 117) |
-| F-033 | S3 | docs | START | `_fxnews-wiki/Testing-and-Validation.md:11,30` | The wiki Testing page hard-codes the assertion total on the same page that promises it never has to |
+| F-032 | S3 | docs | DONE | `tools/selftest-macos.sh:13` | The gate script's header comment states the wrong assertion count (72; actual 117) |
+| F-033 | S3 | docs | DONE | `_fxnews-wiki/Testing-and-Validation.md:11,30` | The wiki Testing page hard-codes the assertion total on the same page that promises it never has to |
 | F-034 | S3 | docs | START | `_fxnews-wiki/Known-Limitations.md:7` | Known-Limitations calls all three gates macOS-only, but census.py is cross-platform |
 | F-035 | S3 | docs | START | `_fxnews-wiki/Development-Guide.md:23` | Development-Guide both denies and documents the release process, and lists 'test' among commands that do not exist |
 | F-036 | S3 | docs | START | `_fxnews-wiki/Project-Tracker.md:3,7,9` | The tracker describes itself as open tasks and known bugs while showing 120/120 done, and its line-number baseline still says version 2.3 |
@@ -122,24 +122,28 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-004 (S1, historical) — Historical impulse evaluation forces acceleration_available and continuation_available to true, hard-coding weights for inputs that may be unmeasurable
 
-- **Status:** START  |  **Category:** logic  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** logic  |  **Host:** node3  |  **Commit:** 2e8430c
 - **Location:** `FXNews.mq5:2728`
 - **Discovered by:** Phase B L2 + historical audit
 - **Evidence (before):**
 
   > ':2728' calls BlendImpulseScore(..., true, true, continuation) unconditionally, while the live path computes genuine flags at ':5393' (SnapshotWindowCovered) and ':5415' (ContinuationScore out-param). acceleration_up is 0.0 when index5<0||index30<0 (:2629-2630) and move5_atr_up is 0.0 when index5<0 (:2628), so a neutral 0.0 enters both the numerator and the normaliser with 0.30 of weight (:5445-5459).
 
+- **Fix:** HistoricalBoundaryFeatures carries acceleration_available and continuation_available derived from whether the 5- and 30-minute lookups resolved; the call site passes them instead of the hard-coded true/true, so an unavailable term leaves the blend and the normaliser.
+- **Evidence (after):** New self-test group 'impulse availability'. BEFORE (forced flags restored): 1 assertion FAILED - 'impulse blend: unavailable terms leave the normaliser (got 0.600000, expected 1.000000)'; RESULT 129 passed, 1 failed of 130; exit 1. AFTER: RESULT 130 passed, 0 failed of 130; exit 0. Build 0/0; census 0 findings; shellcheck clean.
 - **Notes:** Breaches the exclude-don't-impute invariant in the validator/autotune path, whose output is used to advise settings.
 
 ### F-005 (S1, historical) — Historical execution gate applies cost_to_atr unconditionally, so VALIDATION/AUTOTUNE do not reproduce the live filter set when UseStrictExecutionGate is off
 
-- **Status:** START  |  **Category:** logic  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** logic  |  **Host:** node3  |  **Commit:** 57abd8c
 - **Location:** `FXNews.mq5:2667`
 - **Discovered by:** Phase B L2 + historical audit
 - **Evidence (before):**
 
   > ':2667' includes 'features.cost_to_atr > params.max_spread_to_atr' in the unconditional rejection condition, whereas the live gate applies cost_to_atr only inside 'if(UseStrictExecutionGate)' (:5159-5173). With strict off, history rejects boundaries the live scanner accepts.
 
+- **Fix:** Extracted ExecutionSpreadBlock(execution, max_spread_to_atr, strict) as one pure predicate covering the spread, cost-to-ATR and spread-z ceilings, and called it from both the live EvaluateExecutionQuality and the historical ScoreHistoricalBoundary. This removes the duplicated gate and the drift: the validator now honours UseStrictExecutionGate exactly as the live path does.
+- **Evidence (after):** New self-test group 'execution gate'. BEFORE (unconditional ceiling restored): 2 assertions FAILED ('a high cost-to-ATR passes when the strict gate is off', 'the spread-z ceiling is strict-gated as well'); RESULT 126 passed, 2 failed of 128; exit 1. AFTER: RESULT 128 passed, 0 failed of 128; exit 0. Build 0/0; census 0 findings.
 
 ### F-006 (S1, historical) — Two composite caps are structurally inert in history, so historical scores are systematically less penalised than live scores
 
@@ -423,23 +427,27 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-032 (S3, docs) — The gate script's header comment states the wrong assertion count (72; actual 117)
 
-- **Status:** START  |  **Category:** docs  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** 895ad9d
 - **Location:** `tools/selftest-macos.sh:13`
 - **Discovered by:** Phase B baseline
 - **Evidence (before):**
 
   > ':13' says 'default run the built-in self-test (72 pure-helper assertions)'. The baseline run reports 'RESULT: 117 passed, 0 failed of 117 assertions'. README:50, CLAUDE.md:45, Architecture.md:49 and Testing-and-Validation.md:11 all say 117.
 
+- **Fix:** tools/selftest-macos.sh's header no longer states an assertion count; it says the result line prints the total. README.md and CLAUDE.md likewise stopped duplicating the number.
+- **Evidence (after):** grep -rnE '[0-9]+ (pure-helper )?assertions' README.md CLAUDE.md tools/ returns no match; the gate still reports its total at runtime ('RESULT: 130 passed, 0 failed of 130 assertions').
 
 ### F-033 (S3, docs) — The wiki Testing page hard-codes the assertion total on the same page that promises it never has to
 
-- **Status:** START  |  **Category:** docs  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** wiki
 - **Location:** `_fxnews-wiki/Testing-and-Validation.md:11,30`
 - **Discovered by:** Phase B docs audit
 - **Evidence (before):**
 
   > Line 11 states '117 assertions in eight groups'; line 30 states 'The result line prints the assertion total, so this page never has to.' Tracker task 110 asked for exactly the opposite.
 
+- **Fix:** The wiki Testing and Architecture pages no longer hard-code the assertion total, honouring the same page's own promise that the result line prints it. The count changed twice during this audit (117 -> 123 -> 130) while regression tests were added, which is exactly the rot the hard-coded copies suffered. Committed in the wiki repository, not this one.
+- **Evidence (after):** Wiki commit 'docs: stop hard-coding the self-test assertion total'; Testing-and-Validation.md:11 and Architecture.md:49 reworded.
 
 ### F-034 (S3, docs) — Known-Limitations calls all three gates macOS-only, but census.py is cross-platform
 

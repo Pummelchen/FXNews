@@ -2,7 +2,7 @@
 
 Independent pre-production audit of the whole repository, run on branch `audit/2026-09-15` from base commit `71ce980`, and merged by pull request only after the final phase passed. The authoritative ledger lives in the repository at `AUDIT/ledger.md` / `AUDIT/ledger.json`; this page mirrors it and the ledger wins on any conflict.
 
-**total 47 | done 4 | open 43 | blocked 0 | S0:1 S1:9 S2:17 S3:20**
+**total 47 | done 8 | open 39 | blocked 0 | S0:1 S1:9 S2:17 S3:20**
 
 ### Open items
 
@@ -10,8 +10,6 @@ Independent pre-production audit of the whole repository, run on branch `audit/2
 | --- | --- | --- | --- | --- |
 | F-001 | S1 | START | scoring | Breakout hold_score is imputed at 0 with a full 0.20 weight when the price is not outside the box, instead of leaving the normaliser |
 | F-003 | S1 | START | scoring | movement_5m_pips falls back to a 0.0 sentinel when the M1 copy fails and is then consumed as a measured value by three components |
-| F-004 | S1 | START | historical | Historical impulse evaluation forces acceleration_available and continuation_available to true, hard-coding weights for inputs that may be unmeasurable |
-| F-005 | S1 | START | historical | Historical execution gate applies cost_to_atr unconditionally, so VALIDATION/AUTOTUNE do not reproduce the live filter set when UseStrictExecutionGate is off |
 | F-006 | S1 | START | historical | Two composite caps are structurally inert in history, so historical scores are systematically less penalised than live scores |
 | F-007 | S1 | START | tests | The availability-and-composer self-test assertion cannot detect an exclusion regression |
 | F-008 | S1 | START | tests | The live signal lifecycle, correlation grouping, alert dispatch and dashboard rendering have no automated coverage |
@@ -37,8 +35,6 @@ Independent pre-production audit of the whole repository, run on branch `audit/2
 | F-029 | S3 | START | tooling | tools/census-allow.txt is documented and defaulted to but does not exist |
 | F-030 | S3 | START | tooling | .coverage is not ignored, so the coverage artifact required by the audit brief can be committed by accident |
 | F-031 | S3 | START | repo | One contributor appears under three different author identities |
-| F-032 | S3 | START | docs | The gate script's header comment states the wrong assertion count (72; actual 117) |
-| F-033 | S3 | START | docs | The wiki Testing page hard-codes the assertion total on the same page that promises it never has to |
 | F-034 | S3 | START | docs | Known-Limitations calls all three gates macOS-only, but census.py is cross-platform |
 | F-035 | S3 | START | docs | Development-Guide both denies and documents the release process, and lists 'test' among commands that do not exist |
 | F-036 | S3 | START | docs | The tracker describes itself as open tasks and known bugs while showing 120/120 done, and its line-number baseline still says version 2.3 |
@@ -63,4 +59,8 @@ _None._
 | E-1 | S0 | tooling | Build and self-test gates cannot execute: bundled wine64 is x86_64 and Rosetta 2 was absent on all four Macs | Rosetta install finished successfully; arch -x86_64 /usr/bin/true OK; wine64 --version -> wine-9.14; ./tools/build-macos.sh -> 0 errors, 0 warnings, exit 0; ./tools/selftest-macos.sh -> 117 passed, 0 failed |
 | E-2 | S1 | tooling | No MQL5 formatter, linter, static analyzer, SAST scanner or coverage tool exists | AUDIT/environment.md section 2 records the gap and the compensating controls |
 | F-002 | S1 | scoring | UpdateSessionBaseline folds active_trigger_tick_volume into the tick-volume baseline unguarded, while the adjacent line explicitly guards the tick rate | New self-test group 'session baselines'. BEFORE (temporary restore of shared-counter readiness): 'session baseline: a single rate sample is not yet a baseline' FAILED; RESULT 122 passed, 1 failed of 123 assertions; selftest exit 1. AFTER: RESULT 123 passed, 0 failed of 123; exit 0. Build 0 errors/0 warnings; census 0 findings; shellcheck clean; ruff/mypy --strict/bandit clean. |
+| F-004 | S1 | historical | Historical impulse evaluation forces acceleration_available and continuation_available to true, hard-coding weights for inputs that may be unmeasurable | New self-test group 'impulse availability'. BEFORE (forced flags restored): 1 assertion FAILED - 'impulse blend: unavailable terms leave the normaliser (got 0.600000, expected 1.000000)'; RESULT 129 passed, 1 failed of 130; exit 1. AFTER: RESULT 130 passed, 0 failed of 130; exit 0. Build 0/0; census 0 findings; shellcheck clean. |
+| F-005 | S1 | historical | Historical execution gate applies cost_to_atr unconditionally, so VALIDATION/AUTOTUNE do not reproduce the live filter set when UseStrictExecutionGate is off | New self-test group 'execution gate'. BEFORE (unconditional ceiling restored): 2 assertions FAILED ('a high cost-to-ATR passes when the strict gate is off', 'the spread-z ceiling is strict-gated as well'); RESULT 126 passed, 2 failed of 128; exit 1. AFTER: RESULT 128 passed, 0 failed of 128; exit 0. Build 0/0; census 0 findings. |
 | F-009 | S2 | scoring | session_baseline_ready is a single flag for three independent baselines, so a z-score can be reported as measured when its own baseline never received samples | New self-test group 'session baselines'. BEFORE (temporary restore of shared-counter readiness): 'session baseline: a single rate sample is not yet a baseline' FAILED; RESULT 122 passed, 1 failed of 123 assertions; selftest exit 1. AFTER: RESULT 123 passed, 0 failed of 123; exit 0. Build 0 errors/0 warnings; census 0 findings; shellcheck clean; ruff/mypy --strict/bandit clean. |
+| F-032 | S3 | docs | The gate script's header comment states the wrong assertion count (72; actual 117) | grep -rnE '[0-9]+ (pure-helper )?assertions' README.md CLAUDE.md tools/ returns no match; the gate still reports its total at runtime ('RESULT: 130 passed, 0 failed of 130 assertions'). |
+| F-033 | S3 | docs | The wiki Testing page hard-codes the assertion total on the same page that promises it never has to | Wiki commit 'docs: stop hard-coding the self-test assertion total'; Testing-and-Validation.md:11 and Architecture.md:49 reworded. |

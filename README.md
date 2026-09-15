@@ -20,7 +20,7 @@ FXNews does not place, modify, or manage trades. It uses no `WebRequest`, DLL, e
 
 ## Version
 
-Current source version: **3.0** (`#property version "3.000"`). See the [Changelog](https://github.com/Pummelchen/FXNews/wiki/Changelog) for versioned changes.
+Current source version: **3.1** (`#property version "3.100"`). See the [Changelog](https://github.com/Pummelchen/FXNews/wiki/Changelog) for versioned changes.
 
 ## Requirements
 

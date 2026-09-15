@@ -2,17 +2,17 @@
 
 Independent pre-production audit of the whole repository, run on branch `audit/2026-09-15` from base commit `71ce980`, and merged by pull request only after the final phase passed. The authoritative ledger lives in the repository at `AUDIT/ledger.md` / `AUDIT/ledger.json`; this page mirrors it and the ledger wins on any conflict.
 
-**total 56 | done 55 | open 1 | blocked 0 | S0:1 S1:13 S2:16 S3:26**
+**total 56 | done 55 | open 0 | blocked 1 | S0:1 S1:13 S2:16 S3:26**
 
 ### Open items
 
-| # | Sev | Status | Area | What |
-| --- | --- | --- | --- | --- |
-| F-025 | S2 | START | ops | A live-looking GitHub PAT was supplied in plaintext and is present in the agent session transcript |
+_None._
 
 ### Blocked items
 
-_None._
+| # | Sev | Blocked by | What | Options for a human |
+| --- | --- | --- | --- | --- |
+| F-025 | S2 | The GitHub PAT that authenticates as the repository owner was supplied in plaintext and is present in the agent session transcript. Rotating it is a GitHub account action; no repository change can perform it and the audit may not touch credentials on a live system. Tried: (1) confirmed the token is NOT in the repository, NOT in any of the 78 commits (gitleaks and trufflehog both clean over the full history) and was never committed - so there is nothing to purge from history; (2) confirmed it was used only for authenticated API reads and one push to the audit branch, never echoed into a log or a commit; (3) kept it outside the repository in ~/.fxnews/ mode 0600 for the duration. Options for a human, cheapest first: (1) revoke the token at github.com/settings/tokens and issue a replacement only if further audit work needs one - the audit branch is already pushed and needs nothing further; (2) if the token must stay live, scope it down to this repository and set an expiry; (3) run a secret scanner on the session transcript if it is retained anywhere, since that transcript is the only place the value exists. Also outstanding and related: ~/.fxnews/.fleet.secret and ~/.fxnews/.gh.token should be deleted once no further audit work needs them. | A live-looking GitHub PAT was supplied in plaintext and is present in the agent session transcript | - |
 
 ### Completed audit tasks
 

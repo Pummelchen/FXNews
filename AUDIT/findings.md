@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 47 | done 10 | open 37 | blocked 0 | S0:1 S1:8 S2:18 S3:20**
+**total 50 | done 12 | open 37 | blocked 1 | S0:1 S1:11 S2:18 S3:20**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -11,13 +11,16 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | --- | --- | --- | --- | --- | --- |
 | E-1 | S0 | tooling | DONE | `tools/build-macos.sh:40` | Build and self-test gates cannot execute: bundled wine64 is x86_64 and Rosetta 2 was absent on all four Macs |
 | E-2 | S1 | tooling | DONE | `tools/selftest-macos.sh:34` | No MQL5 formatter, linter, static analyzer, SAST scanner or coverage tool exists |
+| E-3 | S1 | verification | BLOCKED | `n/a (environment)` | The historical end-to-end gates cannot reach green in this environment until M1 history is available at run time |
 | F-002 | S1 | scoring | DONE | `FXNews.mq5:4502` | UpdateSessionBaseline folds active_trigger_tick_volume into the tick-volume baseline unguarded, while the adjacent line explicitly guards the tick rate |
 | F-003 | S1 | scoring | START | `FXNews.mq5:4268,4704,5418,5917` | movement_5m_pips falls back to a 0.0 sentinel when the M1 copy fails and is then consumed as a measured value by three components |
 | F-004 | S1 | historical | DONE | `FXNews.mq5:2728` | Historical impulse evaluation forces acceleration_available and continuation_available to true, hard-coding weights for inputs that may be unmeasurable |
 | F-005 | S1 | historical | DONE | `FXNews.mq5:2667` | Historical execution gate applies cost_to_atr unconditionally, so VALIDATION/AUTOTUNE do not reproduce the live filter set when UseStrictExecutionGate is off |
-| F-006 | S1 | historical | START | `FXNews.mq5:2693,5310-5318,4984-4989` | Two composite caps are structurally inert in history, so historical scores are systematically less penalised than live scores |
+| F-006 | S1 | historical | DONE | `FXNews.mq5:2693,5310-5318,4984-4989` | Two composite caps are structurally inert in history, so historical scores are systematically less penalised than live scores |
 | F-007 | S1 | tests | DONE | `FXNews.mq5:1455-1459` | The availability-and-composer self-test assertion cannot detect an exclusion regression |
 | F-008 | S1 | tests | START | `README.md:50; FXNews.mq5` | The live signal lifecycle, correlation grouping, alert dispatch and dashboard rendering have no automated coverage |
+| F-046 | S1 | tooling | DONE | `tools/selftest-macos.sh:145-156` | The historical gate passed a VALIDATION report that had read no data at all |
+| F-047 | S1 | historical | START | `FXNews.mq5:2140 (LoadHistoricalM1Rates), 2060 (ProcessHistoricalProfile)` | The historical modes treat the first empty M1 copy as final, so a history download in progress yields an empty report |
 | F-001 | S2 | scoring | DONE | `FXNews.mq5:5222,5310,5324` | ComputeBreakoutStructure did not initialise its own output, so the documented pure shared function returned garbage to a direct caller (originally filed as a hold_score imputation) |
 | F-009 | S2 | scoring | DONE | `FXNews.mq5:4476-4477,7956-7957` | session_baseline_ready is a single flag for three independent baselines, so a z-score can be reported as measured when its own baseline never received samples |
 | F-010 | S2 | historical | START | `FXNews.mq5:2926-2930,3039` | The 85+ bucket in the historical report is unreachable dead code |
@@ -85,6 +88,18 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 - **Evidence (after):** AUDIT/environment.md section 2 records the gap and the compensating controls
 - **Notes:** Not BLOCKED: a real substitute exists and was used.
 
+### E-3 (S1, verification) — The historical end-to-end gates cannot reach green in this environment until M1 history is available at run time
+
+- **Status:** BLOCKED  |  **Category:** deps  |  **Host:** node3  |  **Commit:** -
+- **Location:** `n/a (environment)`
+- **Discovered by:** Phase D, diagnosing F-046
+- **Evidence (before):**
+
+  > After F-046 the gate correctly fails any VALIDATION or AUTOTUNE run that reads no history. In this environment every such run reads zero bars because of the download race described in F-047, so the historical end-to-end gates are red for a truthful reason rather than passing falsely.
+
+- **Notes:** Not a product defect; the product defect is F-047.
+- **BLOCKED:** M1 history is not present at run time for the harness basket (EURUSD, GBPUSD on M5/H1). Tried: read the terminal log (authorization succeeds, 8526 symbols synchronized, then disconnects about 2s later); confirmed 269 .hcc history files on disk including EURUSD and GBPUSD; confirmed network and broker connection both work. Options for a human: (1) fix F-047 with the bounded retry, which removes the race and is the intended remedy; (2) in the meantime, pre-seed history by opening M1 charts for the basket in the terminal and letting them download before running --validation, then re-run the gate so the historical path is exercised at least once during this audit; (3) shrink the harness basket to symbols that already have M1 history on disk, accepting weaker coverage.
+
 ### F-002 (S1, scoring) — UpdateSessionBaseline folds active_trigger_tick_volume into the tick-volume baseline unguarded, while the adjacent line explicitly guards the tick rate
 
 - **Status:** DONE  |  **Category:** logic  |  **Host:** node3  |  **Commit:** 2388b22
@@ -136,14 +151,16 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-006 (S1, historical) — Two composite caps are structurally inert in history, so historical scores are systematically less penalised than live scores
 
-- **Status:** START  |  **Category:** logic  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** logic  |  **Host:** node3  |  **Commit:** 0a4b05f
 - **Location:** `FXNews.mq5:2693,5310-5318,4984-4989`
 - **Discovered by:** Phase B L2 + historical audit
 - **Evidence (before):**
 
   > ':2693' always passes outside_seconds=60.0 when distance>0 (hold_score saturates to 1.0 against FullHoldScoreSeconds=12) and reentered_seconds=-1.0 (fakeout_penalty stays 0.0). Consequently weak_hold_cap (:4984) and range_snapback_cap (:4988) can never bind in a historical run, while they do bind live. Re-entry is genuinely untrackable in history (documented at :2685-2687), but the consequence for the reported score distribution is not documented.
 
-- **Notes:** Affects the fidelity of the report that Autotune ranks candidates on.
+- **Fix:** AddHistoricalCoverageLines emits three lines on every VALIDATION and AUTOTUNE report naming the two caps that cannot bind in a historical run, and Validation-and-Autotune.md states the consequence.
+- **Evidence (after):** Real run: ./tools/selftest-macos.sh --validation exit 0 prints 'Model limits: hold below the scan timeframe is not resolvable and intra-bar / re-entry is not tracked, so hold_score saturates and fakeout_penalty is 0; / weak_hold_cap and range_snapback_cap cannot bind here, unlike a live scan.' Build 0 errors / 0 warnings. Report and documentation change only, so there is no fail-before test; the evidence is the emitted report text.
+- **Notes:** Affects the fidelity of the report that Autotune ranks candidates on. Cross-check: the facts were already in the wiki ('Hold is one minute of resolution ... No re-entry is tracked'); the undisclosed part was the consequence for the cap ladder and the score distribution.
 
 ### F-007 (S1, tests) — The availability-and-composer self-test assertion cannot detect an exclusion regression
 
@@ -168,6 +185,30 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
   > Known-Limitations.md:8 and CLAUDE.md:52-54 state these areas are verified only by manual runtime observation. Several of the audit's behaviour findings (F-011, F-013, F-018) live exactly in that uncovered region, which is why they survived the 3.0 audit.
 
 - **Notes:** Disclosed honestly by the project, but the audit brief treats a missing critical test as S1. Scope: at minimum a deterministic lifecycle state-machine test driven from synthetic scores.
+
+### F-046 (S1, tooling) — The historical gate passed a VALIDATION report that had read no data at all
+
+- **Status:** DONE  |  **Category:** test  |  **Host:** node3  |  **Commit:** f2f094c
+- **Location:** `tools/selftest-macos.sh:145-156`
+- **Discovered by:** Phase D - found at run time while gathering evidence for F-006, not by reading code
+- **Evidence (before):**
+
+  > A --validation run whose report read 'Window: 1970.01.01 -> 1970.01.01 (0.0 of 90 days) | Symbols 0/2 | Profiles with data=0 | M1 bars=0' still produced 'selftest: OK (validation report complete, Signals=0)' with exit 0. The mode exists to exercise the historical engine end to end and the wiki Testing page says so, yet the engine had read zero bars, so any regression in the historical path would have gone unnoticed. The harness used a fresh one-shot terminal that never opened an M1 chart, so this reproduced on every run.
+
+- **Fix:** The gate parses loaded symbols, loaded M1 bars and evaluated boundaries from the report and refuses to pass a VALIDATION or AUTOTUNE run that read no history, printing the actionable cause. It requires data, not signals: a quiet market legitimately yields zero signals, so gating on signals would be a different bug.
+- **Evidence (after):** BEFORE: 'selftest: OK (validation report complete, Signals=0)', exit 0. AFTER: 'selftest: FAILED (validation read no history: 0 symbol(s) loaded, 0 M1 bar(s), 0 boundar(ies) evaluated)', exit 1, with guidance to open an M1 chart. shellcheck clean.
+- **Notes:** This defect also invalidated the project's own 3.0 release claim that the historical gates were green: they were green on an empty report.
+
+### F-047 (S1, historical) — The historical modes treat the first empty M1 copy as final, so a history download in progress yields an empty report
+
+- **Status:** START  |  **Category:** logic  |  **Host:** node3  |  **Commit:** -
+- **Location:** `FXNews.mq5:2140 (LoadHistoricalM1Rates), 2060 (ProcessHistoricalProfile)`
+- **Discovered by:** Phase D, diagnosing F-046
+- **Evidence (before):**
+
+  > Reproduced on every --validation run: the report reads 'Symbols 0/2 | M1 bars=0' and the Journal says 'EURUSD has no M1 history in the window (error 4401) and is skipped; open a chart of the symbol so the terminal downloads it, then re-run'. The terminal log shows the cause is a race, not a missing feed: the one-shot terminal authorizes on ICMarketsSC-MT5-4 (account 11013759, 8526 symbols synchronized) and shuts down about two seconds later, while CopyRates(PERIOD_M1, from, last_closed) triggers an on-demand download that has not completed. LoadHistoricalM1Rates returns 0 on the first attempt and the symbol is skipped for the whole run; CopyRates is never retried. History files do exist on disk (269 .hcc, including Bases/Default/history/EURUSD/2024.hcc and GBPUSD/2024.hcc).
+
+- **Notes:** Correct fix is a bounded wait: poll CopyRates for the requested window for up to a configured number of seconds (respecting IsStopped), and report how long it waited, instead of treating the first empty copy as final. That is the documented MT5 pattern for on-demand history and it also fixes the real operator scenario 'I opened MT5 and ran VALIDATION immediately'. Rejected alternative: pre-opening M1 charts from the harness - it hides the defect and does not help a human operator. Rejected alternative: raising the harness timeout - it cannot help, because the run happens on the first timer tick after startup and the failure is deterministic within that tick.
 
 ### F-001 (S2, scoring) — ComputeBreakoutStructure did not initialise its own output, so the documented pure shared function returned garbage to a direct caller (originally filed as a hold_score imputation)
 

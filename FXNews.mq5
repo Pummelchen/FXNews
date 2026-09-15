@@ -1789,6 +1789,130 @@ void SelfTestExhaustionAvailability()
    SelfTestGroup("exhaustion availability", before);
 }
 
+// The live signal state machine, driven from synthetic scores instead of from the
+// market. This closes the largest coverage hole the project had: the lifecycle was
+// verified only by manual runtime observation, and three defects fixed in 3.0
+// (stale TTL, re-gating a running signal, a trivially-true HYBRID hold clause)
+// lived exactly here. It covers candidate creation, confirmation, the TTL and
+// decay endings, cooldown blocking and reversal. It does not cover alert dispatch,
+// correlation grouping or dashboard rendering, which need the terminal's object
+// and notification surfaces; that remainder is tracked as F-049.
+void SelfTestSignalLifecycle()
+{
+   int before = g_selftest_failed;
+
+   if(ArrayResize(g_profiles, 1) != 1)
+   {
+      SelfTestCheck(false, "signal lifecycle: synthetic allocation");
+      SelfTestGroup("signal lifecycle", before);
+      return;
+   }
+
+   datetime t0 = D'2026.09.15 10:00';
+   ResetProfile(g_profiles[0], "S0", PERIOD_M5, "M5");
+   g_profiles[0].pip_size = 0.0001;
+   g_profiles[0].point = 0.00001;
+   g_profiles[0].bid = 1.19995;
+   g_profiles[0].ask = 1.20005;
+   g_profiles[0].mid = 1.20000;      // above the box, so the UP context stays valid
+   g_profiles[0].spread_pips = 1.0;
+   g_profiles[0].tick_gap_sec = 0.0;
+   g_profiles[0].range_high = 1.1000;
+   g_profiles[0].range_low = 1.0900;
+   g_profiles[0].range_width = 0.0100;
+   g_profiles[0].quote_time = t0;
+   g_profiles[0].trigger_bar_time = t0;
+   g_profiles[0].event_state = STATE_WATCH;
+   g_profiles[0].active_direction = DIR_NONE;
+   g_profiles[0].cooldown_end_up = 0;
+   g_profiles[0].cooldown_end_down = 0;
+   g_profiles[0].final_score_up = 90.0;
+   g_profiles[0].final_score_down = 0.0;
+   // HYBRID confirms on a measured hold; the other modes ignore it.
+   g_profiles[0].composite_up.breakout.hold_score = 1.0;
+   g_profiles[0].composite_up.age_free_score = 50.0;
+
+   // 1. An above-threshold score with no cooldown starts an event. In LIVE_TICK it
+   //    activates immediately; in the other modes it becomes a candidate.
+   UpdateSignalState(0, t0);
+   SelfTestCheck(g_profiles[0].event_state == STATE_CANDIDATE ||
+                 g_profiles[0].event_state == STATE_ACTIVE_CONFIRMED,
+                 "signal lifecycle: an above-threshold score starts an event");
+
+   // 2. A new trigger bar (and in HYBRID the measured hold) confirms it.
+   g_profiles[0].trigger_bar_time = t0 + 60;
+   UpdateSignalState(0, t0 + 60);
+   SelfTestCheck(g_profiles[0].event_state == STATE_ACTIVE_CONFIRMED &&
+                 g_profiles[0].active_direction == DIR_UP &&
+                 g_profiles[0].event_start_time > 0,
+                 "signal lifecycle: the event confirms, activates and is timestamped");
+
+   // 3. The age limit ends it, and the ending records a cooldown for its own
+   //    direction rather than leaving the slot free.
+   datetime started = g_profiles[0].event_start_time;
+   if(ExpireOldSignals)
+   {
+      datetime expired_at = started + SignalTTLSeconds + 5;
+      UpdateSignalState(0, expired_at);
+      SelfTestCheck(g_profiles[0].event_state == STATE_COOLDOWN &&
+                    g_profiles[0].active_direction == DIR_NONE &&
+                    g_profiles[0].cooldown_end_up >= expired_at,
+                    "signal lifecycle: the age limit ends the signal into a cooldown");
+
+      // 4. While that cooldown runs, the same direction cannot open a new event.
+      g_profiles[0].final_score_up = 90.0;
+      UpdateSignalState(0, g_profiles[0].cooldown_end_up - 1);
+      SelfTestCheck(g_profiles[0].event_state == STATE_COOLDOWN &&
+                    g_profiles[0].active_direction == DIR_NONE,
+                    "signal lifecycle: a running cooldown holds that direction out");
+   }
+   else
+   {
+      // With the age limit off, a still-scoring event must survive the same
+      // instant that would otherwise expire it.
+      UpdateSignalState(0, started + SignalTTLSeconds + 5);
+      SelfTestCheck(g_profiles[0].event_state == STATE_ACTIVE_CONFIRMED,
+                    "signal lifecycle: with the age limit off the signal survives");
+   }
+
+   // 5. Reversal: a much stronger opposite score ends the running event and enters
+   //    the normal candidate path for the opposite direction, so every
+   //    confirmation mode applies its own rule to it.
+   ResetProfile(g_profiles[0], "S0", PERIOD_M5, "M5");
+   g_profiles[0].pip_size = 0.0001;
+   g_profiles[0].point = 0.00001;
+   g_profiles[0].bid = 1.10005;
+   g_profiles[0].ask = 1.10015;
+   g_profiles[0].mid = 1.10010;
+   g_profiles[0].spread_pips = 1.0;
+   g_profiles[0].tick_gap_sec = 0.0;
+   g_profiles[0].range_high = 1.1000;
+   g_profiles[0].range_low = 1.0900;
+   g_profiles[0].range_width = 0.0100;
+   g_profiles[0].trigger_bar_time = t0;
+   g_profiles[0].event_state = STATE_WATCH;
+   g_profiles[0].active_direction = DIR_NONE;
+   g_profiles[0].final_score_up = 90.0;
+   g_profiles[0].composite_up.breakout.hold_score = 1.0;
+   g_profiles[0].composite_up.age_free_score = 50.0;
+   UpdateSignalState(0, t0);
+   g_profiles[0].trigger_bar_time = t0 + 60;
+   UpdateSignalState(0, t0 + 60);
+   bool active_up = (g_profiles[0].event_state == STATE_ACTIVE_CONFIRMED &&
+                     g_profiles[0].active_direction == DIR_UP);
+
+   g_profiles[0].final_score_down = 99.0;
+   datetime flip_at = t0 + 120;
+   UpdateSignalState(0, flip_at);
+   bool flipped = (g_profiles[0].active_direction == DIR_DOWN ||
+                   (g_profiles[0].event_state == STATE_CANDIDATE &&
+                    g_profiles[0].candidate_direction == DIR_DOWN));
+   SelfTestCheck(active_up && flipped && g_profiles[0].cooldown_end_up >= flip_at,
+                 "signal lifecycle: a stronger opposite score reverses into the candidate path");
+
+   SelfTestGroup("signal lifecycle", before);
+}
+
 // The historical engine on a synthetic minute series with a known shape and
 // a deliberate ten-minute gap after bar 250.
 void SelfTestHistoricalEngine()
@@ -2009,6 +2133,7 @@ void RunSelfTest()
    SelfTestImpulseAvailability();
    SelfTestBreakoutHold();
    SelfTestExhaustionAvailability();
+   SelfTestSignalLifecycle();
    SelfTestHistoricalEngine();
    SelfTestSignalHistory();
 

@@ -2267,6 +2267,43 @@ void SelfTestAlertGroupIdentity()
    SelfTestGroup("alert group", before);
 }
 
+// The ATR definition, undocumented until F-044: a SIMPLE mean of the last `period` true ranges,
+// not Wilder smoothing, which is what MT5's own ATR indicator plots. The numbers below are
+// chosen so the two definitions disagree (simple 7.667 against Wilder 8.667), so this fails if
+// a recursive average is ever substituted.
+void SelfTestAtrDefinition()
+{
+   int before = g_selftest_failed;
+
+   HistoricalBar bars[5];
+   for(int i = 0; i < 5; i++)
+   {
+      bars[i].valid = true;
+      bars[i].high = 0.0;
+      bars[i].low = 0.0;
+      bars[i].close = 0.0;
+   }
+
+   // Each true range is measured against the older neighbour's close:
+   //   bar 1: max(10, |100-104|, |90-104|)  = 14
+   //   bar 2: max( 5, |105-100|, |100-100|) =  5
+   //   bar 3: max( 4, |99-98|,  |95-98|)    =  4
+   bars[1].high = 100.0;
+   bars[1].low = 90.0;
+   bars[2].high = 105.0;
+   bars[2].low = 100.0;
+   bars[2].close = 104.0;
+   bars[3].high = 99.0;
+   bars[3].low = 95.0;
+   bars[3].close = 100.0;
+   bars[4].close = 98.0;
+
+   SelfTestNear(HistoricalATRFromBars(bars, 5, 3), (14.0 + 5.0 + 4.0) / 3.0,
+                "atr definition: the simple mean of the last period true ranges (F-044)");
+
+   SelfTestGroup("atr definition", before);
+}
+
 // The BAR_CLOSE confirmation rule, which no other test could reach because the mode is an
 // input. The first assertion pins the redundancy F-041 reported - the caller has already
 // checked the floor - and the second pins the defence that redundancy represents.
@@ -2670,6 +2707,7 @@ void RunSelfTest()
    SelfTestComposerEngineGating();
    SelfTestSignalLifecycle();
    SelfTestHistoryRefresh();
+   SelfTestAtrDefinition();
    SelfTestBarCloseConfirmation();
    SelfTestAlertGroupIdentity();
    SelfTestBreakoutBlend();
@@ -3329,6 +3367,10 @@ bool AggregateHistoricalBarAt(MqlRates &rates[],
 
 // ATR of the scan timeframe from the aggregated bars 1..period, with each
 // bar's true range measured against the previous aggregated bar's close.
+//
+// Same definition as CalculateATRFromRates: a simple mean, not Wilder smoothing (F-044). The
+// historical modes must use the identical definition, or a score produced on history would not
+// describe what the live scanner produces on the same bars.
 double HistoricalATRFromBars(HistoricalBar &bars[], const int bars_available, const int period)
 {
    double total = 0.0;
@@ -5510,6 +5552,13 @@ void BuildRangeBox(const int index, MqlRates &rates[], const int copied)
    g_profiles[index].range_anchor_bar_time = rates[0].time;
 }
 
+// ATR definition: the simple arithmetic mean of the true ranges of the last `period` closed
+// bars, where true range is max(high-low, |high-prev_close|, |low-prev_close|). This is NOT
+// Wilder smoothing, so it does not match the ATR that MT5's own ATR indicator plots, and the
+// two will disagree on a chart. The live and historical paths here use the same definition as
+// each other (CalculateATRFromRates and HistoricalATRFromBars), which is what matters for
+// consistency between the live scanner and the historical modes. Filed as F-044 because the
+// definition was nowhere written down; the self-test group "atr definition" pins it.
 double CalculateATRFromRates(MqlRates &rates[], const int copied, const int period)
 {
    if(copied <= period + 1 || period <= 0)

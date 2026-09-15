@@ -649,7 +649,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-036 (S3, docs) — The tracker describes itself as open tasks and known bugs while showing 120/120 done, and its line-number baseline still says version 2.3
 
-- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** wiki
+- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** 7de7c62
 - **Location:** `_fxnews-wiki/Project-Tracker.md:3,7,9`
 - **Discovered by:** Phase B docs audit
 - **Evidence (before):**
@@ -662,7 +662,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-037 (S3, docs) — The documented version-bump procedure requires a deployment clone at MQL5/Indicators/FXNews/ that does not exist on this machine
 
-- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** 38fe455
+- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** 7de7c62
 - **Location:** `CLAUDE.md:24-30`
 - **Discovered by:** Phase B L0
 - **Evidence (before):**

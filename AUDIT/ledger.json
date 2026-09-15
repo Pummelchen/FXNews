@@ -681,7 +681,7 @@
       "evidenceBefore": "':3' calls the page 'Open tasks and known bugs'; ':7' records 'Progress: 120 of 120 done'; ':9' states line numbers refer to commit 9069ca3 (version 2.3) although the page was rewritten for 3.0.",
       "fixSummary": "The Project-Tracker header no longer describes the page as 'open tasks and known bugs' beneath a stale '120 of 120 done' line and a 2.3 line-number baseline. It now separates the finished 2026-09-13 audit from the current one, points at AUDIT/ledger.json as the authoritative count, adds Blocked to the status list and contracts.py to the done criteria, and states which commit the line numbers refer to.",
       "evidenceAfter": "The wiki page header reads as above; the generated audit section beneath it is unchanged and still produced from AUDIT/ledger.json.",
-      "commit": "wiki",
+      "commit": "7de7c62",
       "notes": "The stale lines were hand-written outside the generated section, which is why regenerating the tracker never touched them.",
       "blockedReason": null
     },
@@ -698,7 +698,7 @@
       "evidenceBefore": "CLAUDE.md step 2 tells the developer to fetch and reset a separate clone at MQL5/Indicators/FXNews/. That directory does not exist in the WINEPREFIX and no FXNews artifact exists anywhere in the MT5 tree; 'build-macos.sh --install' would create it.",
       "fixSummary": "CLAUDE.md's version-bump step no longer tells the developer to fetch and reset a clone that may not exist. It states that the directory is the terminal's separate clone, that it is not guaranteed to exist, how to bootstrap it with git clone, and explicitly that --install creates the directory and verifies the copy but does NOT clone.",
       "evidenceAfter": "Verified against the machine rather than assumed, after F-045's --install created the directory: ls -a shows only FXNews.ex5 and no .git, and 'git -C .../FXNews fetch' reports 'fatal: not a git repository' - so the documented fetch/reset step would indeed have failed there.",
-      "commit": "38fe455",
+      "commit": "7de7c62",
       "notes": "The finding was filed when the directory did not exist at all; F-045 then created it as an empty directory, which turns the missing-clone problem into a subtler one - a binary with no source beside it.",
       "blockedReason": null
     },

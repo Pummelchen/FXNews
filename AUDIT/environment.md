@@ -27,21 +27,30 @@ known state.
 | Host | Installed by this audit | Purpose | Removal |
 | --- | --- | --- | --- |
 | `node1` | Rosetta 2; `bandit 1.9.4` (pip, `--break-system-packages`); a staged copy of node3's `MetaTrader 5.app` at `~/mt5-app` (**removed**); `~/fxnews-phasee` and `~/fxnews-main` clones | Phase E attempt, abandoned — see E-5 | Rosetta 2 has no uninstaller; the staged app and the `fxnews-main` clone were deleted; `~/fxnews-phasee` (1.5 MB) retained |
-| `node2` | Rosetta 2; `~/fxnews-phasee` clone (1.5 MB) | **Phase E host** | `rm -rf ~/fxnews-phasee`; Rosetta 2 has no uninstaller |
+| `node2` | Rosetta 2; `bandit 1.9.4` and `coverage 7.16.1` (pip, `--break-system-packages`, console scripts not on the non-interactive PATH - invoke them as `python3 -m bandit` / `python3 -m coverage`); `~/fxnews-phasee` clone (1.5 MB) | **Phase E host** | `rm -rf ~/fxnews-phasee`; `pip uninstall bandit coverage`; Rosetta 2 has no uninstaller |
 | `node3` | Rosetta 2; `bandit`, `pip-audit`, `coverage`, `PyYAML` (pip) | development, baseline and fix host | `pip uninstall` those four; the interpreter itself is unchanged |
 | `node4` | nothing | not used | — |
 | `deltasona` (VPS) | nothing | reachable, not used | — |
 
-**Fleet finding (E-5).** All four Macs are Apple Silicon and none had Rosetta 2 when the
-audit began, so no gate could run anywhere. Rosetta is now installed on node1, node2 and
-node3. Beyond that the spares differ from the development host in one way that matters:
-`node3`'s MetaTrader 5 authorises against a live broker account and runs the harness, while
-`node1` and `node2` have no broker authorization (their newest terminal logs hold zero
-`authorized on` lines and their last real activity is 2026-09-04) and their terminals
-**exit with code 0 at startup**, before loading any script or indicator — including with no
-startup config at all, so it is not a configuration problem. The same app version
-(5.0.4501) and Wine (9.14) work on node3, and a pristine `main` clone fails identically on
-node1, so the failure is environmental and unrelated to this audit's changes.
+**Fleet finding (E-4/E-5).** All four Macs are Apple Silicon and none had Rosetta 2 when
+the audit began, so no gate could run anywhere. Rosetta is now installed on node1, node2 and
+node3.
+
+**Phase E procedure.** The MetaTrader gates must run inside the console user's **Aqua**
+launchd session. Over SSH the session is `Background`, macOS forbids it from connecting to
+WindowServer, and MetaTrader 5 — a windowed application — initialises graphics and exits
+cleanly with code 0 before loading any script, producing `no Experts journal`. The symptom
+looks like a broken terminal or a missing broker account; it is neither. Confirm with
+`launchctl managername` (expects `Aqua`) and run the gate through:
+
+```bash
+ssh <host> 'sudo launchctl asuser "$(id -u)" sudo -u <user> /bin/bash -lc \
+  "cd ~/fxnews-phasee && ./tools/selftest-macos.sh"'
+```
+
+`node2` was the Phase E host (app 5.0.4501, Wine 9.14, same as the working development
+host). `node1` was abandoned after its bundled Wine 9.8 (app 5.0.4330) refused to start even
+with node3's newer Wine staged in; the staged copy was deleted.
 
 ## 2. Local toolchain (`node3`)
 

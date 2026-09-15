@@ -2326,6 +2326,71 @@ void SelfTestBarCloseConfirmation()
    SelfTestGroup("bar-close confirmation", before);
 }
 
+// Alert dispatch and group election, the two areas F-049 names that live behind globals and a
+// chart. Both rules are now pure functions, so the boundaries that decide whether an operator
+// is told about a signal are asserted rather than observed.
+void SelfTestAlertDispatch()
+{
+   int before = g_selftest_failed;
+
+   datetime now = D'2026.09.15 12:00:00';
+   datetime sends[10];
+   for(int i = 0; i < 10; i++)
+      sends[i] = 0;
+
+   // Per-profile spacing: the boundary is inclusive, so exactly MIN_ALERT_INTERVAL_SECONDS is
+   // allowed and one second less is not.
+   SelfTestCheck(AlertRateLimitsAllow(now, now - MIN_ALERT_INTERVAL_SECONDS, sends, 10),
+                 "alert limits: a profile may alert again at exactly the minimum interval (F-049)");
+   SelfTestCheck(!AlertRateLimitsAllow(now, now - MIN_ALERT_INTERVAL_SECONDS + 1, sends, 10),
+                 "alert limits: a profile may not alert one second early");
+   SelfTestCheck(AlertRateLimitsAllow(now, 0, sends, 10),
+                 "alert limits: a profile that has never alerted is allowed");
+
+   // Global window: nine sends in the last minute leave room for a tenth, ten do not.
+   for(int i = 0; i < 9; i++)
+      sends[i] = now - 10;
+   SelfTestCheck(AlertRateLimitsAllow(now, 0, sends, 10),
+                 "alert limits: nine sends in the last minute still allow one more");
+
+   sends[9] = now - 10;
+   SelfTestCheck(!AlertRateLimitsAllow(now, 0, sends, 10),
+                 "alert limits: the tenth send in the last minute blocks the next (F-049)");
+
+   // A slot outside the window must stop counting rather than pinning the cap forever.
+   for(int i = 0; i < 10; i++)
+      sends[i] = now - 61;
+   SelfTestCheck(AlertRateLimitsAllow(now, 0, sends, 10),
+                 "alert limits: sends older than sixty seconds stop counting");
+
+   // Group election: the highest score leads, and a tie keeps the earliest member so the
+   // choice cannot flap between scans.
+   double scores[4];
+   scores[0] = 10.0;
+   scores[1] = 40.0;
+   scores[2] = 20.0;
+   scores[3] = -999999.0;
+   SelfTestCheck(GroupLeaderIndex(scores, 4) == 1,
+                 "group election: the highest scoring member leads (F-049)");
+
+   // A three-way tie at the top, so the assertion is about the tie rule and not about which
+   // of two different scores happens to be larger. The first version of this case lowered
+   // scores[1] to 10 while leaving scores[2] at 20, so it was not a tie at all and the
+   // assertion failed against correct code.
+   scores[1] = 10.0;
+   scores[2] = 10.0;
+   SelfTestCheck(GroupLeaderIndex(scores, 4) == 0,
+                 "group election: a tie keeps the earliest member");
+
+   scores[0] = -999999.0;
+   scores[1] = -999999.0;
+   scores[2] = -999999.0;
+   SelfTestCheck(GroupLeaderIndex(scores, 4) == -1,
+                 "group election: a group with no member has no leader");
+
+   SelfTestGroup("alert dispatch", before);
+}
+
 // One case per guard block in ValidateInputsCore, because the validation only ran at
 // OnInit and nothing could reach its rejection paths: the inputs are read-only, so
 // before the extraction no test could make one fail. Baseline first, then each field
@@ -2707,6 +2772,7 @@ void RunSelfTest()
    SelfTestComposerEngineGating();
    SelfTestSignalLifecycle();
    SelfTestHistoryRefresh();
+   SelfTestAlertDispatch();
    SelfTestAtrDefinition();
    SelfTestBarCloseConfirmation();
    SelfTestAlertGroupIdentity();
@@ -7553,6 +7619,25 @@ bool CanDispatchAlert(const int index)
    return g_profiles[index].group_leader_signal;
 }
 
+// The group's leader is the member with the highest sort score, and the FIRST member wins a
+// tie because the comparison is strict. Extracted so the election rule can be tested without
+// profiles or a chart (F-049). Callers mark non-members with a sentinel below any real score
+// rather than leaving their slots at a neutral value a member could lose to.
+int GroupLeaderIndex(const double &scores[], const int count)
+{
+   int leader = -1;
+   double best = -999999.0;
+   for(int i = 0; i < count; i++)
+   {
+      if(scores[i] > best)
+      {
+         best = scores[i];
+         leader = i;
+      }
+   }
+   return leader;
+}
+
 // A signal's group is bound once, when it activates, and kept until it ends.
 // Re-deriving it every scan from the instantaneous basket let membership flap
 // between scans, which released held alerts and re-elected leaders at random.
@@ -7589,24 +7674,24 @@ void UpdateAlertGroups(const datetime now)
       if(already_processed)
          continue;
 
-      int leader = -1;
-      double leader_score = -999999.0;
       int members = 0;
+      int profile_count = ArraySize(g_profiles);
+      double member_scores[];
+      ArrayResize(member_scores, profile_count);
+      for(int j = 0; j < profile_count; j++)
+         member_scores[j] = -999999.0;   // non-members cannot lead
 
-      for(int j = 0; j < ArraySize(g_profiles); j++)
+      for(int j = 0; j < profile_count; j++)
       {
          if(g_profiles[j].correlated_alert_group_id != group_id)
             continue;
          members++;
          int member_direction = g_profiles[j].active_direction;
-         double candidate = DirectionSortScore(j, member_direction,
+         member_scores[j] = DirectionSortScore(j, member_direction,
                                                EventAgeSeconds(j, member_direction, now));
-         if(candidate > leader_score)
-         {
-            leader_score = candidate;
-            leader = j;
-         }
       }
+
+      int leader = GroupLeaderIndex(member_scores, profile_count);
 
       for(int j = 0; j < ArraySize(g_profiles); j++)
       {
@@ -7915,21 +8000,33 @@ bool SendOptionalAlert(const int index,
 }
 
 // Per-profile spacing plus a sliding one-minute window over the last sends.
-bool AlertRateLimitAllows(const int index, const datetime now)
+//
+// Pure over its inputs so the self-test can exercise the boundaries without a terminal. The
+// global window is a ring of send times, and a slot older than 60 s stops counting rather than
+// being cleared, so a stale slot cannot be mistaken for a recent send (F-049).
+bool AlertRateLimitsAllow(const datetime now,
+                          const datetime last_attempt_time,
+                          const datetime &send_times[],
+                          const int send_count)
 {
-   if(g_profiles[index].last_alert_attempt_time > 0 &&
-      now - g_profiles[index].last_alert_attempt_time < MIN_ALERT_INTERVAL_SECONDS)
-   {
+   if(last_attempt_time > 0 && now - last_attempt_time < MIN_ALERT_INTERVAL_SECONDS)
       return false;
-   }
 
    int recent = 0;
-   for(int i = 0; i < MAX_ALERTS_PER_MINUTE; i++)
+   for(int i = 0; i < send_count; i++)
    {
-      if(g_alert_send_times[i] > 0 && now - g_alert_send_times[i] < 60)
+      if(send_times[i] > 0 && now - send_times[i] < 60)
          recent++;
    }
    return (recent < MAX_ALERTS_PER_MINUTE);
+}
+
+bool AlertRateLimitAllows(const int index, const datetime now)
+{
+   return AlertRateLimitsAllow(now,
+                               g_profiles[index].last_alert_attempt_time,
+                               g_alert_send_times,
+                               MAX_ALERTS_PER_MINUTE);
 }
 
 void RecordAlertSend(const datetime now)

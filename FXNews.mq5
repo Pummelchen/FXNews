@@ -1686,12 +1686,28 @@ void SelfTestAvailabilityAndComposer()
    for(int i = 0; i < 26; i++)
       long_text += "word" + IntegerToString(i) + " ";
    string pieces[];
-   int piece_count = WrapLabelText(long_text, pieces);
+   int piece_count = WrapLabelText(long_text, pieces, DASHBOARD_MAX_TEXT_CHARS);
    bool pieces_fit = (piece_count >= 3);
    for(int i = 0; i < piece_count; i++)
       pieces_fit = pieces_fit && (StringLen(pieces[i]) <= DASHBOARD_MAX_TEXT_CHARS);
    SelfTestCheck(pieces_fit && StringFind(pieces[1], "  ") == 0,
                  "WrapLabelText splits at the label limit and indents continuations");
+
+   // F-021: the wrap width must be the width the rows are clipped to. Wrapping at the
+   // 63-character cap while the row clipped to a narrower pixel width produced a
+   // truncated first piece and lost the wrapped tail entirely. On a narrow chart the
+   // text therefore has to come out as more, shorter pieces, every one of which fits,
+   // with no word dropped.
+   string narrow[];
+   int narrow_count = WrapLabelText(long_text, narrow, 20);
+   bool narrow_fits = (narrow_count > piece_count);
+   for(int i = 0; i < narrow_count; i++)
+      narrow_fits = narrow_fits && (StringLen(narrow[i]) <= 20);
+   string joined = "";
+   for(int i = 0; i < narrow_count; i++)
+      joined += narrow[i] + " ";
+   SelfTestCheck(narrow_fits && StringFind(joined, "word0 ") >= 0 && StringFind(joined, "word25") >= 0,
+                 "WrapLabelText wraps to the requested width and keeps every word (F-021)");
 
    // Regression test for a self-test assertion that could not fail. The displayed
    // score cannot distinguish exclusion from imputation here because
@@ -4344,7 +4360,7 @@ void UpdateHistoricalReportDashboard()
    for(int line = 0; line < lines && row < DASHBOARD_MAX_OBJECTS; line++)
    {
       string text = g_historical_report_lines[line];
-      int count = WrapLabelText(text, pieces);
+      int count = WrapLabelText(text, pieces, DashboardTextLimit());
       for(int piece = 0; piece < count && row < DASHBOARD_MAX_OBJECTS; piece++)
       {
          SetDashboardRow(row, pieces[piece], text, (line == 0 ? StatusLineColor() : clrWhite));
@@ -8631,15 +8647,22 @@ string FitDashboardText(const string text)
 
 // Splits a report line into label-sized pieces at word boundaries; the
 // continuation pieces are indented.
-int WrapLabelText(const string text, string &pieces[])
+// wrap_chars is passed in rather than read here so the width the rows will be clipped to
+// is one explicit decision at each call site, and so the self-test can exercise a narrow
+// width. Wrapping at the terminal's 63-character cap while SetDashboardRow clipped each
+// piece to DashboardTextLimit() truncated the first piece and discarded the wrapped tail
+// on any chart narrower than the cap (F-021).
+int WrapLabelText(const string text, string &pieces[], const int wrap_chars)
 {
    if(ArrayResize(pieces, 0) != 0)
       return 0;
+   if(wrap_chars < 1)
+      return 0;
    string remaining = text;
-   while(StringLen(remaining) > DASHBOARD_MAX_TEXT_CHARS)
+   while(StringLen(remaining) > wrap_chars)
    {
       int cut = -1;
-      for(int i = DASHBOARD_MAX_TEXT_CHARS; i >= DASHBOARD_MAX_TEXT_CHARS / 2; i--)
+      for(int i = wrap_chars; i >= wrap_chars / 2; i--)
       {
          if(StringGetCharacter(remaining, i) == ' ')
          {
@@ -8648,7 +8671,7 @@ int WrapLabelText(const string text, string &pieces[])
          }
       }
       if(cut < 0)
-         cut = DASHBOARD_MAX_TEXT_CHARS;
+         cut = wrap_chars;
 
       int next = ArraySize(pieces);
       if(ArrayResize(pieces, next + 1) != next + 1)

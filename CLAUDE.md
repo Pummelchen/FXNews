@@ -56,10 +56,16 @@ indicator, the harness and these scripts, which no compiler sees.
 ## Version bumps touch three locations plus the wiki
 
 1. **This repo** — `FXNews.mq5` line 1 and `#property version`, plus `README.md`.
-2. **`MQL5/Indicators/FXNews/`** — a separate clone of this repository. Update it with git
-   (`fetch` + `reset --hard origin/main`), then `./tools/build-macos.sh --install` (or copy
-   a freshly compiled `FXNews.ex5` in). A stale `.ex5` next to a current `.mq5` is a trap:
-   MT5 loads the binary.
+2. **`MQL5/Indicators/FXNews/`** — the terminal's copy, which is a *separate clone* of this
+   repository, not a directory this repo maintains. It is not guaranteed to exist: on the
+   audit machine it was absent until `--install` created it, and it held only `FXNews.ex5`
+   afterwards (F-037). Bootstrap it once with
+   `git clone https://github.com/Pummelchen/FXNews.git`, then update it with
+   `fetch` + `reset --hard origin/main`, then `./tools/build-macos.sh --install` (or copy a
+   freshly compiled `FXNews.ex5` in). `--install` creates the directory and verifies the
+   copy but does **not** clone: installing into a directory with no `.git` leaves a binary
+   with no source beside it, so the `fetch`/`reset` step above will fail there. A stale
+   `.ex5` next to a current `.mq5` is a trap: MT5 loads the binary.
 3. **`origin/main`**.
 
 Then the wiki (a separate git repository): `Home.md` version line, a `Changelog.md`

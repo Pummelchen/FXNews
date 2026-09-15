@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 52 | done 19 | open 33 | blocked 0 | S0:1 S1:11 S2:18 S3:22**
+**total 52 | done 21 | open 31 | blocked 0 | S0:1 S1:11 S2:18 S3:22**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -26,7 +26,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-011 | S2 | dashboard | START | `FXNews.mq5:3788,6802-6804,7182` | g_signal_history_dirty is never cleared while active signal rows are rendered, forcing a full dashboard rebuild every scan |
 | F-012 | S2 | scoring | START | `FXNews.mq5:5330-5331` | wick_rejection_penalty is subtracted from the breakout blend without its weight being added to the normaliser |
 | F-013 | S2 | dashboard | START | `FXNews.mq5:6325,6246` | DominantCurrencyFlow's own_group key makes every timeframe of one symbol share a correlation group, so at most one of them can ever alert |
-| F-014 | S2 | tooling | START | `tools/build-macos.sh:40-43; tools/selftest-macos.sh:38-40` | The Wine path, WINEPREFIX and MT5 path constants are duplicated across the two gate scripts and can drift |
+| F-014 | S2 | tooling | DONE | `tools/build-macos.sh:40-43; tools/selftest-macos.sh:38-40` | The Wine path, WINEPREFIX and MT5 path constants are duplicated across the two gate scripts and can drift |
 | F-015 | S2 | tooling | START | `FXNews.mq5:1725; tools/mql5/FXNewsSelfTest.mq5:14,32-34; tools/selftest-macos.sh:72,139,159-163` | The indicator, the harness and the gate script are coupled by undocumented string literals with no contract test |
 | F-016 | S2 | ops | START | `.github/` | No CI workflow: the three release gates are never run automatically |
 | F-017 | S2 | validation | START | `FXNews.mq5:942,988-995` | MaxQuoteAgeSeconds and FullHoldScoreSeconds have no upper bound, so extreme values silently disable the freshness gate or make the HYBRID hold clause unreachable |
@@ -35,7 +35,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-021 | S2 | dashboard | START | `FXNews.mq5:7482,7419` | WrapLabelText wraps report lines at 63 characters but SetDashboardRow re-clips them to the measured pixel limit, truncating the wrapped tail |
 | F-022 | S2 | dashboard | START | `FXNews.mq5:6817-6825,6747` | UpdateActivityStatusLine recomputes CountDashboardObjects (up to 40 ObjectFind calls) on every scan that skips the full dashboard |
 | F-023 | S2 | tests | START | `FXNews.mq5:930-1109` | No test exercises any ValidateInputs rejection path |
-| F-024 | S2 | tooling | START | `tools/build-macos.sh:47,116-120` | build-macos.sh cannot distinguish 'Wine cannot execute' from 'the compiler produced no result line', and reports the wrong exit code |
+| F-024 | S2 | tooling | DONE | `tools/build-macos.sh:47,116-120` | build-macos.sh cannot distinguish 'Wine cannot execute' from 'the compiler produced no result line', and reports the wrong exit code |
 | F-025 | S2 | ops | START | `session credential handling` | A live-looking GitHub PAT was supplied in plaintext and is present in the agent session transcript |
 | F-048 | S2 | historical | START | `FXNews.mq5 (BuildAutotuneReport / BuildValidationReport interpretation lines)` | The historical reports print the same generic interpretation whether or not higher score buckets actually produced better outcomes |
 | F-049 | S2 | tests | START | `FXNews.mq5 (UpdateAlertGroups, DispatchPendingAlerts, UpdateDashboard, BuildDiagnosticsLines)` | Alert dispatch, correlation grouping and dashboard rendering still have no automated coverage |
@@ -280,13 +280,16 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-014 (S2, tooling) — The Wine path, WINEPREFIX and MT5 path constants are duplicated across the two gate scripts and can drift
 
-- **Status:** START  |  **Category:** dead  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** dead  |  **Host:** node3  |  **Commit:** 970f8e5
 - **Location:** `tools/build-macos.sh:40-43; tools/selftest-macos.sh:38-40`
 - **Discovered by:** Phase B L1
 - **Evidence (before):**
 
   > Both scripts independently hard-code '/Applications/MetaTrader 5.app/Contents/SharedSupport/wine/bin/wine64' and the same WINEPREFIX; the MT5 sub-path is repeated in build-macos.sh:42 and selftest-macos.sh:39-40. Extracting them into one sourced file is the standard fix.
 
+- **Fix:** New tools/lib-mt5.sh holds the Wine path, the WINEPREFIX and the MetaTrader paths with mt5_configure and mt5_require_wine; both gate scripts source it. mt5_require_wine probes 'wine64 --version' and exits 2 naming the real cause (on arm64, the exact Rosetta 2 install command) instead of letting the failure surface later as a compiler result. FXNEWS_WINE and FXNEWS_WINEPREFIX allow a different install and make the checks themselves testable.
+- **Evidence (after):** Scripts are the unit under test. BEFORE (probe removed): 'build: MetaEditor wrote no log (wine exit status 1)', exit 3 - the misleading compiler diagnosis, reproduced deliberately. AFTER: 'wine64 exists but cannot run ... needs Rosetta 2 ... sudo softwareupdate --install-rosetta --agree-to-license', exit 2; the same probe on selftest-macos.sh exits 2; a missing binary still reports 'wine64 not found' with exit 2 so the two failures stay distinguishable. No regression: build 0/0, full selftest 142 passed / 0 failed, explicit-source-path build works, census 0 findings, shellcheck clean on all three files. shellcheck's SC2034 on ME/TERMINAL was fixed by exporting the interface variables rather than with a disable directive.
+- **Notes:** Shares the code being changed with F-024 and is committed with it as audit(F-014,F-024).
 
 ### F-015 (S2, tooling) — The indicator, the harness and the gate script are coupled by undocumented string literals with no contract test
 
@@ -381,14 +384,16 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-024 (S2, tooling) — build-macos.sh cannot distinguish 'Wine cannot execute' from 'the compiler produced no result line', and reports the wrong exit code
 
-- **Status:** START  |  **Category:** bug  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** bug  |  **Host:** node3  |  **Commit:** 970f8e5
 - **Location:** `tools/build-macos.sh:47,116-120`
 - **Discovered by:** Finding E-1
 - **Evidence (before):**
 
   > The script checks only '[ -x "$WINE" ]' (:47), which is true for an x86_64 binary on an arm64 host without Rosetta. When Wine then fails to exec, the log is empty and the script exits 3 ('compiler produced no result line'), which the header documents as a compiler problem, not the environment problem (exit 2) it actually is. Observed on all four Macs.
 
-- **Notes:** Fix: probe that Wine can actually execute before compiling, and report exit 2 with an actionable message.
+- **Fix:** New tools/lib-mt5.sh holds the Wine path, the WINEPREFIX and the MetaTrader paths with mt5_configure and mt5_require_wine; both gate scripts source it. mt5_require_wine probes 'wine64 --version' and exits 2 naming the real cause (on arm64, the exact Rosetta 2 install command) instead of letting the failure surface later as a compiler result. FXNEWS_WINE and FXNEWS_WINEPREFIX allow a different install and make the checks themselves testable.
+- **Evidence (after):** Scripts are the unit under test. BEFORE (probe removed): 'build: MetaEditor wrote no log (wine exit status 1)', exit 3 - the misleading compiler diagnosis, reproduced deliberately. AFTER: 'wine64 exists but cannot run ... needs Rosetta 2 ... sudo softwareupdate --install-rosetta --agree-to-license', exit 2; the same probe on selftest-macos.sh exits 2; a missing binary still reports 'wine64 not found' with exit 2 so the two failures stay distinguishable. No regression: build 0/0, full selftest 142 passed / 0 failed, explicit-source-path build works, census 0 findings, shellcheck clean on all three files. shellcheck's SC2034 on ME/TERMINAL was fixed by exporting the interface variables rather than with a disable directive.
+- **Notes:** Shares the code being changed with F-014 and is committed with it. This is the repo-side defect behind environment blocker E-1, which was the audit's only S0.
 
 ### F-025 (S2, ops) — A live-looking GitHub PAT was supplied in plaintext and is present in the agent session transcript
 

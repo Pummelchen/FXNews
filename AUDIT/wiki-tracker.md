@@ -2,7 +2,7 @@
 
 Independent pre-production audit of the whole repository, run on branch `audit/2026-09-15` from base commit `71ce980`, and merged by pull request only after the final phase passed. The authoritative ledger lives in the repository at `AUDIT/ledger.md` / `AUDIT/ledger.json`; this page mirrors it and the ledger wins on any conflict.
 
-**total 55 | done 39 | open 16 | blocked 0 | S0:1 S1:13 S2:16 S3:25**
+**total 55 | done 42 | open 13 | blocked 0 | S0:1 S1:13 S2:16 S3:25**
 
 ### Open items
 
@@ -11,9 +11,6 @@ Independent pre-production audit of the whole repository, run on branch `audit/2
 | F-025 | S2 | START | ops | A live-looking GitHub PAT was supplied in plaintext and is present in the agent session transcript |
 | F-049 | S2 | START | tests | Alert dispatch, correlation grouping and dashboard rendering still have no automated coverage |
 | F-010 | S3 | START | historical | The 85+ bucket in the historical report is unreachable (now empirically confirmed; the wiki already documents the empty bucket, so only the unannotated report row remains) |
-| F-029 | S3 | START | tooling | tools/census-allow.txt is documented and defaulted to but does not exist |
-| F-030 | S3 | START | tooling | .coverage is not ignored, so the coverage artifact required by the audit brief can be committed by accident |
-| F-031 | S3 | START | repo | One contributor appears under three different author identities |
 | F-036 | S3 | START | docs | The tracker describes itself as open tasks and known bugs while showing 120/120 done, and its line-number baseline still says version 2.3 |
 | F-037 | S3 | START | docs | The documented version-bump procedure requires a deployment clone at MQL5/Indicators/FXNews/ that does not exist on this machine |
 | F-038 | S3 | START | scoring | Unreachable guard: total_weight can never be zero |
@@ -68,6 +65,9 @@ _None._
 | F-026 | S3 | tooling | ruff F541: two f-strings without placeholders | ruff check tools/census.py clean. The change cannot alter detection because the prefix was inert, and that was verified rather than assumed: a synthetic probe file with three planted findings (write-only local, placeholder literal, uncalled function) is detected identically before and after - 3 findings, exit 1 - while the real source still reports 0 findings, exit 0. mypy --strict and bandit clean. |
 | F-027 | S3 | tooling | ruff format drift: the only Python file is not formatted to the formatter's standard | ruff format --check clean; ruff check clean; mypy --strict clean; bandit clean. Census behaviour unchanged: 3 findings on the synthetic probe, 0 on the real source. |
 | F-028 | S3 | tooling | shfmt drift in both shell scripts | Reformatting executable gates is behaviour-risky, so every gate was run afterwards instead of trusting a whitespace-only diff. shfmt -d reports no drift; shellcheck clean on all three files; tools/contracts.py reports 0 violations, which also proves the patterns it parses out of selftest-macos.sh survived; build 0 errors / 0 warnings; full selftest 145 passed, 0 failed of 145. |
+| F-029 | S3 | tooling | tools/census-allow.txt is documented and defaulted to but does not exist | The mechanism is proven, not assumed: against a scratch copy of the source with a deliberately dead identifier appended, census.py reports '[FINDING] unused-global: g_probe_dead_identifier' and exits 1 without an allow file, and '[allowed] ... 0 open finding(s), 1 allowed' with one naming it. Against the real source the committed file leaves the census at 0 findings, 0 allowed. |
+| F-030 | S3 | tooling | .coverage is not ignored, so the coverage artifact required by the audit brief can be committed by accident | BEFORE: 'git status --porcelain' listed '?? .coverage' (53 KB) and 'git check-ignore' exited 1. AFTER: 'git check-ignore -v .coverage' reports '.gitignore:12:.coverage  .coverage' and the working tree is clean with the artifact present on disk. |
+| F-031 | S3 | repo | One contributor appears under three different author identities | BEFORE: 'git log --format=%an <%ae> \| sort -u' reports 5 identities (node3; André Borchert at two addresses; Pummelchen at two). AFTER: 'git log --format=%aN <%aE> \| sort -u' reports 1, with all 130 commits attributed to it. |
 | F-032 | S3 | docs | The gate script's header comment states the wrong assertion count (72; actual 117) | grep -rnE '[0-9]+ (pure-helper )?assertions' README.md CLAUDE.md tools/ returns no match; the gate still reports its total at runtime ('RESULT: 130 passed, 0 failed of 130 assertions'). |
 | F-033 | S3 | docs | The wiki Testing page hard-codes the assertion total on the same page that promises it never has to | Wiki commit 'docs: stop hard-coding the self-test assertion total'; Testing-and-Validation.md:11 and Architecture.md:49 reworded. |
 | F-034 | S3 | docs | Known-Limitations calls all three gates macOS-only, but census.py is cross-platform | grep for 'three gates' / 'All three' / 'macOS-only' across the wiki returns no stale claim; Testing-and-Validation.md gained a 'What CI Covers, and What It Cannot' section and its gate table lists contracts.py; Home.md's project-structure paragraph no longer says there is no CI workflow. |

@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 55 | done 39 | open 16 | blocked 0 | S0:1 S1:13 S2:16 S3:25**
+**total 55 | done 42 | open 13 | blocked 0 | S0:1 S1:13 S2:16 S3:25**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -47,9 +47,9 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-026 | S3 | tooling | DONE | `tools/census.py:273,274` | ruff F541: two f-strings without placeholders |
 | F-027 | S3 | tooling | DONE | `tools/census.py` | ruff format drift: the only Python file is not formatted to the formatter's standard |
 | F-028 | S3 | tooling | DONE | `tools/build-macos.sh; tools/selftest-macos.sh` | shfmt drift in both shell scripts |
-| F-029 | S3 | tooling | START | `tools/census.py:17,338` | tools/census-allow.txt is documented and defaulted to but does not exist |
-| F-030 | S3 | tooling | START | `.gitignore` | .coverage is not ignored, so the coverage artifact required by the audit brief can be committed by accident |
-| F-031 | S3 | repo | START | `git history` | One contributor appears under three different author identities |
+| F-029 | S3 | tooling | DONE | `tools/census.py:17,338` | tools/census-allow.txt is documented and defaulted to but does not exist |
+| F-030 | S3 | tooling | DONE | `.gitignore` | .coverage is not ignored, so the coverage artifact required by the audit brief can be committed by accident |
+| F-031 | S3 | repo | DONE | `git history` | One contributor appears under three different author identities |
 | F-032 | S3 | docs | DONE | `tools/selftest-macos.sh:13` | The gate script's header comment states the wrong assertion count (72; actual 117) |
 | F-033 | S3 | docs | DONE | `_fxnews-wiki/Testing-and-Validation.md:11,30` | The wiki Testing page hard-codes the assertion total on the same page that promises it never has to |
 | F-034 | S3 | docs | DONE | `_fxnews-wiki/Known-Limitations.md:7` | Known-Limitations calls all three gates macOS-only, but census.py is cross-platform |
@@ -556,33 +556,40 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-029 (S3, tooling) — tools/census-allow.txt is documented and defaulted to but does not exist
 
-- **Status:** START  |  **Category:** docs  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** HEAD
 - **Location:** `tools/census.py:17,338`
 - **Discovered by:** Phase B L0 + docs audit
 - **Evidence (before):**
 
   > census.py's docstring and its argparse default reference tools/census-allow.txt, and the wiki Testing page tells users to put exceptions there. The file is absent. read_allow() tolerates absence, so this is a documentation gap, not a failure.
 
+- **Fix:** tools/census-allow.txt now exists, empty, documenting the one-identifier-per-line format and the expectation that an entry is a written admission rather than a silencer. The path that census.py's usage text and the wiki's Testing page both reference now resolves.
+- **Evidence (after):** The mechanism is proven, not assumed: against a scratch copy of the source with a deliberately dead identifier appended, census.py reports '[FINDING] unused-global: g_probe_dead_identifier' and exits 1 without an allow file, and '[allowed] ... 0 open finding(s), 1 allowed' with one naming it. Against the real source the committed file leaves the census at 0 findings, 0 allowed.
+- **Notes:** The finding was a documentation/behaviour mismatch, so the fix had to be verified in both directions: that the file resolves, and that an entry in it actually changes the verdict.
 
 ### F-030 (S3, tooling) — .coverage is not ignored, so the coverage artifact required by the audit brief can be committed by accident
 
-- **Status:** START  |  **Category:** style  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** style  |  **Host:** node3  |  **Commit:** HEAD
 - **Location:** `.gitignore`
 - **Discovered by:** Phase B L0
 - **Evidence (before):**
 
   > Running the mandated coverage measurement creates an untracked .coverage in the repository root; .gitignore lists *.ex5, *.log, *.out, *.tmp, *.bak and the MT5 runtime directories but not coverage data.
 
+- **Fix:** .gitignore now lists .coverage, .coverage.* and htmlcov/ with the Python tool caches, so the artifact the brief's mandatory coverage run produces cannot be committed by accident.
+- **Evidence (after):** BEFORE: 'git status --porcelain' listed '?? .coverage' (53 KB) and 'git check-ignore' exited 1. AFTER: 'git check-ignore -v .coverage' reports '.gitignore:12:.coverage  .coverage' and the working tree is clean with the artifact present on disk.
 
 ### F-031 (S3, repo) — One contributor appears under three different author identities
 
-- **Status:** START  |  **Category:** docs  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** HEAD
 - **Location:** `git history`
 - **Discovered by:** Phase B L0
 - **Evidence (before):**
 
   > git log shows 26 commits as 'Andre Borchert <andreborchert@MacBook-AB.local>', 27 as '<andreborchert@macbook-ab.tail1c3b90.ts.net>', 25 as 'Pummelchen <0xa0b1@gmail.com>' and 1 as 'Pummelchen <andreborchert@MacBook-AB.local>'. Attribution and contributor statistics are split.
 
+- **Fix:** A .mailmap maps the five author identities onto André Borchert <0xa0b1@gmail.com>. Display-only: no commit object changes, so no hash referenced by the ledger or the wiki is invalidated and the history is not rewritten.
+- **Evidence (after):** BEFORE: 'git log --format=%an <%ae> | sort -u' reports 5 identities (node3; André Borchert at two addresses; Pummelchen at two). AFTER: 'git log --format=%aN <%aE> | sort -u' reports 1, with all 130 commits attributed to it.
 - **Notes:** Fix is an additive .mailmap; no history rewrite. Never force-push.
 
 ### F-032 (S3, docs) — The gate script's header comment states the wrong assertion count (72; actual 117)

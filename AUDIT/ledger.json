@@ -981,14 +981,14 @@
       "file": "FXNews.mq5 (UpdateDashboard, SetDashboardRow, DeleteDashboardRowsFrom)",
       "title": "Dashboard row rendering and the signal-history eviction dwell still have no automated coverage",
       "category": "tests",
-      "status": "START",
+      "status": "DONE",
       "hostUsed": null,
       "discoveredBy": "scope re-homed from F-049, as the audit brief requires",
       "evidenceBefore": "Re-homed from F-049, which named alert dispatch, correlation grouping and dashboard rendering together. The first two are now covered by the 'alert dispatch' self-test group. Still uncovered: stale-row deletion when the dashboard shrinks, the ShowActiveSignalRows path, and the signal-history eviction dwell introduced with F-042. Rendering needs a live chart, which is why the whole area was manual-only. F-011's refresh-ordering invariant is already pinned structurally by tools/contracts.py (dashboard-refresh) and F-021's wrap width by the self-test, so this task is the remainder, not the whole area.",
-      "fixSummary": null,
-      "evidenceAfter": null,
-      "commit": null,
-      "notes": "Opened rather than leaving F-049 open with a narrowed scope, because the brief forbids closing a task by narrowing it and requires the remainder to become its own task with a note on the original.",
+      "fixSummary": "Dashboard row creation, the label budget and stale-row deletion are covered by running against the harness's real chart; the history eviction rule moved into a pure SignalHistoryEvictionSlot with four boundary assertions. The F-042 contract was repointed at the new function.",
+      "evidenceAfter": "BEFORE A (deletion off-by-one): 197 passed, 2 failed of 199, exit 1. BEFORE B (dwell ignored): 198 passed, 1 failed of 199, exit 1. AFTER: 199 passed, 0 failed of 199. Assertions 191 -> 199. Build 0/0; census 0; contracts 0/9.",
+      "commit": "2dcd832",
+      "notes": "The ShowActiveSignalRows path is not covered by a new test and the ledger says so: it needs a running scan. Its defect-prone property - refresh before the branch on display mode - is already pinned structurally by the dashboard-refresh contract added with F-011. Two fixtures of mine failed first against correct code (a non-tie 'tie' in F-049, and a non-monotonic eviction fixture here); both were test errors and are recorded in the tests.",
       "blockedReason": null
     }
   ]

@@ -2,14 +2,13 @@
 
 Independent pre-production audit of the whole repository, run on branch `audit/2026-09-15` from base commit `71ce980`, and merged by pull request only after the final phase passed. The authoritative ledger lives in the repository at `AUDIT/ledger.md` / `AUDIT/ledger.json`; this page mirrors it and the ledger wins on any conflict.
 
-**total 56 | done 54 | open 2 | blocked 0 | S0:1 S1:13 S2:16 S3:26**
+**total 56 | done 55 | open 1 | blocked 0 | S0:1 S1:13 S2:16 S3:26**
 
 ### Open items
 
 | # | Sev | Status | Area | What |
 | --- | --- | --- | --- | --- |
 | F-025 | S2 | START | ops | A live-looking GitHub PAT was supplied in plaintext and is present in the agent session transcript |
-| F-051 | S3 | START | testing | Dashboard row rendering and the signal-history eviction dwell still have no automated coverage |
 
 ### Blocked items
 
@@ -73,3 +72,4 @@ _None._
 | F-043 | S3 | logic | DISPROVED: SmoothStep's edge re-orientation is a tested fix for a pre-1.4 defect | Grepping every call site found exactly three reversed literal pairs, all of them self-test assertions (SmoothStep(0.50,0.35,0.20) < ...(0.60), and ...(1.0,0.0,0.5) == 0.5). No production caller passes reversed edges, and the adjacent comment already recorded that before the fix the ramp ran backwards and scored 1.00 for moves against the signal. Build 0/0; census 0; contracts 0/9; selftest 177/0. |
 | F-044 | S3 | docs | The ATR definition (simple mean of true range, not Wilder smoothing) is undocumented | New self-test group 'atr definition' on a three-bar series with true ranges 14, 5, 4: simple mean 7.667 against Wilder 8.667. BEFORE (genuine Wilder recursion substituted): 181 passed, 1 failed of 182, exit 1. AFTER: 182 passed, 0 failed. Build 0/0; census 0; contracts 0/9. |
 | F-045 | S3 | tooling | --install creates the destination directory silently and never verifies the terminal can load the binary | Against the real prefix: first run 'install target absent, creating: ...' then 'installed FXNews.ex5 ... (246424 bytes, verified)' with the installed file measuring 246424 bytes against a 246424-byte source; second run reports 'install target exists' and verifies again. The size guard was reproduced in isolation with a 3-byte file against a 10-byte source and reports REJECTED, exiting 2. shfmt -d and shellcheck tools/*.sh are clean. |
+| F-051 | S3 | testing | Dashboard row rendering and the signal-history eviction dwell still have no automated coverage | BEFORE A (deletion off-by-one): 197 passed, 2 failed of 199, exit 1. BEFORE B (dwell ignored): 198 passed, 1 failed of 199, exit 1. AFTER: 199 passed, 0 failed of 199. Assertions 191 -> 199. Build 0/0; census 0; contracts 0/9. |

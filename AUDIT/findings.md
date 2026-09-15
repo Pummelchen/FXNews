@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 56 | done 54 | open 2 | blocked 0 | S0:1 S1:13 S2:16 S3:26**
+**total 56 | done 55 | open 1 | blocked 0 | S0:1 S1:13 S2:16 S3:26**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -64,7 +64,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-043 | S3 | logic | DONE | `FXNews.mq5:8198-8208` | DISPROVED: SmoothStep's edge re-orientation is a tested fix for a pre-1.4 defect |
 | F-044 | S3 | docs | DONE | `FXNews.mq5:4401-4425` | The ATR definition (simple mean of true range, not Wilder smoothing) is undocumented |
 | F-045 | S3 | tooling | DONE | `tools/build-macos.sh:150-156` | --install creates the destination directory silently and never verifies the terminal can load the binary |
-| F-051 | S3 | testing | START | `FXNews.mq5 (UpdateDashboard, SetDashboardRow, DeleteDashboardRowsFrom)` | Dashboard row rendering and the signal-history eviction dwell still have no automated coverage |
+| F-051 | S3 | testing | DONE | `FXNews.mq5 (UpdateDashboard, SetDashboardRow, DeleteDashboardRowsFrom)` | Dashboard row rendering and the signal-history eviction dwell still have no automated coverage |
 
 ## Detail
 
@@ -779,11 +779,13 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-051 (S3, testing) — Dashboard row rendering and the signal-history eviction dwell still have no automated coverage
 
-- **Status:** START  |  **Category:** tests  |  **Host:** None  |  **Commit:** -
+- **Status:** DONE  |  **Category:** tests  |  **Host:** None  |  **Commit:** 2dcd832
 - **Location:** `FXNews.mq5 (UpdateDashboard, SetDashboardRow, DeleteDashboardRowsFrom)`
 - **Discovered by:** scope re-homed from F-049, as the audit brief requires
 - **Evidence (before):**
 
   > Re-homed from F-049, which named alert dispatch, correlation grouping and dashboard rendering together. The first two are now covered by the 'alert dispatch' self-test group. Still uncovered: stale-row deletion when the dashboard shrinks, the ShowActiveSignalRows path, and the signal-history eviction dwell introduced with F-042. Rendering needs a live chart, which is why the whole area was manual-only. F-011's refresh-ordering invariant is already pinned structurally by tools/contracts.py (dashboard-refresh) and F-021's wrap width by the self-test, so this task is the remainder, not the whole area.
 
-- **Notes:** Opened rather than leaving F-049 open with a narrowed scope, because the brief forbids closing a task by narrowing it and requires the remainder to become its own task with a note on the original.
+- **Fix:** Dashboard row creation, the label budget and stale-row deletion are covered by running against the harness's real chart; the history eviction rule moved into a pure SignalHistoryEvictionSlot with four boundary assertions. The F-042 contract was repointed at the new function.
+- **Evidence (after):** BEFORE A (deletion off-by-one): 197 passed, 2 failed of 199, exit 1. BEFORE B (dwell ignored): 198 passed, 1 failed of 199, exit 1. AFTER: 199 passed, 0 failed of 199. Assertions 191 -> 199. Build 0/0; census 0; contracts 0/9.
+- **Notes:** The ShowActiveSignalRows path is not covered by a new test and the ledger says so: it needs a running scan. Its defect-prone property - refresh before the branch on display mode - is already pinned structurally by the dashboard-refresh contract added with F-011. Two fixtures of mine failed first against correct code (a non-tie 'tie' in F-049, and a non-monotonic eviction fixture here); both were test errors and are recorded in the tests.

@@ -2015,6 +2015,52 @@ void SelfTestHistoryRefresh()
    SelfTestGroup("history refresh", before);
 }
 
+// Whether a historical sample supports the score's own ranking claim. The reports
+// used to assert that claim unconditionally, including on the AUTOTUNE run whose
+// buckets fell the wrong way, so the comparison is now a pure function with a test
+// and the call sites are pinned by tools/contracts.py.
+void SelfTestRankingCheck()
+{
+   int before = g_selftest_failed;
+
+   HistoricalBacktestStats stats;
+
+   // One populated bucket cannot say anything about ordering.
+   ResetHistoricalStats(stats);
+   AddHistoricalBucketStats(stats, 70, 0.25);
+   HistoricalRankingCheck single = EvaluateHistoricalRanking(stats);
+   SelfTestCheck(!single.comparable && !single.supported,
+                 "ranking check: a single populated bucket makes no claim");
+
+   ResetHistoricalStats(stats);
+   HistoricalRankingCheck empty = EvaluateHistoricalRanking(stats);
+   SelfTestCheck(!empty.comparable, "ranking check: no signals make no claim");
+
+   // A rising profile is supported.
+   ResetHistoricalStats(stats);
+   AddHistoricalBucketStats(stats, 60, -0.5);
+   AddHistoricalBucketStats(stats, 80, 0.5);
+   HistoricalRankingCheck rising = EvaluateHistoricalRanking(stats);
+   SelfTestCheck(rising.comparable && rising.supported &&
+                 rising.low_bucket == 60 && rising.high_bucket == 80 &&
+                 rising.compared_pairs == 1 && rising.rising_pairs == 1,
+                 "ranking check: a rising bucket profile is reported as supported");
+
+   // The profile the 2026-09-15 AUTOTUNE run produced: the highest bucket worse
+   // than the lowest, and no adjacent pair improving.
+   ResetHistoricalStats(stats);
+   AddHistoricalBucketStats(stats, 60, 0.5);
+   AddHistoricalBucketStats(stats, 75, 0.1);
+   AddHistoricalBucketStats(stats, 80, -0.5);
+   HistoricalRankingCheck falling = EvaluateHistoricalRanking(stats);
+   SelfTestCheck(falling.comparable && !falling.supported &&
+                 falling.low_bucket == 60 && falling.high_bucket == 80 &&
+                 falling.compared_pairs == 2 && falling.rising_pairs == 0,
+                 "ranking check: a falling bucket profile is reported as unsupported");
+
+   SelfTestGroup("ranking check", before);
+}
+
 // The historical engine on a synthetic minute series with a known shape and
 // a deliberate ten-minute gap after bar 250.
 void SelfTestHistoricalEngine()
@@ -2238,6 +2284,7 @@ void RunSelfTest()
    SelfTestComposerEngineGating();
    SelfTestSignalLifecycle();
    SelfTestHistoryRefresh();
+   SelfTestRankingCheck();
    SelfTestHistoricalEngine();
    SelfTestSignalHistory();
 
@@ -3589,6 +3636,99 @@ void AddHistoricalCoverageLines(const HistoricalBacktestStats &stats)
    AddHistoricalReportLine("  weak_hold_cap and range_snapback_cap cannot bind here, unlike a live scan.");
 }
 
+// The outcome of comparing the populated score buckets. Pure over the stats so the
+// self-test can assert it without capturing report text.
+struct HistoricalRankingCheck
+{
+   bool comparable;      // at least two buckets hold signals
+   int low_bucket;       // floor of the lowest populated bucket
+   int high_bucket;      // floor of the highest populated bucket
+   double low_R;
+   double high_R;
+   int rising_pairs;     // adjacent populated pairs whose average R improved
+   int compared_pairs;
+   bool supported;       // the highest populated bucket beat the lowest
+};
+
+HistoricalRankingCheck EvaluateHistoricalRanking(const HistoricalBacktestStats &stats)
+{
+   HistoricalRankingCheck check;
+   check.comparable = false;
+   check.low_bucket = 0;
+   check.high_bucket = 0;
+   check.low_R = 0.0;
+   check.high_R = 0.0;
+   check.rising_pairs = 0;
+   check.compared_pairs = 0;
+   check.supported = false;
+
+   int floor_of[6];
+   int counts[6];
+   double sums[6];
+   floor_of[0] = 60;  counts[0] = stats.bucket60_count;  sums[0] = stats.bucket60_R;
+   floor_of[1] = 65;  counts[1] = stats.bucket65_count;  sums[1] = stats.bucket65_R;
+   floor_of[2] = 70;  counts[2] = stats.bucket70_count;  sums[2] = stats.bucket70_R;
+   floor_of[3] = 75;  counts[3] = stats.bucket75_count;  sums[3] = stats.bucket75_R;
+   floor_of[4] = 80;  counts[4] = stats.bucket80_count;  sums[4] = stats.bucket80_R;
+   floor_of[5] = 85;  counts[5] = stats.bucket85_count;  sums[5] = stats.bucket85_R;
+
+   int low_index = -1;
+   int high_index = -1;
+   for(int i = 0; i < 6; i++)
+   {
+      if(counts[i] <= 0)
+         continue;
+      if(low_index < 0)
+         low_index = i;
+      if(high_index >= 0)
+      {
+         check.compared_pairs++;
+         if(sums[i] / (double)counts[i] > sums[high_index] / (double)counts[high_index])
+            check.rising_pairs++;
+      }
+      high_index = i;
+   }
+
+   if(low_index < 0 || low_index == high_index)
+      return check;
+
+   check.comparable = true;
+   check.low_bucket = floor_of[low_index];
+   check.high_bucket = floor_of[high_index];
+   check.low_R = sums[low_index] / (double)counts[low_index];
+   check.high_R = sums[high_index] / (double)counts[high_index];
+   check.supported = (check.high_R > check.low_R);
+   return check;
+}
+
+// The reports claim that a useful score ranks outcomes, and the Autotune report
+// then recommends settings on the strength of that ordering. Both used to print the
+// claim whether or not it held, so an operator reading the tail of the Journal could
+// act on a recommendation the sample did not support. This states the outcome.
+void AddHistoricalRankingVerdict(const HistoricalBacktestStats &stats)
+{
+   HistoricalRankingCheck check = EvaluateHistoricalRanking(stats);
+   if(!check.comparable)
+   {
+      AddHistoricalReportLine("Ranking check: fewer than two buckets hold signals, so this sample makes no claim about how the score ranks outcomes.");
+      return;
+   }
+
+   if(check.supported)
+   {
+      AddHistoricalReportLine(StringFormat("Ranking check: supported here - the highest populated bucket (%d+) averaged %+.3f R against %+.3f R in the lowest (%d+), with %d of %d adjacent pairs improving.",
+                                           check.high_bucket, check.high_R, check.low_R, check.low_bucket,
+                                           check.rising_pairs, check.compared_pairs));
+      return;
+   }
+
+   // The sentence an operator must not have to infer.
+   AddHistoricalReportLine(StringFormat("Ranking check: NOT SUPPORTED on this sample - the highest populated bucket (%d+) averaged %+.3f R against %+.3f R in the lowest (%d+), and only %d of %d adjacent pairs improved.",
+                                        check.high_bucket, check.high_R, check.low_R, check.low_bucket,
+                                        check.rising_pairs, check.compared_pairs));
+   AddHistoricalReportLine("  Higher scores did not produce better outcomes here, so this sample shows no ranking edge. Treat any recommendation below as unvalidated and check it on a separate holdout before entering settings.");
+}
+
 void AddHistoricalBucketLines(const string title, const HistoricalBacktestStats &stats)
 {
    AddHistoricalReportLine(title);
@@ -3638,8 +3778,9 @@ void BuildValidationReport(const HistoricalBacktestStats &stats, const Historica
                                         AverageStopScore(stats),
                                         ScoreEdge(stats)));
    AddHistoricalBucketLines("Buckets by displayed score: count | avg 30m R", stats);
+   AddHistoricalRankingVerdict(stats);
    AddHistoricalReportLine("Model: the live composer over bar features; no basket, calendar or tick data, so scores are capped at 84 like a live instance without a basket reading. Minute-scale impulse windows use their own threshold.");
-   AddHistoricalReportLine("Interpretation: score is a ranking metric. A useful score should show better R/PF in higher buckets.");
+   AddHistoricalReportLine("Interpretation: the score is an event-quality ranking, not a probability or a trade instruction. Whether this sample supports that ranking is stated by the ranking check above, not assumed here.");
    PrintHistoricalReportToJournal();
    SetHistoricalReadyMessage("VALIDATION");
 }
@@ -3701,6 +3842,9 @@ void BuildAutotuneReport(const HistoricalBacktestStats &default_stats,
    }
    AddHistoricalReportLine("Current settings baseline: " + FormatHistoricalParams(default_params));
    AddHistoricalBucketLines("Best score buckets: count | avg 30m R", best_stats);
+   // The recommendation above rests on the score ranking outcomes, so the ranking
+   // is checked and reported before the closing "no runtime change" line.
+   AddHistoricalRankingVerdict(best_stats);
    AddHistoricalReportLine(recommend ?
                            "Applied: no runtime change; review the recommendation with an external holdout before editing inputs." :
                            "Applied: no runtime change; no recommendation was produced.");

@@ -208,6 +208,31 @@ def check_dashboard_refresh(violations: list[Violation], indicator: str) -> None
         )
 
 
+def check_ranking_disclosure(violations: list[Violation], indicator: str) -> None:
+    """Both historical reports must state whether the sample supports the ranking claim.
+
+    The reports used to print the claim unconditionally, so an AUTOTUNE run whose
+    buckets fell the wrong way still recommended settings without saying so. The
+    comparison itself lives in EvaluateHistoricalRanking and is asserted by the
+    self-test; this pins the two call sites, which no unit test can reach without
+    running a full historical backtest.
+    """
+    for builder in ("BuildValidationReport", "BuildAutotuneReport"):
+        body = re.search(rf"void {builder}\(.*?\n\}}", indicator, re.DOTALL)
+        if body is None:
+            violations.append(
+                Violation("ranking-disclosure", f"{builder} not found in FXNews.mq5")
+            )
+            continue
+        if "AddHistoricalRankingVerdict(" not in body.group(0):
+            violations.append(
+                Violation(
+                    "ranking-disclosure",
+                    f"{builder} no longer reports whether the sample supports the score's ranking claim",
+                )
+            )
+
+
 def main(argv: list[str]) -> int:
     """Run every contract check against the repository at argv[0] or the parent of tools/."""
     root = (
@@ -225,11 +250,12 @@ def main(argv: list[str]) -> int:
     check_report_fields(violations, indicator, shell)
     check_harness_path(violations, harness, shell)
     check_dashboard_refresh(violations, indicator)
+    check_ranking_disclosure(violations, indicator)
 
     for violation in violations:
         print(violation.as_text())
     print(
-        f"contracts: {len(violations)} violation(s) across 5 contracts, root {root.name}"
+        f"contracts: {len(violations)} violation(s) across 6 contracts, root {root.name}"
     )
     return 1 if violations else 0
 

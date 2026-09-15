@@ -862,14 +862,14 @@
       "file": "FXNews.mq5:2140 (LoadHistoricalM1Rates), 2060 (ProcessHistoricalProfile)",
       "title": "The historical modes treat the first empty M1 copy as final, so a history download in progress yields an empty report",
       "category": "logic",
-      "status": "START",
+      "status": "DONE",
       "hostUsed": "node3",
       "discoveredBy": "Phase D, diagnosing F-046",
       "evidenceBefore": "Reproduced on every --validation run: the report reads 'Symbols 0/2 | M1 bars=0' and the Journal says 'EURUSD has no M1 history in the window (error 4401) and is skipped; open a chart of the symbol so the terminal downloads it, then re-run'. The terminal log shows the cause is a race, not a missing feed: the one-shot terminal authorizes on ICMarketsSC-MT5-4 (account 11013759, 8526 symbols synchronized) and shuts down about two seconds later, while CopyRates(PERIOD_M1, from, last_closed) triggers an on-demand download that has not completed. LoadHistoricalM1Rates returns 0 on the first attempt and the symbol is skipped for the whole run; CopyRates is never retried. History files do exist on disk (269 .hcc, including Bases/Default/history/EURUSD/2024.hcc and GBPUSD/2024.hcc).",
-      "fixSummary": null,
-      "evidenceAfter": null,
-      "commit": null,
-      "notes": "Correct fix is a bounded wait: poll CopyRates for the requested window for up to a configured number of seconds (respecting IsStopped), and report how long it waited, instead of treating the first empty copy as final. That is the documented MT5 pattern for on-demand history and it also fixes the real operator scenario 'I opened MT5 and ran VALIDATION immediately'. Rejected alternative: pre-opening M1 charts from the harness - it hides the defect and does not help a human operator. Rejected alternative: raising the harness timeout - it cannot help, because the run happens on the first timer tick after startup and the failure is deterministic within that tick.",
+      "fixSummary": "LoadHistoricalM1Rates polls CopyRates for the requested window inside a bounded, IsStopped-aware budget and reports a wait of two seconds or more; new input HistoricalHistoryWaitSeconds (default 60, validated 0..600 via MAX_HISTORICAL_HISTORY_WAIT_SECONDS), where 0 restores the single-attempt behaviour.",
+      "evidenceAfter": "The gate is the unit under test. BEFORE (retry disabled): 'Symbols 0/2 | M1 bars=0', 'selftest: FAILED (validation read no history ...)', exit 1 - run twice. AFTER: 'Symbols 1/2 | Profiles with data=2 | M1 bars=50000', 'Boundaries: evaluated 2589 of ~10683', 'Signals=601', gate OK, exit 0 - run twice (2588/605 then 2589/601). Falsification attempted: the retry-disabled version was re-run after a successful populated run with the same terminal state and still read 0 bars, which rejects cache warming as the explanation.",
+      "commit": "81b79d4",
+      "notes": "Correct fix is a bounded wait: poll CopyRates for the requested window for up to a configured number of seconds (respecting IsStopped), and report how long it waited, instead of treating the first empty copy as final. That is the documented MT5 pattern for on-demand history and it also fixes the real operator scenario 'I opened MT5 and ran VALIDATION immediately'. Rejected alternative: pre-opening M1 charts from the harness - it hides the defect and does not help a human operator. Rejected alternative: raising the harness timeout - it cannot help, because the run happens on the first timer tick after startup and the failure is deterministic within that tick. Sub-two-second retries are the normal successful path, which is why no wait line appears; the Journal line only fires at two seconds or more.",
       "blockedReason": null
     },
     {
@@ -879,15 +879,15 @@
       "file": "n/a (environment)",
       "title": "The historical end-to-end gates cannot reach green in this environment until M1 history is available at run time",
       "category": "deps",
-      "status": "BLOCKED",
+      "status": "DONE",
       "hostUsed": "node3",
       "discoveredBy": "Phase D, diagnosing F-046",
       "evidenceBefore": "After F-046 the gate correctly fails any VALIDATION or AUTOTUNE run that reads no history. In this environment every such run reads zero bars because of the download race described in F-047, so the historical end-to-end gates are red for a truthful reason rather than passing falsely.",
-      "fixSummary": null,
-      "evidenceAfter": null,
-      "commit": null,
-      "notes": "Not a product defect; the product defect is F-047.",
-      "blockedReason": "M1 history is not present at run time for the harness basket (EURUSD, GBPUSD on M5/H1). Tried: read the terminal log (authorization succeeds, 8526 symbols synchronized, then disconnects about 2s later); confirmed 269 .hcc history files on disk including EURUSD and GBPUSD; confirmed network and broker connection both work. Options for a human: (1) fix F-047 with the bounded retry, which removes the race and is the intended remedy; (2) in the meantime, pre-seed history by opening M1 charts for the basket in the terminal and letting them download before running --validation, then re-run the gate so the historical path is exercised at least once during this audit; (3) shrink the harness basket to symbols that already have M1 history on disk, accepting weaker coverage."
+      "fixSummary": "Resolved by the F-047 fix. The historical end-to-end gates now reach green in this environment and the historical engine was exercised on real broker history for the first time in this audit.",
+      "evidenceAfter": "./tools/selftest-macos.sh --validation exit 0 with 'M1 bars=50000', 'Boundaries: evaluated 2589 of ~10683', 'Signals=601', reproduced on a second consecutive run (2589 boundaries, 601 signals). EURUSD still reports unavailable after its 60 s budget while GBPUSD loads, so the timeout branch is exercised as well as the success branch; the report's 'Symbols 1/2' line discloses the coverage shortfall.",
+      "commit": "81b79d4",
+      "notes": "Was filed BLOCKED with three options for a human. Option (1) - fix F-047 - was implemented and removed the blocker, so no human decision is outstanding. Residual, not blocking: a symbol needing more than the budget still reports unavailable; HistoricalHistoryWaitSeconds is tunable to 600.",
+      "blockedReason": null
     }
   ]
 }

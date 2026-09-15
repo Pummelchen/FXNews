@@ -211,11 +211,16 @@ def check_dashboard_refresh(violations: list[Violation], indicator: str) -> None
 def check_ranking_disclosure(violations: list[Violation], indicator: str) -> None:
     """Both historical reports must state whether the sample supports the ranking claim.
 
-    The reports used to print the claim unconditionally, so an AUTOTUNE run whose
-    buckets fell the wrong way still recommended settings without saying so. The
-    comparison itself lives in EvaluateHistoricalRanking and is asserted by the
-    self-test; this pins the two call sites, which no unit test can reach without
-    running a full historical backtest.
+    The reports used to print the claim unconditionally, so an AUTOTUNE run whose buckets
+    fell the wrong way still recommended settings without saying so. This pins the whole
+    chain, because each link is a place the disclosure can be silently lost and none of it
+    is reachable from a unit test without running a full historical backtest:
+
+      1. both report builders emit the ranking section;
+      2. the section compares the bucketings rather than only printing a table;
+      3. the verdict reads BOTH bucketings, which is the F-048 diagnostic - dropping the
+         pre-cap comparison would leave a report that says the ranking failed without
+         distinguishing that from the caps having moved samples between buckets.
     """
     for builder in ("BuildValidationReport", "BuildAutotuneReport"):
         body = re.search(rf"void {builder}\(.*?\n\}}", indicator, re.DOTALL)
@@ -224,13 +229,54 @@ def check_ranking_disclosure(violations: list[Violation], indicator: str) -> Non
                 Violation("ranking-disclosure", f"{builder} not found in FXNews.mq5")
             )
             continue
-        if "AddHistoricalRankingVerdict(" not in body.group(0):
+        if "AddHistoricalRankingSection(" not in body.group(0):
             violations.append(
                 Violation(
                     "ranking-disclosure",
                     f"{builder} no longer reports whether the sample supports the score's ranking claim",
                 )
             )
+
+    section = re.search(
+        r"void AddHistoricalRankingSection\(.*?\n\}", indicator, re.DOTALL
+    )
+    if section is None:
+        violations.append(
+            Violation(
+                "ranking-disclosure",
+                "AddHistoricalRankingSection not found in FXNews.mq5",
+            )
+        )
+    elif "AddHistoricalRankingVerdict(" not in section.group(0):
+        violations.append(
+            Violation(
+                "ranking-disclosure",
+                "AddHistoricalRankingSection no longer emits the ranking verdict, so the reports "
+                "print buckets without saying whether the ordering held",
+            )
+        )
+
+    verdict = re.search(
+        r"void AddHistoricalRankingVerdict\(.*?\n\}", indicator, re.DOTALL
+    )
+    if verdict is None:
+        violations.append(
+            Violation(
+                "ranking-disclosure",
+                "AddHistoricalRankingVerdict not found in FXNews.mq5",
+            )
+        )
+    elif "stats.buckets" not in verdict.group(
+        0
+    ) or "stats.pre_cap_buckets" not in verdict.group(0):
+        violations.append(
+            Violation(
+                "ranking-disclosure",
+                "AddHistoricalRankingVerdict no longer compares the displayed-score and pre-cap "
+                "bucketings, so the report cannot distinguish a score that fails to rank from "
+                "buckets the cap ladder contaminated (F-048)",
+            )
+        )
 
 
 def check_diagnostics_object_count(violations: list[Violation], indicator: str) -> None:

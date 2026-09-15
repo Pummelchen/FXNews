@@ -9450,7 +9450,11 @@ double SmoothStep(const double edge0, const double edge1, const double x)
       return (x >= edge1 ? 1.0 : 0.0);
 
    // A reversed pair would silently invert the ramp and reward evidence against
-   // the signal, so orient the edges before interpolating.
+   // the signal, so orient the edges before interpolating. Filed as F-043 as a suspected
+   // silent re-orientation of a caller error; re-examined and NOT a defect. Every reversed
+   // call in the file is an assertion in the self-test below that pins this behaviour, no
+   // production caller passes reversed edges, and the orientation is the deliberate fix for
+   // a pre-1.4 bug that scored 1.00 for moves against the signal.
    double low = MathMin(edge0, edge1);
    double high = MathMax(edge0, edge1);
    double t = Clamp01((x - low) / (high - low));

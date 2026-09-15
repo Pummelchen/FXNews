@@ -160,7 +160,35 @@ if [ "$INSTALL" -eq 1 ]; then
     echo "build: expected $EX5 after a clean compile" >&2
     exit 2
   }
-  mkdir -p "$DEST" || exit 2
+  # Report whether the destination already existed. Creating it silently hid the case of an
+  # install aimed at the wrong terminal: an empty indicator folder appears, MT5 shows nothing,
+  # and the build reports success (F-045).
+  if [ -d "$DEST" ]; then
+    echo "build: install target exists: $DEST"
+  else
+    echo "build: install target absent, creating: $DEST"
+    mkdir -p "$DEST" || exit 2
+  fi
   cp "$EX5" "$DEST/" || exit 2
-  echo "build: installed $(basename "$EX5") to $DEST"
+
+  # An install is not complete until the binary is there at full length. A short copy is what
+  # a full disk or a permissions problem produces, and MT5 would load a truncated indicator,
+  # so the size is checked rather than assumed.
+  SRC_BYTES=$(wc -c <"$EX5" | tr -d ' ')
+  INSTALLED="$DEST/$(basename "$EX5")"
+  DST_BYTES=$(wc -c <"$INSTALLED" 2>/dev/null | tr -d ' ')
+  if [ "${DST_BYTES:-0}" != "$SRC_BYTES" ]; then
+    echo "build: installed copy is ${DST_BYTES:-0} bytes, expected $SRC_BYTES - install incomplete" >&2
+    exit 2
+  fi
+
+  # A stale .mq5 beside a fresh .ex5 is a documented trap: MT5 loads the binary, so the pair
+  # disagrees silently. Report it rather than failing, because installing a binary whose source
+  # is not kept in step is a legitimate manual workflow.
+  MQ5_INSTALLED="$DEST/$(basename "${SRC%.mq5}.mq5")"
+  if [ -f "$MQ5_INSTALLED" ] && ! cmp -s "$SRC" "$MQ5_INSTALLED"; then
+    echo "build: WARNING - $MQ5_INSTALLED differs from the source that produced the installed .ex5" >&2
+  fi
+
+  echo "build: installed $(basename "$EX5") to $DEST ($SRC_BYTES bytes, verified)"
 fi

@@ -1587,6 +1587,51 @@ void SelfTestSessionBaselines()
    SelfTestGroup("session baselines", before);
 }
 
+// The spread/cost/spread-z gate must behave identically for the live scanner and
+// the historical validator, and must apply the cost-to-ATR and spread-z ceilings
+// only under UseStrictExecutionGate. Regression test for the validator applying
+// the cost ceiling unconditionally and so rejecting boundaries live accepts.
+void SelfTestExecutionGate()
+{
+   int before = g_selftest_failed;
+
+   ExecutionQuality ex;
+   ex.spread_pips = 1.0;
+   ex.median_available = false;
+   ex.median_spread_pips = 0.0;
+   ex.spread_ratio = 0.0;
+   ex.spread_z_available = false;
+   ex.spread_z = 0.0;
+   ex.cost_to_atr = 0.60;
+
+   SelfTestCheck(ExecutionSpreadBlock(ex, 0.45, false) == BLOCK_NONE,
+                 "execution gate: a high cost-to-ATR passes when the strict gate is off");
+   SelfTestCheck(ExecutionSpreadBlock(ex, 0.45, true) == BLOCK_BAD_SPREAD,
+                 "execution gate: the same reading is rejected when the strict gate is on");
+
+   // The ungated ceilings apply regardless of the strict switch.
+   ex.cost_to_atr = 0.10;
+   ex.spread_pips = MaxSpreadPips + 1.0;
+   SelfTestCheck(ExecutionSpreadBlock(ex, 0.45, false) == BLOCK_BAD_SPREAD,
+                 "execution gate: the absolute spread ceiling applies without the strict gate");
+
+   ex.spread_pips = 1.0;
+   ex.median_available = true;
+   ex.spread_ratio = MaxSpreadMedianMultiplier + 0.5;
+   SelfTestCheck(ExecutionSpreadBlock(ex, 0.45, false) == BLOCK_BAD_SPREAD,
+                 "execution gate: the median-multiple ceiling applies without the strict gate");
+
+   ex.median_available = false;
+   ex.spread_ratio = 0.0;
+   ex.spread_z_available = true;
+   ex.spread_z = MaxSpreadZScore + 1.0;
+   SelfTestCheck(ExecutionSpreadBlock(ex, 0.45, false) == BLOCK_NONE &&
+                 ExecutionSpreadBlock(ex, 0.45, true) == BLOCK_BAD_SPREAD,
+                 "execution gate: the spread-z ceiling is strict-gated as well");
+
+   SelfTestGroup("execution gate", before);
+}
+
 // The historical engine on a synthetic minute series with a known shape and
 // a deliberate ten-minute gap after bar 250.
 void SelfTestHistoricalEngine()
@@ -1803,6 +1848,7 @@ void RunSelfTest()
    SelfTestScoringHelpers();
    SelfTestAvailabilityAndComposer();
    SelfTestSessionBaselines();
+   SelfTestExecutionGate();
    SelfTestHistoricalEngine();
    SelfTestSignalHistory();
 
@@ -2746,10 +2792,7 @@ void ScoreHistoricalBoundary(const HistoricalBoundaryFeatures &features,
    score.execution.spread_z = features.spread_z;
    score.execution.cost_to_atr = features.cost_to_atr;
    if(features.rollover ||
-      features.spread_pips <= 0.0 || features.spread_pips > MaxSpreadPips ||
-      (features.median_available && features.spread_ratio > MaxSpreadMedianMultiplier) ||
-      features.cost_to_atr > params.max_spread_to_atr ||
-      (UseStrictExecutionGate && features.spread_z_available && features.spread_z > MaxSpreadZScore))
+      ExecutionSpreadBlock(score.execution, params.max_spread_to_atr, UseStrictExecutionGate) != BLOCK_NONE)
    {
       return;
    }
@@ -5255,8 +5298,7 @@ void EvaluateExecutionQuality(const int index, const datetime now, ExecutionQual
       return;
    }
 
-   if(execution.spread_pips <= 0.0 || execution.spread_pips > MaxSpreadPips ||
-      (execution.median_available && execution.spread_ratio > MaxSpreadMedianMultiplier))
+   if(ExecutionSpreadBlock(execution, MaxSpreadToAtrRatio, UseStrictExecutionGate) != BLOCK_NONE)
    {
       execution.block_reason = BLOCK_BAD_SPREAD;
       return;
@@ -5264,13 +5306,6 @@ void EvaluateExecutionQuality(const int index, const datetime now, ExecutionQual
 
    if(UseStrictExecutionGate)
    {
-      if(execution.cost_to_atr > MaxSpreadToAtrRatio ||
-         (execution.spread_z_available && execution.spread_z > MaxSpreadZScore))
-      {
-         execution.block_reason = BLOCK_BAD_SPREAD;
-         return;
-      }
-
       if(execution.tick_gap_sec > MaxTickGapSeconds)
       {
          execution.block_reason = BLOCK_STALE_QUOTE;
@@ -5280,6 +5315,33 @@ void EvaluateExecutionQuality(const int index, const datetime now, ExecutionQual
 
    execution.score = BlendExecutionScore(execution, MaxSpreadToAtrRatio, true);
    execution.pass = true;
+}
+
+// The spread, cost-to-ATR and spread-z ceilings as one predicate over the terms
+// that bar history can also measure. The live scanner and the historical
+// validator both call it, so the UseStrictExecutionGate switch cannot drift
+// between the strategy that runs live and the strategy the reports describe:
+// the validator used to apply the cost-to-ATR ceiling unconditionally, which
+// rejected boundaries the live scanner accepts. Returns BLOCK_NONE to accept.
+SignalBlockReason ExecutionSpreadBlock(const ExecutionQuality &execution,
+                                       const double max_spread_to_atr,
+                                       const bool strict)
+{
+   if(execution.spread_pips <= 0.0 || execution.spread_pips > MaxSpreadPips ||
+      (execution.median_available && execution.spread_ratio > MaxSpreadMedianMultiplier))
+   {
+      return BLOCK_BAD_SPREAD;
+   }
+
+   if(!strict)
+      return BLOCK_NONE;
+
+   if(execution.cost_to_atr > max_spread_to_atr)
+      return BLOCK_BAD_SPREAD;
+   if(execution.spread_z_available && execution.spread_z > MaxSpreadZScore)
+      return BLOCK_BAD_SPREAD;
+
+   return BLOCK_NONE;
 }
 
 // Execution quality from the measured terms only. The quote-age and tick-gap

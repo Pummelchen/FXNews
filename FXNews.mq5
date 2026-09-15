@@ -1509,6 +1509,49 @@ void SelfTestAvailabilityAndComposer()
    SelfTestCheck(pieces_fit && StringFind(pieces[1], "  ") == 0,
                  "WrapLabelText splits at the label limit and indents continuations");
 
+   // Regression test for a self-test assertion that could not fail. The displayed
+   // score cannot distinguish exclusion from imputation here because
+   // flow_absent_cap binds at 84 either way, so the assertion above passes under
+   // both the correct implementation and one that folds an unmeasured component in
+   // at zero.
+   //
+   // With every measured component at the same quality, dropping a component's
+   // weight from the normaliser leaves the blended average unchanged, whereas
+   // imputing 0 drags it down by the excluded weight's share. Asserting raw_score
+   // (pre-cap) therefore distinguishes the two. Flow is the component under test
+   // because the breakout/impulse synergy term is identical in both branches and
+   // so cancels out.
+   {
+      CompositeSignalScore equal_score;
+      CompositeContext equal_context;
+      ResetCompositeSignalScore(equal_score);
+      equal_score.execution.pass = true;
+      equal_score.execution.score = 0.60;
+      equal_score.breakout.measured = true;
+      equal_score.breakout.score = 0.60;
+      equal_score.impulse.measured = true;
+      equal_score.impulse.score = 0.60;
+      equal_score.regime.score = 0.60;
+      equal_score.flow.available = true;
+      equal_score.flow.score = 0.60;
+      equal_context.direction = DIR_UP;
+      equal_context.m5_move_directional = 0.0;
+      equal_context.m15_move_directional = 0.0;
+      equal_context.age_seconds = 0;
+      equal_context.age_limit_seconds = 0;
+      equal_context.max_spread_to_atr = 0.45;
+
+      ComposeSignalScore(equal_score, equal_context, false);
+      double flow_measured_raw = equal_score.raw_score;
+
+      // Exactly the state ResetCompositeSignalScore leaves behind: no reading.
+      equal_score.flow.available = false;
+      equal_score.flow.score = 0.0;
+      ComposeSignalScore(equal_score, equal_context, false);
+      SelfTestNear(equal_score.raw_score, flow_measured_raw,
+                   "ComposeSignalScore leaves the blend unchanged when a component is unmeasured");
+   }
+
    SelfTestGroup("availability and composer", before);
 }
 

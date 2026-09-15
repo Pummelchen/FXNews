@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 56 | done 55 | open 0 | blocked 1 | S0:1 S1:13 S2:16 S3:26**
+**total 57 | done 56 | open 0 | blocked 1 | S0:1 S1:14 S2:16 S3:26**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -14,6 +14,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | E-3 | S1 | verification | DONE | `n/a (environment)` | The historical end-to-end gates cannot reach green in this environment until M1 history is available at run time |
 | E-4 | S1 | verification | DONE | `n/a (fleet)` | Provision an independent macOS host for Phase E |
 | E-5 | S1 | verification | DONE | `n/a (fleet)` | Phase E's self-test gate could not run over SSH: the spare Macs' terminal exits when launched outside the Aqua session |
+| E-6 | S1 | verification | DONE | `n/a (fleet)` | Phase E final verification from a fresh clone on a host that did not develop the fixes |
 | F-002 | S1 | scoring | DONE | `FXNews.mq5:4502` | UpdateSessionBaseline folds active_trigger_tick_volume into the tick-volume baseline unguarded, while the adjacent line explicitly guards the tick rate |
 | F-003 | S1 | scoring | DONE | `FXNews.mq5:4268,4704,5418,5917` | movement_5m_pips falls back to a 0.0 sentinel when the M1 copy fails and is then consumed as a measured value by three components |
 | F-004 | S1 | historical | DONE | `FXNews.mq5:2728` | Historical impulse evaluation forces acceleration_available and continuation_available to true, hard-coding weights for inputs that may be unmeasurable |
@@ -132,6 +133,19 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 - **Fix:** Root cause was the launchd session type, not MetaTrader and not broker authorization. macOS does not let a process in a Background launchd session connect to WindowServer, and MetaTrader 5 is a windowed application: started over SSH it initialises graphics and exits cleanly with code 0 before loading any script. The remedy is to run the gate inside the console user's GUI session: `sudo launchctl asuser "$(id -u)" sudo -u <user> /bin/bash -lc '<command>'`. No product change was needed; the launchctl wrapper is recorded in AUDIT/environment.md as the Phase E procedure.
 - **Evidence (after):** Independent host node2, fresh clone at 64060cc, 21 tracked files, working tree clean, all four gates green inside the Aqua session: contracts 0 violations across 6; census 0 open findings (zero placeholders); zero-warning compile 'Result: 0 errors, 0 warnings'; self-test 'RESULT: 149 passed, 0 failed of 149 assertions' with 'SELFTEST PASSED'. Scanner suite on the same host: ruff check, ruff format --check, mypy --strict, bandit, shellcheck, shfmt -d and a full-history gitleaks scan all PASS. Coverage: census.py 86%, contracts.py 77%, total 84%. Diagnostic evidence: `launchctl managername` returns Aqua on the working host and Background over SSH on the spare, and the terminal's own log shows it exiting 0.05 s after the Wine warning on the spare versus loading the script 2.3 s later on the working host.
 - **Notes:** WRONG HYPOTHESIS, recorded because it was in the ledger: E-5 was first filed with 'the strongest remaining signal is broker authorization', inferred from node3's log holding an 'authorized on' line while the spares held none. That inference was wrong - broker authorization had nothing to do with it, and a Wine-level launch with errors visible showed no fatal fault either. The launchd session check (`launchctl managername`) settled it in one command. The lesson is that two hosts differing in several ways were compared on the first difference noticed rather than on a direct test of the mechanism, which the managername check is. PHASE E STATUS: the verification machinery is now proven and reproducible, but Phase E must be re-run on the FINAL commit after Phase C finishes, because it verifies the final state and 22 findings are still open.
+
+### E-6 (S1, verification) — Phase E final verification from a fresh clone on a host that did not develop the fixes
+
+- **Status:** DONE  |  **Category:** deps  |  **Host:** node2  |  **Commit:** 98c608c
+- **Location:** `n/a (fleet)`
+- **Discovered by:** Phase E
+- **Evidence (before):**
+
+  > Phase E verifies the final state, so it could not run until Phase C finished. It also needs a machine that did none of the development, and the earlier attempt established that this requires the gate to run inside the console user's Aqua launchd session (E-5).
+
+- **Fix:** Fresh clone of the audit branch on node2 (app 5.0.4501, Wine 9.14, Rosetta 2 installed by E-4), with all four gates run inside the Aqua session via launchctl asuser. No fixes were developed on node2.
+- **Evidence (after):** commit 98c608c, branch audit/2026-09-15, 23 tracked files, working tree clean. contracts: 0 violations across 9. census: 0 open findings, 0 allowed (zero placeholders). compile: 'Result: 0 errors, 0 warnings'. self-test: 'RESULT: 199 passed, 0 failed of 199 assertions' with SELFTEST PASSED. Scanners on the same host: ruff check, ruff format --check, mypy --strict, bandit, shellcheck, shfmt -d and a full-history gitleaks scan all PASS. Coverage: census.py 88%, contracts.py 74%, total 83%.
+- **Notes:** Run from a fresh clone on the independent host rather than from the development tree, which is what the brief requires and what makes the result evidence of the committed state rather than of the working copy. The ledger at this point holds no non-BLOCKED open task: 56 tasks, 55 DONE and 1 BLOCKED (F-025, credential rotation, which only a human can perform).
 
 ### F-002 (S1, scoring) — UpdateSessionBaseline folds active_trigger_tick_volume into the tick-volume baseline unguarded, while the adjacent line explicitly guards the tick rate
 

@@ -990,6 +990,23 @@
       "commit": "2dcd832",
       "notes": "The ShowActiveSignalRows path is not covered by a new test and the ledger says so: it needs a running scan. Its defect-prone property - refresh before the branch on display mode - is already pinned structurally by the dashboard-refresh contract added with F-011. Two fixtures of mine failed first against correct code (a non-tie 'tie' in F-049, and a non-monotonic eviction fixture here); both were test errors and are recorded in the tests.",
       "blockedReason": null
+    },
+    {
+      "id": "E-6",
+      "severity": "S1",
+      "module": "verification",
+      "file": "n/a (fleet)",
+      "title": "Phase E final verification from a fresh clone on a host that did not develop the fixes",
+      "category": "deps",
+      "status": "DONE",
+      "hostUsed": "node2",
+      "discoveredBy": "Phase E",
+      "evidenceBefore": "Phase E verifies the final state, so it could not run until Phase C finished. It also needs a machine that did none of the development, and the earlier attempt established that this requires the gate to run inside the console user's Aqua launchd session (E-5).",
+      "fixSummary": "Fresh clone of the audit branch on node2 (app 5.0.4501, Wine 9.14, Rosetta 2 installed by E-4), with all four gates run inside the Aqua session via launchctl asuser. No fixes were developed on node2.",
+      "evidenceAfter": "commit 98c608c, branch audit/2026-09-15, 23 tracked files, working tree clean. contracts: 0 violations across 9. census: 0 open findings, 0 allowed (zero placeholders). compile: 'Result: 0 errors, 0 warnings'. self-test: 'RESULT: 199 passed, 0 failed of 199 assertions' with SELFTEST PASSED. Scanners on the same host: ruff check, ruff format --check, mypy --strict, bandit, shellcheck, shfmt -d and a full-history gitleaks scan all PASS. Coverage: census.py 88%, contracts.py 74%, total 83%.",
+      "commit": "98c608c",
+      "notes": "Run from a fresh clone on the independent host rather than from the development tree, which is what the brief requires and what makes the result evidence of the committed state rather than of the working copy. The ledger at this point holds no non-BLOCKED open task: 56 tasks, 55 DONE and 1 BLOCKED (F-025, credential rotation, which only a human can perform).",
+      "blockedReason": null
     }
   ]
 }

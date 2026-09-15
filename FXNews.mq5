@@ -437,7 +437,13 @@ struct CompositeContext
 
 struct SessionBaseline
 {
-   int sample_count;
+   // One counter per measured series. A shared counter let a bucket report a
+   // z-score as measured for a series that had never contributed a sample: the
+   // tick rate is only folded when it is actually known, so a spread-only bucket
+   // still reached the readiness threshold and published a neutral 0 for it.
+   int spread_samples;
+   int tick_rate_samples;
+   int tick_volume_samples;
    double spread_mean;
    double spread_var;
    double tick_rate_mean;
@@ -610,7 +616,9 @@ struct SymbolProfile
    double session_spread_z;
    double session_tick_rate_z;
    double session_tick_volume_z;
-   bool session_baseline_ready;
+   bool session_spread_z_ready;      // this session bucket measured spread often enough
+   bool session_tick_rate_z_ready;   // ... and likewise the tick rate
+   bool session_tick_volume_z_ready; // ... and likewise the tick volume
    SessionBucket session_index;
    bool tick_quality_available;      // measured from CopyTicks this scan
    double tick_sample_quality_score;
@@ -1504,6 +1512,81 @@ void SelfTestAvailabilityAndComposer()
    SelfTestGroup("availability and composer", before);
 }
 
+// A session bucket must publish a z-score only for a series it has actually
+// sampled. The three series are folded on different conditions (the tick rate
+// only when it is known, the tick volume only when the trigger timeframe has
+// data), so a single shared counter let a spread-only bucket report a
+// measured-looking neutral 0 for the other two. Regression test for that defect.
+void SelfTestSessionBaselines()
+{
+   int before = g_selftest_failed;
+
+   if(ArrayResize(g_profiles, 1) != 1 ||
+      ArrayResize(g_session_baselines, SESSION_COUNT) != SESSION_COUNT)
+   {
+      SelfTestCheck(false, "session baseline: synthetic allocation");
+      SelfTestGroup("session baselines", before);
+      return;
+   }
+
+   ResetProfile(g_profiles[0], "S0", PERIOD_M5, "M5");
+   ResetSessionBaselines();
+   g_profiles[0].session_index = SESSION_LONDON;
+   g_profiles[0].spread_pips = 1.2;
+   g_profiles[0].tick_rate_available = false;   // no rate reading this scan
+   g_profiles[0].has_trigger = false;           // and no tick volume either
+   g_profiles[0].active_trigger_tick_volume = 0.0;
+
+   for(int i = 0; i < MinBaselineSamples + 1; i++)
+      UpdateSessionBaseline(0);
+
+   if(UseSessionAwareBaselines)
+   {
+      SelfTestCheck(g_profiles[0].session_spread_z_ready,
+                    "session baseline: spread reaches readiness on spread samples");
+      SelfTestCheck(!g_profiles[0].session_tick_rate_z_ready,
+                    "session baseline: spread samples do not make the tick-rate z ready");
+      SelfTestCheck(!g_profiles[0].session_tick_volume_z_ready,
+                    "session baseline: spread samples do not make the tick-volume z ready");
+
+      // The tick rate and the trigger bar appear. One sample is not a baseline:
+      // a shared counter would declare both ready here and publish a neutral 0
+      // for series that had contributed nothing.
+      g_profiles[0].tick_rate_available = true;
+      g_profiles[0].tick_rate_per_sec = 1.5;
+      g_profiles[0].has_trigger = true;
+      g_profiles[0].active_trigger_tick_volume = 40.0;
+      UpdateSessionBaseline(0);
+      SelfTestCheck(!g_profiles[0].session_tick_rate_z_ready &&
+                    !g_profiles[0].session_tick_volume_z_ready,
+                    "session baseline: a single rate sample is not yet a baseline");
+
+      // Their own samples eventually reach readiness.
+      for(int i = 0; i < MinBaselineSamples + 1; i++)
+         UpdateSessionBaseline(0);
+      SelfTestCheck(g_profiles[0].session_tick_rate_z_ready &&
+                    g_profiles[0].session_tick_volume_z_ready,
+                    "session baseline: rate and volume reach readiness on their own samples");
+   }
+   else
+   {
+      SelfTestCheck(!g_profiles[0].session_spread_z_ready &&
+                    !g_profiles[0].session_tick_rate_z_ready &&
+                    !g_profiles[0].session_tick_volume_z_ready,
+                    "session baseline: disabled input publishes no readiness at all");
+   }
+
+   // Every bucket must start from a clean slate: a new session must not inherit
+   // another bucket's counts.
+   int london = BaselineIndex(0, SESSION_LONDON);
+   int asia = BaselineIndex(0, SESSION_ASIA);
+   SelfTestCheck(g_session_baselines[london].spread_samples > 0 &&
+                 g_session_baselines[asia].spread_samples == 0,
+                 "session baseline: counts are per session bucket");
+
+   SelfTestGroup("session baselines", before);
+}
+
 // The historical engine on a synthetic minute series with a known shape and
 // a deliberate ten-minute gap after bar 250.
 void SelfTestHistoricalEngine()
@@ -1719,6 +1802,7 @@ void RunSelfTest()
    SelfTestSymbolsAndTimeframes();
    SelfTestScoringHelpers();
    SelfTestAvailabilityAndComposer();
+   SelfTestSessionBaselines();
    SelfTestHistoricalEngine();
    SelfTestSignalHistory();
 
@@ -3619,7 +3703,9 @@ void ResetProfile(SymbolProfile &profile,
    profile.session_spread_z = 0.0;
    profile.session_tick_rate_z = 0.0;
    profile.session_tick_volume_z = 0.0;
-   profile.session_baseline_ready = false;
+   profile.session_spread_z_ready = false;
+   profile.session_tick_rate_z_ready = false;
+   profile.session_tick_volume_z_ready = false;
    profile.session_index = SESSION_OTHER;
    profile.tick_quality_available = false;
    profile.tick_sample_quality_score = 0.0;
@@ -4045,7 +4131,9 @@ void ClearProfileHistory(const int index)
       int baseline_index = BaselineIndex(index, session);
       if(baseline_index < 0 || baseline_index >= ArraySize(g_session_baselines))
          continue;
-      g_session_baselines[baseline_index].sample_count = 0;
+      g_session_baselines[baseline_index].spread_samples = 0;
+      g_session_baselines[baseline_index].tick_rate_samples = 0;
+      g_session_baselines[baseline_index].tick_volume_samples = 0;
       g_session_baselines[baseline_index].spread_mean = 0.0;
       g_session_baselines[baseline_index].spread_var = 0.0;
       g_session_baselines[baseline_index].tick_rate_mean = 0.0;
@@ -4053,7 +4141,9 @@ void ClearProfileHistory(const int index)
       g_session_baselines[baseline_index].tick_volume_mean = 0.0;
       g_session_baselines[baseline_index].tick_volume_var = 0.0;
    }
-   g_profiles[index].session_baseline_ready = false;
+   g_profiles[index].session_spread_z_ready = false;
+   g_profiles[index].session_tick_rate_z_ready = false;
+   g_profiles[index].session_tick_volume_z_ready = false;
    g_profiles[index].session_spread_z = 0.0;
    g_profiles[index].session_tick_rate_z = 0.0;
    g_profiles[index].session_tick_volume_z = 0.0;
@@ -4441,7 +4531,9 @@ void ResetSessionBaselines()
 {
    for(int i = 0; i < ArraySize(g_session_baselines); i++)
    {
-      g_session_baselines[i].sample_count = 0;
+      g_session_baselines[i].spread_samples = 0;
+      g_session_baselines[i].tick_rate_samples = 0;
+      g_session_baselines[i].tick_volume_samples = 0;
       g_session_baselines[i].spread_mean = 0.0;
       g_session_baselines[i].spread_var = 0.0;
       g_session_baselines[i].tick_rate_mean = 0.0;
@@ -4465,43 +4557,57 @@ void UpdateSessionBaseline(const int index)
       return;
 
    SessionBaseline baseline = g_session_baselines[baseline_index];
-   double tick_volume = g_profiles[index].active_trigger_tick_volume;
    bool tick_rate_known = g_profiles[index].tick_rate_available;
+   // The projected bar volume only exists once the trigger timeframe has data.
+   // Folding the initial or a stale value in would poison the tick-volume
+   // baseline exactly as folding an unknown tick rate in as zero would, so both
+   // series carry the same guard and each carries its own sample count.
+   bool tick_volume_known = g_profiles[index].has_trigger;
+   double tick_volume = g_profiles[index].active_trigger_tick_volume;
 
-   // Readiness is taken from the baseline the z-scores are actually measured
-   // against, and assigned once. Reading it from the post-update count meant that
-   // on the sample where the count crossed the threshold the flag went true while
-   // the z-scores still held the previous scan's values. Zeroing on the not-ready
-   // path also stops a new session bucket inheriting the previous bucket's scores.
-   bool baseline_ready = (baseline.sample_count >= MinBaselineSamples);
-   g_profiles[index].session_baseline_ready = baseline_ready;
-   if(!baseline_ready)
-   {
-      g_profiles[index].session_spread_z = 0.0;
-      g_profiles[index].session_tick_rate_z = 0.0;
-      g_profiles[index].session_tick_volume_z = 0.0;
-   }
-   else
-   {
-      g_profiles[index].session_spread_z = BaselineZ(g_profiles[index].spread_pips,
-                                                      baseline.spread_mean,
-                                                      baseline.spread_var);
-      g_profiles[index].session_tick_rate_z = (tick_rate_known ?
-                                               BaselineZ(g_profiles[index].tick_rate_per_sec,
-                                                         baseline.tick_rate_mean,
-                                                         baseline.tick_rate_var) : 0.0);
-      g_profiles[index].session_tick_volume_z = BaselineZ(tick_volume,
-                                                           baseline.tick_volume_mean,
-                                                           baseline.tick_volume_var);
-   }
+   // Readiness is taken per series from the baseline that series' z-score is
+   // actually measured against, and assigned before the update, so on the sample
+   // that crosses the threshold the flag and the z-score agree. One shared flag
+   // published a measured-looking 0 for a series that had never contributed a
+   // sample. Zeroing on the not-ready path also stops a new session bucket
+   // inheriting the previous bucket's scores.
+   bool spread_ready = (baseline.spread_samples >= MinBaselineSamples);
+   bool tick_rate_ready = (tick_rate_known && baseline.tick_rate_samples >= MinBaselineSamples);
+   bool tick_volume_ready = (tick_volume_known && baseline.tick_volume_samples >= MinBaselineSamples);
+   g_profiles[index].session_spread_z_ready = spread_ready;
+   g_profiles[index].session_tick_rate_z_ready = tick_rate_ready;
+   g_profiles[index].session_tick_volume_z_ready = tick_volume_ready;
 
-   UpdateRollingMeanVar(baseline.spread_mean, baseline.spread_var, baseline.sample_count, g_profiles[index].spread_pips);
-   // An unmeasured tick rate must not be folded into the baseline as zero.
+   g_profiles[index].session_spread_z = (spread_ready ?
+                                         BaselineZ(g_profiles[index].spread_pips,
+                                                   baseline.spread_mean,
+                                                   baseline.spread_var) : 0.0);
+   g_profiles[index].session_tick_rate_z = (tick_rate_ready ?
+                                            BaselineZ(g_profiles[index].tick_rate_per_sec,
+                                                      baseline.tick_rate_mean,
+                                                      baseline.tick_rate_var) : 0.0);
+   g_profiles[index].session_tick_volume_z = (tick_volume_ready ?
+                                              BaselineZ(tick_volume,
+                                                        baseline.tick_volume_mean,
+                                                        baseline.tick_volume_var) : 0.0);
+
+   UpdateRollingMeanVar(baseline.spread_mean, baseline.spread_var, baseline.spread_samples, g_profiles[index].spread_pips);
+   if(baseline.spread_samples < BaselineLookbackSamples)
+      baseline.spread_samples++;
+   // An unmeasured tick rate or tick volume must not be folded into the baseline
+   // as zero, and must not advance the other series' counters either.
    if(tick_rate_known)
-      UpdateRollingMeanVar(baseline.tick_rate_mean, baseline.tick_rate_var, baseline.sample_count, g_profiles[index].tick_rate_per_sec);
-   UpdateRollingMeanVar(baseline.tick_volume_mean, baseline.tick_volume_var, baseline.sample_count, tick_volume);
-   if(baseline.sample_count < BaselineLookbackSamples)
-      baseline.sample_count++;
+   {
+      UpdateRollingMeanVar(baseline.tick_rate_mean, baseline.tick_rate_var, baseline.tick_rate_samples, g_profiles[index].tick_rate_per_sec);
+      if(baseline.tick_rate_samples < BaselineLookbackSamples)
+         baseline.tick_rate_samples++;
+   }
+   if(tick_volume_known)
+   {
+      UpdateRollingMeanVar(baseline.tick_volume_mean, baseline.tick_volume_var, baseline.tick_volume_samples, tick_volume);
+      if(baseline.tick_volume_samples < BaselineLookbackSamples)
+         baseline.tick_volume_samples++;
+   }
 
    g_session_baselines[baseline_index] = baseline;
 }
@@ -5110,7 +5216,7 @@ void EvaluateExecutionQuality(const int index, const datetime now, ExecutionQual
    execution.median_spread_pips = (execution.median_available ? g_profiles[index].median_spread_pips : 0.0);
    execution.spread_ratio = (execution.median_available && execution.median_spread_pips > 0.0 ?
                              execution.spread_pips / execution.median_spread_pips : 0.0);
-   bool session_z_ready = (UseSessionAwareBaselines && g_profiles[index].session_baseline_ready);
+   bool session_z_ready = (UseSessionAwareBaselines && g_profiles[index].session_spread_z_ready);
    execution.spread_z_available = (session_z_ready || execution.median_available);
    execution.spread_z = (session_z_ready ? g_profiles[index].session_spread_z :
                          (execution.median_available ? g_profiles[index].spread_z : 0.0));
@@ -7953,7 +8059,7 @@ double TickRateZ(const int index, bool &available)
       return 0.0;
 
    available = true;
-   if(UseSessionAwareBaselines && g_profiles[index].session_baseline_ready)
+   if(UseSessionAwareBaselines && g_profiles[index].session_tick_rate_z_ready)
       return g_profiles[index].session_tick_rate_z;
 
    // FX tick feeds differ by broker, so the flat baseline is configurable.
@@ -7966,7 +8072,7 @@ double TickRateZ(const int index, bool &available)
 double TickVolumeDeviation(const int index, bool &available)
 {
    available = false;
-   if(UseSessionAwareBaselines && g_profiles[index].session_baseline_ready)
+   if(UseSessionAwareBaselines && g_profiles[index].session_tick_volume_z_ready)
    {
       available = true;
       return g_profiles[index].session_tick_volume_z;

@@ -1706,6 +1706,36 @@ void SelfTestImpulseAvailability()
    SelfTestGroup("impulse availability", before);
 }
 
+// hold_score is a measurement, not an imputation: a price inside the buffered
+// boundary has held outside for zero seconds, which is real information, and the
+// weight applies to a measured-but-not-passing box on purpose. This is a
+// characterisation test - no behaviour changed - so it passes both with and
+// without the clarity edit that made the assignment single-valued. It exists so
+// that a future change to the guard cannot silently turn the zero into a default.
+void SelfTestBreakoutHold()
+{
+   int before = g_selftest_failed;
+
+   BreakoutStructure inside;
+   BreakoutStructure outside;
+   // Inside the boundary: distance is negative, so the box has not broken and the
+   // price has held outside for zero seconds.
+   ComputeBreakoutStructure(DIR_UP, 0.0010, 0.0030, -0.0002, 0.0002, 1.80,
+                            1.1000, 1.1030, 1.0995, 1.1025, -1.0, -1.0, inside);
+   // Same bar, broken and held well past the full-hold horizon.
+   ComputeBreakoutStructure(DIR_UP, 0.0010, 0.0030, 0.0006, 0.0002, 1.80,
+                            1.1000, 1.1030, 1.0995, 1.1025,
+                            (double)FullHoldScoreSeconds * 2.0, -1.0, outside);
+
+   SelfTestCheck(inside.measured && !inside.pass && inside.hold_score == 0.0,
+                 "ComputeBreakoutStructure: an unbroken box is measured, not passing, zero hold");
+   SelfTestCheck(outside.measured && outside.pass && outside.hold_score > 0.99 &&
+                 outside.score > inside.score,
+                 "ComputeBreakoutStructure weights a sustained hold above a zero hold");
+
+   SelfTestGroup("breakout hold", before);
+}
+
 // The historical engine on a synthetic minute series with a known shape and
 // a deliberate ten-minute gap after bar 250.
 void SelfTestHistoricalEngine()
@@ -1924,6 +1954,7 @@ void RunSelfTest()
    SelfTestSessionBaselines();
    SelfTestExecutionGate();
    SelfTestImpulseAvailability();
+   SelfTestBreakoutHold();
    SelfTestHistoricalEngine();
    SelfTestSignalHistory();
 
@@ -5522,7 +5553,23 @@ void ComputeBreakoutStructure(const int direction,
                               const double reentered_seconds,
                               BreakoutStructure &breakout)
 {
+   // Fully initialise the output so this is a pure function of its arguments.
+   // It used to set only 'measured' and rely on every caller having reset the
+   // struct first: MQL5 does not zero the caller's struct, so a direct caller got
+   // whatever the memory held, and the "pure functions shared by the live scanner
+   // and the historical modes" promise in CLAUDE.md was not actually true. The
+   // self-test group "breakout hold" fails against the caller-dependent form.
+   breakout.pass = false;
    breakout.measured = true;
+   breakout.candle_measured = false;
+   breakout.score = 0.0;
+   breakout.compression_score = 0.0;
+   breakout.distance_score = 0.0;
+   breakout.close_location_score = 0.0;
+   breakout.hold_score = 0.0;
+   breakout.body_quality_score = 0.0;
+   breakout.wick_rejection_penalty = 0.0;
+   breakout.fakeout_penalty = 0.0;
 
    double range_atr = range_width / atr;
    double not_dead = SmoothStep(0.65, 1.80, range_atr);
@@ -5559,12 +5606,17 @@ void ComputeBreakoutStructure(const int direction,
       breakout.wick_rejection_penalty = Clamp01(rejection_wick / candle_range);
    }
 
-   if(outside_seconds >= 0.0)
-   {
-      breakout.hold_score = SmoothStep((double)MinHoldSecondsForHighScore,
-                                       (double)FullHoldScoreSeconds,
-                                       outside_seconds);
-   }
+   // A negative outside_seconds means the price is inside the buffered boundary,
+   // which is a measurement of "held outside for zero seconds", not missing data:
+   // UpdateOutsideTimers only reaches its classification when the trigger data
+   // exists, and EvaluateBreakoutStructure requires atr_trigger > 0 to get here.
+   // The zero is therefore weighted deliberately, and the branch is written out in
+   // full so the weight below and the value here are visibly one decision rather
+   // than a default that a future guard change could silently alter.
+   breakout.hold_score = (outside_seconds >= 0.0 ?
+                          SmoothStep((double)MinHoldSecondsForHighScore,
+                                     (double)FullHoldScoreSeconds,
+                                     outside_seconds) : 0.0);
 
    if(reentered_seconds >= 0.0 && reentered_seconds <= 30.0)
       breakout.fakeout_penalty = 1.0 - SmoothStep(0.0, 30.0, reentered_seconds);

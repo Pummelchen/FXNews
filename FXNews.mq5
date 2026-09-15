@@ -8467,20 +8467,36 @@ void PushSignalHistory(const int index,
       return;
    }
 
-   // Entries are held newest-first. Drop the oldest slot that has already met
-   // its minimum dwell rather than always dropping the tail, so a burst of new
-   // signals cannot sweep a row off the chart seconds after it appeared. If
-   // every slot is still within its dwell the tail goes anyway: capacity is a
-   // hard bound. Removing a slot from the tail region preserves newest-first
-   // order for everything that stays.
+   // Entries are held newest-first and contiguously from slot 0. Drop the oldest slot that
+   // has already met its minimum dwell rather than always dropping the tail, so a burst of
+   // new signals cannot sweep a row off the chart seconds after it appeared. If every slot
+   // is still within its dwell the tail goes anyway: capacity is a hard bound. Removing a
+   // slot from the tail region preserves newest-first order for everything that stays.
+   //
+   // The eviction slot is the list's own end when there is a free one. Scanning from the tail
+   // first used to return the last slot for a partly-filled list, so the shift below walked
+   // every empty slot above the last entry, copying nothing into nothing. The observable list
+   // was identical, which is why no behavioural test could catch it (F-042).
    int evict = SIGNAL_HISTORY_SIZE - 1;
-   for(int i = SIGNAL_HISTORY_SIZE - 1; i >= 0; i--)
+   bool full = true;
+   for(int i = 0; i < SIGNAL_HISTORY_SIZE; i++)
    {
-      if(!g_signal_history[i].used ||
-         local_time - g_signal_history[i].local_time >= SIGNAL_MESSAGE_MIN_VISIBLE_SECONDS)
+      if(!g_signal_history[i].used)
       {
          evict = i;
+         full = false;
          break;
+      }
+   }
+   if(full)
+   {
+      for(int i = SIGNAL_HISTORY_SIZE - 1; i >= 0; i--)
+      {
+         if(local_time - g_signal_history[i].local_time >= SIGNAL_MESSAGE_MIN_VISIBLE_SECONDS)
+         {
+            evict = i;
+            break;
+         }
       }
    }
 

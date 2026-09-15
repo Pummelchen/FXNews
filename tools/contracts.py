@@ -311,6 +311,35 @@ def check_score_ceiling_reasons(violations: list[Violation], indicator: str) -> 
         )
 
 
+def check_signal_history_shift(violations: list[Violation], indicator: str) -> None:
+    """PushSignalHistory must evict at the list's own end when it is partly filled (F-042).
+
+    A structural check because the defect has no observable behavioural difference: the
+    old tail-first scan returned the last slot for a partly-filled list, so the shift walked
+    every empty slot above the last entry, copying nothing into nothing. The resulting list
+    was byte-for-byte identical, which is exactly why no behavioural test could catch it.
+    What can be pinned is that the eviction slot is located by looking for a free slot
+    rather than assuming the array is full.
+    """
+    match = re.search(r"void PushSignalHistory\(.*?\n\}", indicator, re.DOTALL)
+    if match is None:
+        violations.append(
+            Violation(
+                "signal-history-shift", "PushSignalHistory not found in FXNews.mq5"
+            )
+        )
+        return
+    body = match.group(0)
+    if "!g_signal_history[i].used" not in body:
+        violations.append(
+            Violation(
+                "signal-history-shift",
+                "PushSignalHistory no longer looks for the first unused slot, so its shift can walk "
+                "past the end of a partly-filled list (F-042)",
+            )
+        )
+
+
 def main(argv: list[str]) -> int:
     """Run every contract check against the repository at argv[0] or the parent of tools/."""
     root = (
@@ -331,11 +360,12 @@ def main(argv: list[str]) -> int:
     check_ranking_disclosure(violations, indicator)
     check_diagnostics_object_count(violations, indicator)
     check_score_ceiling_reasons(violations, indicator)
+    check_signal_history_shift(violations, indicator)
 
     for violation in violations:
         print(violation.as_text())
     print(
-        f"contracts: {len(violations)} violation(s) across 8 contracts, root {root.name}"
+        f"contracts: {len(violations)} violation(s) across 9 contracts, root {root.name}"
     )
     return 1 if violations else 0
 

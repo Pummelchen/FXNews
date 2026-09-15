@@ -195,10 +195,12 @@ Leave previous releases' notes and performance tables alone.
   covering both, because the source is the reviewable artifact and the `.ex5` is
   the one users actually load into a terminal.
 - **Identity** the `#property version "M.mpp"` line in `FXNews.mq5` — currently
-  `"3.300"` for version 3.3. That is the only version literal; nothing else in the
-  tree restates it, and no separate `VERSION` file is introduced. MQL5 version
-  properties are two-component at most in practice, so the release tag here is
-  `v3.300`, taken verbatim from the property rather than re-derived.
+  `"3.300"` for version 3.3. **Nothing enforces it.** The same version is restated in
+  the `// FXNews version 3.3` comment on line 1 and in `README.md`, and
+  `tools/contracts.py` does not check the version triple, so a bump must touch all
+  three by hand. No separate `VERSION` file is introduced. MQL5 version properties
+  are two-component at most in practice, so the release tag is `v3.300`, taken
+  verbatim from the property rather than re-derived.
 - **Build** `tools/build-macos.sh`, which drives MetaEditor under the
   MetaQuotes-bundled Wine on macOS. It exits non-zero on a compiler error **or
   warning**, so a warning-free compile is already enforced and the release uses the

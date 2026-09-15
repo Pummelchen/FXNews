@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 55 | done 42 | open 13 | blocked 0 | S0:1 S1:13 S2:16 S3:25**
+**total 55 | done 44 | open 11 | blocked 0 | S0:1 S1:13 S2:16 S3:25**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -57,8 +57,8 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-036 | S3 | docs | START | `_fxnews-wiki/Project-Tracker.md:3,7,9` | The tracker describes itself as open tasks and known bugs while showing 120/120 done, and its line-number baseline still says version 2.3 |
 | F-037 | S3 | docs | START | `CLAUDE.md:24-30` | The documented version-bump procedure requires a deployment clone at MQL5/Indicators/FXNews/ that does not exist on this machine |
 | F-038 | S3 | scoring | START | `FXNews.mq5:4948-4949` | Unreachable guard: total_weight can never be zero |
-| F-039 | S3 | docs | START | `FXNews.mq5:396,5012-5041` | The age_free_score field comment understates what the value excludes |
-| F-040 | S3 | logic | START | `FXNews.mq5:5044-5045` | The hard 95 ceiling is the only cap that records no reason string |
+| F-039 | S3 | docs | DONE | `FXNews.mq5:396,5012-5041` | The age_free_score field comment understates what the value excludes |
+| F-040 | S3 | logic | DONE | `FXNews.mq5:5044-5045` | The hard 95 ceiling is the only cap that records no reason string |
 | F-041 | S3 | logic | START | `FXNews.mq5:6187,6410` | Redundant threshold re-check in IsConfirmedSignal for CONFIRM_BAR_CLOSE |
 | F-042 | S3 | dashboard | START | `FXNews.mq5:7261-7262` | PushSignalHistory's shift loop copies empty slots when the list is not yet full |
 | F-043 | S3 | logic | START | `FXNews.mq5:8198-8208` | SmoothStep silently re-orients reversed edges instead of surfacing a configuration error |
@@ -675,23 +675,29 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-039 (S3, docs) — The age_free_score field comment understates what the value excludes
 
-- **Status:** START  |  **Category:** docs  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** HEAD
 - **Location:** `FXNews.mq5:396,5012-5041`
 - **Discovered by:** Phase B L3 + scoring agent
 - **Evidence (before):**
 
   > ':396' documents age_free_score as 'displayed score before the event-age caps', but it is captured at ':5012' before the calendar-uncertainty, single-feature and elite caps are also applied (:5023-5042).
 
+- **Fix:** The age_free_score field comment now names every ceiling it precedes - age, calendar uncertainty, single-feature, elite and absolute - instead of only the event-age caps.
+- **Evidence (after):** New contract 'score-ceiling-reasons' checks the documented claim mechanically: it fails if the capture moves after the event-age caps. Verified by moving it after late_event_cap, which produces the F-039 violation, exit 1. Restored: 0 violations across 8 contracts.
+- **Notes:** A comment cannot be tested for truth, but the claim it makes can: that age_free_score is captured before the age caps is structural, and the contract asserts exactly that.
 
 ### F-040 (S3, logic) — The hard 95 ceiling is the only cap that records no reason string
 
-- **Status:** START  |  **Category:** docs  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** HEAD
 - **Location:** `FXNews.mq5:5044-5045`
 - **Discovered by:** Phase B L3 + scoring audit
 - **Evidence (before):**
 
   > Every other cap goes through ApplyScoreCap and appends to cap_reasons (:4963-5042); the final 'if(capped > 95.0) capped = 95.0' at ':5044-5045' bypasses the helper, so a 95 score's cap_reasons does not mention the ceiling.
 
+- **Fix:** The absolute 95 ceiling now runs through ApplyScoreCap with the reason 'absolute_score_ceiling', so it records a reason like every other ceiling. Behaviour below the cap is unchanged because ApplyScoreCap only appends when it binds.
+- **Evidence (after):** BEFORE (silent clamp restored): contracts reports two violations naming F-040, exit 1. AFTER: 0 violations across 8 contracts. Build 0/0; census 0; selftest 177 passed, 0 failed of 177.
+- **Notes:** The contract's first pattern was wrong ('double ComposeSignalScore' for a void function) and reported the function missing against correct code; the pattern was corrected rather than the check loosened.
 
 ### F-041 (S3, logic) — Redundant threshold re-check in IsConfirmedSignal for CONFIRM_BAR_CLOSE
 

@@ -2,7 +2,7 @@
 
 Independent pre-production audit of the whole repository, run on branch `audit/2026-09-15` from base commit `71ce980`, and merged by pull request only after the final phase passed. The authoritative ledger lives in the repository at `AUDIT/ledger.md` / `AUDIT/ledger.json`; this page mirrors it and the ledger wins on any conflict.
 
-**total 55 | done 42 | open 13 | blocked 0 | S0:1 S1:13 S2:16 S3:25**
+**total 55 | done 44 | open 11 | blocked 0 | S0:1 S1:13 S2:16 S3:25**
 
 ### Open items
 
@@ -14,8 +14,6 @@ Independent pre-production audit of the whole repository, run on branch `audit/2
 | F-036 | S3 | START | docs | The tracker describes itself as open tasks and known bugs while showing 120/120 done, and its line-number baseline still says version 2.3 |
 | F-037 | S3 | START | docs | The documented version-bump procedure requires a deployment clone at MQL5/Indicators/FXNews/ that does not exist on this machine |
 | F-038 | S3 | START | scoring | Unreachable guard: total_weight can never be zero |
-| F-039 | S3 | START | docs | The age_free_score field comment understates what the value excludes |
-| F-040 | S3 | START | logic | The hard 95 ceiling is the only cap that records no reason string |
 | F-041 | S3 | START | logic | Redundant threshold re-check in IsConfirmedSignal for CONFIRM_BAR_CLOSE |
 | F-042 | S3 | START | dashboard | PushSignalHistory's shift loop copies empty slots when the list is not yet full |
 | F-043 | S3 | START | logic | SmoothStep silently re-orients reversed edges instead of surfacing a configuration error |
@@ -72,3 +70,5 @@ _None._
 | F-033 | S3 | docs | The wiki Testing page hard-codes the assertion total on the same page that promises it never has to | Wiki commit 'docs: stop hard-coding the self-test assertion total'; Testing-and-Validation.md:11 and Architecture.md:49 reworded. |
 | F-034 | S3 | docs | Known-Limitations calls all three gates macOS-only, but census.py is cross-platform | grep for 'three gates' / 'All three' / 'macOS-only' across the wiki returns no stale claim; Testing-and-Validation.md gained a 'What CI Covers, and What It Cannot' section and its gate table lists contracts.py; Home.md's project-structure paragraph no longer says there is no CI workflow. |
 | F-035 | S3 | docs | Development-Guide both denies and documents the release process, and lists 'test' among commands that do not exist | Development-Guide.md:23 rewritten; the page now names the four gates, says which are cross-platform, and points at Release-Checklist.md for the release sequence. |
+| F-039 | S3 | docs | The age_free_score field comment understates what the value excludes | New contract 'score-ceiling-reasons' checks the documented claim mechanically: it fails if the capture moves after the event-age caps. Verified by moving it after late_event_cap, which produces the F-039 violation, exit 1. Restored: 0 violations across 8 contracts. |
+| F-040 | S3 | logic | The hard 95 ceiling is the only cap that records no reason string | BEFORE (silent clamp restored): contracts reports two violations naming F-040, exit 1. AFTER: 0 violations across 8 contracts. Build 0/0; census 0; selftest 177 passed, 0 failed of 177. |

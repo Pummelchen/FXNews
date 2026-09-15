@@ -204,6 +204,12 @@ input int AutotuneMinSignals = 100;
 #define MAX_RANGE_LOOKBACK 500
 #define MAX_ATR_PERIOD 200
 #define MAX_TICK_LOOKBACK_SECONDS 300
+// F-017: both of these had only a lower bound, so a large value silently disabled the
+// gate each one feeds - a quote-age of a day makes the freshness check vacuous, and a
+// hold requirement longer than any signal lives makes the hold bonus unreachable. The
+// ceilings match the other time-shaped inputs, which top out at one hour.
+#define MAX_QUOTE_AGE_SECONDS 3600
+#define MAX_FULL_HOLD_SCORE_SECONDS 3600
 #define MAX_CALENDAR_WINDOW_MINUTES 1440
 #define MAX_HISTORICAL_LOOKBACK_DAYS 365
 #define MAX_HISTORICAL_WARMUP_BARS 10000
@@ -953,6 +959,320 @@ int OnCalculate(const int rates_total,
    return rates_total;
 }
 
+// Every numeric input that ValidateInputs bounds-checks, gathered in one struct so the
+// checks can be exercised without a terminal: MQL5 input variables are read-only, so a
+// test cannot set them. ValidateInputs fills this from the inputs; the self-test builds
+// the same struct by hand and asserts that each rejection path actually rejects (F-023).
+struct ValidationInputs
+{
+   int    scan_interval_seconds;
+   int    display_update_seconds;
+   int    max_quote_age_seconds;
+   double min_display_confidence;
+   double strong_alert_confidence;
+   int    range_lookback_m1;
+   int    atr_period;
+   double breakout_buffer_atr;
+   double min_breakout_buffer_pips;
+   double max_spread_pips;
+   double max_spread_median_multiplier;
+   int    failed_signal_cooldown_seconds;
+   int    valid_signal_cooldown_seconds;
+   double max_spread_to_atr_ratio;
+   double max_tick_gap_seconds;
+   double max_spread_z_score;
+   int    min_hold_seconds_for_high_score;
+   int    full_hold_score_seconds;
+   double max_overextension_atr;
+   double min_impulse_z_for_signal;
+   double max_exhaustion_atr;
+   double min_basket_agreement_for_high_score;
+   double min_directional_edge_for_high_score;
+   double m5_reject_atr;
+   double m15_reject_atr;
+   double tick_rate_baseline_per_sec;
+   double tick_volume_ratio_scale;
+   int    calendar_lookback_minutes;
+   int    calendar_lookahead_minutes;
+   int    calendar_pre_news_block_minutes;
+   bool   ignore_rollover_time;
+   int    rollover_start_hour_server;
+   int    rollover_end_hour_server;
+   int    asia_start_hour_server;
+   int    asia_end_hour_server;
+   int    london_start_hour_server;
+   int    london_end_hour_server;
+   int    newyork_start_hour_server;
+   int    newyork_end_hour_server;
+   int    overlap_start_hour_server;
+   int    overlap_end_hour_server;
+   int    outcome_horizon_minutes1;
+   int    outcome_horizon_minutes2;
+   int    outcome_horizon_minutes3;
+   double outcome_target_atr;
+   double outcome_stop_atr;
+   int    baseline_lookback_samples;
+   int    min_baseline_samples;
+   double recent_list_min_score;
+   int    max_dashboard_rows;
+   int    signal_ttl_seconds;
+   int    copy_ticks_lookback_seconds;
+   int    min_copy_ticks_for_good_quality;
+   int    historical_lookback_days;
+   int    historical_step_minutes;
+   int    historical_warmup_bars;
+   int    historical_max_boundaries_per_profile;
+   int    historical_history_wait_seconds;
+   int    autotune_min_signals;
+};
+
+ValidationInputs CurrentValidationInputs()
+{
+   ValidationInputs in;
+   in.scan_interval_seconds = ScanIntervalSeconds;
+   in.display_update_seconds = DisplayUpdateSeconds;
+   in.max_quote_age_seconds = MaxQuoteAgeSeconds;
+   in.min_display_confidence = MinDisplayConfidence;
+   in.strong_alert_confidence = StrongAlertConfidence;
+   in.range_lookback_m1 = RangeLookbackM1;
+   in.atr_period = ATRPeriod;
+   in.breakout_buffer_atr = BreakoutBufferATR;
+   in.min_breakout_buffer_pips = MinBreakoutBufferPips;
+   in.max_spread_pips = MaxSpreadPips;
+   in.max_spread_median_multiplier = MaxSpreadMedianMultiplier;
+   in.failed_signal_cooldown_seconds = FailedSignalCooldownSeconds;
+   in.valid_signal_cooldown_seconds = ValidSignalCooldownSeconds;
+   in.max_spread_to_atr_ratio = MaxSpreadToAtrRatio;
+   in.max_tick_gap_seconds = MaxTickGapSeconds;
+   in.max_spread_z_score = MaxSpreadZScore;
+   in.min_hold_seconds_for_high_score = MinHoldSecondsForHighScore;
+   in.full_hold_score_seconds = FullHoldScoreSeconds;
+   in.max_overextension_atr = MaxOverextensionAtr;
+   in.min_impulse_z_for_signal = MinImpulseZForSignal;
+   in.max_exhaustion_atr = MaxExhaustionAtr;
+   in.min_basket_agreement_for_high_score = MinBasketAgreementForHighScore;
+   in.min_directional_edge_for_high_score = MinDirectionalEdgeForHighScore;
+   in.m5_reject_atr = M5RejectAtr;
+   in.m15_reject_atr = M15RejectAtr;
+   in.tick_rate_baseline_per_sec = TickRateBaselinePerSec;
+   in.tick_volume_ratio_scale = TickVolumeRatioScale;
+   in.calendar_lookback_minutes = CalendarLookbackMinutes;
+   in.calendar_lookahead_minutes = CalendarLookaheadMinutes;
+   in.calendar_pre_news_block_minutes = CalendarPreNewsBlockMinutes;
+   in.ignore_rollover_time = IgnoreRolloverTime;
+   in.rollover_start_hour_server = RolloverStartHourServer;
+   in.rollover_end_hour_server = RolloverEndHourServer;
+   in.asia_start_hour_server = AsiaStartHourServer;
+   in.asia_end_hour_server = AsiaEndHourServer;
+   in.london_start_hour_server = LondonStartHourServer;
+   in.london_end_hour_server = LondonEndHourServer;
+   in.newyork_start_hour_server = NewYorkStartHourServer;
+   in.newyork_end_hour_server = NewYorkEndHourServer;
+   in.overlap_start_hour_server = LondonNYOverlapStartHourServer;
+   in.overlap_end_hour_server = LondonNYOverlapEndHourServer;
+   in.outcome_horizon_minutes1 = OutcomeHorizonMinutes1;
+   in.outcome_horizon_minutes2 = OutcomeHorizonMinutes2;
+   in.outcome_horizon_minutes3 = OutcomeHorizonMinutes3;
+   in.outcome_target_atr = OutcomeTargetAtr;
+   in.outcome_stop_atr = OutcomeStopAtr;
+   in.baseline_lookback_samples = BaselineLookbackSamples;
+   in.min_baseline_samples = MinBaselineSamples;
+   in.recent_list_min_score = RecentListMinScore;
+   in.max_dashboard_rows = MaxDashboardRows;
+   in.signal_ttl_seconds = SignalTTLSeconds;
+   in.copy_ticks_lookback_seconds = CopyTicksLookbackSeconds;
+   in.min_copy_ticks_for_good_quality = MinCopyTicksForGoodQuality;
+   in.historical_lookback_days = HistoricalLookbackDays;
+   in.historical_step_minutes = HistoricalStepMinutes;
+   in.historical_warmup_bars = HistoricalWarmupBars;
+   in.historical_max_boundaries_per_profile = HistoricalMaxBoundariesPerProfile;
+   in.historical_history_wait_seconds = HistoricalHistoryWaitSeconds;
+   in.autotune_min_signals = AutotuneMinSignals;
+   return in;
+}
+
+// The numeric half of ValidateInputs, pure over its argument and setting the exact
+// operator-facing message. Validating a struct rather than the inputs is what makes
+// every rejection path reachable from the self-test.
+bool ValidateInputsCore(const ValidationInputs &in, string &reason)
+{
+   if(in.scan_interval_seconds < 1 || in.display_update_seconds < 1 || in.max_quote_age_seconds < 1 ||
+      in.max_quote_age_seconds > MAX_QUOTE_AGE_SECONDS)
+   {
+      reason = StringFormat("FXNews: scan, display, and quote-age inputs must be positive "
+                            "(MaxQuoteAgeSeconds at most %d).", MAX_QUOTE_AGE_SECONDS);
+      return false;
+   }
+
+   if(!MathIsValidNumber(in.min_display_confidence) || !MathIsValidNumber(in.strong_alert_confidence) ||
+      in.min_display_confidence < 1.0 || in.min_display_confidence > 99.0 ||
+      in.strong_alert_confidence < in.min_display_confidence || in.strong_alert_confidence > 100.0)
+   {
+      reason = "FXNews: confidence inputs are inconsistent.";
+      return false;
+   }
+
+   if(in.range_lookback_m1 < 10 || in.range_lookback_m1 > MAX_RANGE_LOOKBACK ||
+      in.atr_period < 2 || in.atr_period > MAX_ATR_PERIOD ||
+      !MathIsValidNumber(in.breakout_buffer_atr) || !MathIsValidNumber(in.min_breakout_buffer_pips) ||
+      in.breakout_buffer_atr < 0.0 || in.min_breakout_buffer_pips < 0.0)
+   {
+      reason = "FXNews: range and ATR inputs are outside supported bounds.";
+      return false;
+   }
+
+   if(!MathIsValidNumber(in.max_spread_pips) || !MathIsValidNumber(in.max_spread_median_multiplier) ||
+      in.max_spread_pips <= 0.0 || in.max_spread_median_multiplier <= 1.0)
+   {
+      reason = "FXNews: spread filters are outside supported bounds.";
+      return false;
+   }
+
+   if(in.failed_signal_cooldown_seconds < 1 || in.valid_signal_cooldown_seconds < 1)
+   {
+      reason = "FXNews: cooldown inputs must be positive.";
+      return false;
+   }
+
+   if(!MathIsValidNumber(in.max_spread_to_atr_ratio) || !MathIsValidNumber(in.max_tick_gap_seconds) ||
+      !MathIsValidNumber(in.max_spread_z_score) || in.max_spread_to_atr_ratio <= 0.0 ||
+      in.max_tick_gap_seconds <= 0.0 || in.max_spread_z_score <= 0.0)
+   {
+      reason = "FXNews: execution gate inputs must be positive.";
+      return false;
+   }
+
+   // A zero hold requirement would let the HYBRID confirmation clause pass on
+   // the first scan and silently turn it into CONFIRM_LIVE_TICK.
+   if(in.min_hold_seconds_for_high_score < 1 || in.full_hold_score_seconds < 1 ||
+      in.full_hold_score_seconds < in.min_hold_seconds_for_high_score ||
+      in.full_hold_score_seconds > MAX_FULL_HOLD_SCORE_SECONDS ||
+      !MathIsValidNumber(in.max_overextension_atr) || in.max_overextension_atr <= 0.0)
+   {
+      reason = StringFormat("FXNews: breakout-quality inputs are outside supported bounds "
+                            "(MinHoldSecondsForHighScore must be at least 1 and at most FullHoldScoreSeconds, "
+                            "which is itself at most %d).", MAX_FULL_HOLD_SCORE_SECONDS);
+      return false;
+   }
+
+   if(!MathIsValidNumber(in.min_impulse_z_for_signal) || !MathIsValidNumber(in.max_exhaustion_atr) ||
+      !MathIsValidNumber(in.min_basket_agreement_for_high_score) ||
+      !MathIsValidNumber(in.min_directional_edge_for_high_score) ||
+      in.min_impulse_z_for_signal < 0.0 || in.max_exhaustion_atr <= 0.0 ||
+      in.min_basket_agreement_for_high_score <= BASKET_AGREEMENT_SCORE_FLOOR ||
+      in.min_basket_agreement_for_high_score > 1.0 ||
+      in.min_directional_edge_for_high_score <= 0.0)
+   {
+      reason = StringFormat("FXNews: impulse or basket-quality inputs are outside supported bounds. "
+                            "MinBasketAgreementForHighScore must be above %.2f and at most 1.00; "
+                            "MinDirectionalEdgeForHighScore must be above 0.",
+                            BASKET_AGREEMENT_SCORE_FLOOR);
+      return false;
+   }
+
+   // Both reject levels are the lower edge of a rising ramp. A value at or above
+   // the upper edge would score moves against the signal as confirmation.
+   if(!MathIsValidNumber(in.m5_reject_atr) || !MathIsValidNumber(in.m15_reject_atr) ||
+      in.m5_reject_atr >= M5_CONTEXT_FULL_ATR || in.m15_reject_atr >= M15_CONTEXT_FULL_ATR ||
+      in.m5_reject_atr < -5.0 || in.m15_reject_atr < -5.0)
+   {
+      reason = StringFormat("FXNews: multi-timeframe reject levels are outside supported bounds. "
+                            "M5RejectAtr must be below %.2f and M15RejectAtr below %.2f.",
+                            M5_CONTEXT_FULL_ATR, M15_CONTEXT_FULL_ATR);
+      return false;
+   }
+
+   if(!MathIsValidNumber(in.tick_rate_baseline_per_sec) || !MathIsValidNumber(in.tick_volume_ratio_scale) ||
+      in.tick_rate_baseline_per_sec <= 0.0 || in.tick_rate_baseline_per_sec > 100.0 ||
+      in.tick_volume_ratio_scale <= 0.0 || in.tick_volume_ratio_scale > 10.0)
+   {
+      reason = "FXNews: tick-activity calibration inputs must be positive and within range.";
+      return false;
+   }
+
+   if(in.calendar_lookback_minutes < 0 || in.calendar_lookback_minutes > MAX_CALENDAR_WINDOW_MINUTES ||
+      in.calendar_lookahead_minutes < 0 || in.calendar_lookahead_minutes > MAX_CALENDAR_WINDOW_MINUTES ||
+      in.calendar_pre_news_block_minutes < 0 ||
+      in.calendar_pre_news_block_minutes > in.calendar_lookahead_minutes)
+   {
+      reason = StringFormat("FXNews: calendar minutes must be between 0 and %d, and CalendarPreNewsBlockMinutes "
+                            "must not exceed CalendarLookaheadMinutes.", MAX_CALENDAR_WINDOW_MINUTES);
+      return false;
+   }
+
+   // Equal hours would silently disable the rollover block while the input
+   // says it is on; sessions with equal hours are documented as disabled.
+   if(in.ignore_rollover_time && in.rollover_start_hour_server == in.rollover_end_hour_server)
+   {
+      reason = "FXNews: RolloverStartHourServer and RolloverEndHourServer must differ while IgnoreRolloverTime is on.";
+      return false;
+   }
+
+   if(in.rollover_start_hour_server < 0 || in.rollover_start_hour_server > 23 ||
+      in.rollover_end_hour_server < 0 || in.rollover_end_hour_server > 23 ||
+      in.asia_start_hour_server < 0 || in.asia_start_hour_server > 23 ||
+      in.asia_end_hour_server < 0 || in.asia_end_hour_server > 23 ||
+      in.london_start_hour_server < 0 || in.london_start_hour_server > 23 ||
+      in.london_end_hour_server < 0 || in.london_end_hour_server > 23 ||
+      in.newyork_start_hour_server < 0 || in.newyork_start_hour_server > 23 ||
+      in.newyork_end_hour_server < 0 || in.newyork_end_hour_server > 23 ||
+      in.overlap_start_hour_server < 0 || in.overlap_start_hour_server > 23 ||
+      in.overlap_end_hour_server < 0 || in.overlap_end_hour_server > 23)
+   {
+      reason = "FXNews: session and rollover hours must be between 0 and 23.";
+      return false;
+   }
+
+   if(in.outcome_horizon_minutes1 < 1 || in.outcome_horizon_minutes2 < in.outcome_horizon_minutes1 ||
+      in.outcome_horizon_minutes3 < in.outcome_horizon_minutes2 ||
+      in.outcome_horizon_minutes3 > MAX_OUTCOME_HORIZON_MINUTES ||
+      !MathIsValidNumber(in.outcome_target_atr) || !MathIsValidNumber(in.outcome_stop_atr) ||
+      in.outcome_target_atr <= 0.0 || in.outcome_stop_atr <= 0.0)
+   {
+      reason = "FXNews: outcome inputs are inconsistent.";
+      return false;
+   }
+
+   if(in.baseline_lookback_samples < 50 || in.baseline_lookback_samples > MAX_BASELINE_SAMPLES ||
+      in.min_baseline_samples < 10 || in.min_baseline_samples > in.baseline_lookback_samples)
+   {
+      reason = "FXNews: session baseline inputs are inconsistent.";
+      return false;
+   }
+
+   if(!MathIsValidNumber(in.recent_list_min_score) || in.recent_list_min_score < in.min_display_confidence ||
+      in.recent_list_min_score > 100.0)
+   {
+      reason = "FXNews: RecentListMinScore must be between MinDisplayConfidence and 100.";
+      return false;
+   }
+
+   if(in.max_dashboard_rows < 1 || in.max_dashboard_rows > DASHBOARD_MAX_OBJECTS - SIGNAL_FIRST_ROW_INDEX ||
+      in.signal_ttl_seconds < 30 || in.signal_ttl_seconds > 3600 ||
+      in.display_update_seconds > 3600 || in.scan_interval_seconds > 3600 ||
+      in.copy_ticks_lookback_seconds < 5 || in.copy_ticks_lookback_seconds > MAX_TICK_LOOKBACK_SECONDS ||
+      in.min_copy_ticks_for_good_quality < 1 || in.min_copy_ticks_for_good_quality > MAX_COPY_TICKS)
+   {
+      reason = "FXNews: dashboard, lifecycle, or tick-quality inputs are inconsistent.";
+      return false;
+   }
+
+   if(in.historical_lookback_days < 1 || in.historical_lookback_days > MAX_HISTORICAL_LOOKBACK_DAYS ||
+      in.historical_step_minutes < 1 || in.historical_step_minutes > 60 ||
+      in.historical_warmup_bars < 100 || in.historical_warmup_bars > MAX_HISTORICAL_WARMUP_BARS ||
+      in.historical_max_boundaries_per_profile < 10 ||
+      in.historical_max_boundaries_per_profile > MAX_HISTORICAL_BOUNDARIES_PER_PROFILE ||
+      in.historical_history_wait_seconds < 0 ||
+      in.historical_history_wait_seconds > MAX_HISTORICAL_HISTORY_WAIT_SECONDS ||
+      in.autotune_min_signals < 10)
+   {
+      reason = "FXNews: historical validation/autotune inputs are inconsistent.";
+      return false;
+   }
+
+   return true;
+}
+
 bool ValidateInputs()
 {
    if(StringLen(SymbolsToScan) <= 0 || StringLen(SymbolsToScan) > MAX_UNIQUE_SYMBOLS * (MAX_SYMBOL_TOKEN_LENGTH + 1) ||
@@ -965,172 +1285,16 @@ bool ValidateInputs()
       return false;
    }
 
-   if(ScanIntervalSeconds < 1 || DisplayUpdateSeconds < 1 || MaxQuoteAgeSeconds < 1)
+   string reason = "";
+   if(!ValidateInputsCore(CurrentValidationInputs(), reason))
    {
-      Print("FXNews: scan, display, and quote-age inputs must be positive.");
-      return false;
-   }
-
-   if(!MathIsValidNumber(MinDisplayConfidence) || !MathIsValidNumber(StrongAlertConfidence) ||
-      MinDisplayConfidence < 1.0 || MinDisplayConfidence > 99.0 ||
-      StrongAlertConfidence < MinDisplayConfidence || StrongAlertConfidence > 100.0)
-   {
-      Print("FXNews: confidence inputs are inconsistent.");
-      return false;
-   }
-
-   if(RangeLookbackM1 < 10 || RangeLookbackM1 > MAX_RANGE_LOOKBACK ||
-      ATRPeriod < 2 || ATRPeriod > MAX_ATR_PERIOD ||
-      !MathIsValidNumber(BreakoutBufferATR) || !MathIsValidNumber(MinBreakoutBufferPips) ||
-      BreakoutBufferATR < 0.0 || MinBreakoutBufferPips < 0.0)
-   {
-      Print("FXNews: range and ATR inputs are outside supported bounds.");
-      return false;
-   }
-
-   if(!MathIsValidNumber(MaxSpreadPips) || !MathIsValidNumber(MaxSpreadMedianMultiplier) ||
-      MaxSpreadPips <= 0.0 || MaxSpreadMedianMultiplier <= 1.0)
-   {
-      Print("FXNews: spread filters are outside supported bounds.");
-      return false;
-   }
-
-   if(FailedSignalCooldownSeconds < 1 || ValidSignalCooldownSeconds < 1)
-   {
-      Print("FXNews: cooldown inputs must be positive.");
-      return false;
-   }
-
-   if(!MathIsValidNumber(MaxSpreadToAtrRatio) || !MathIsValidNumber(MaxTickGapSeconds) ||
-      !MathIsValidNumber(MaxSpreadZScore) || MaxSpreadToAtrRatio <= 0.0 ||
-      MaxTickGapSeconds <= 0.0 || MaxSpreadZScore <= 0.0)
-   {
-      Print("FXNews: execution gate inputs must be positive.");
-      return false;
-   }
-
-   // A zero hold requirement would let the HYBRID confirmation clause pass on
-   // the first scan and silently turn it into CONFIRM_LIVE_TICK.
-   if(MinHoldSecondsForHighScore < 1 || FullHoldScoreSeconds < 1 ||
-      FullHoldScoreSeconds < MinHoldSecondsForHighScore || !MathIsValidNumber(MaxOverextensionAtr) ||
-      MaxOverextensionAtr <= 0.0)
-   {
-      Print("FXNews: breakout-quality inputs are outside supported bounds "
-            "(MinHoldSecondsForHighScore must be at least 1 and at most FullHoldScoreSeconds).");
+      Print(reason);
       return false;
    }
 
    if(!UseTechnicalBreakoutEngine && !UseImpulseBreakoutEngine)
    {
       Print("FXNews: enable at least one signal engine.");
-      return false;
-   }
-
-   if(!MathIsValidNumber(MinImpulseZForSignal) || !MathIsValidNumber(MaxExhaustionAtr) ||
-      !MathIsValidNumber(MinBasketAgreementForHighScore) || !MathIsValidNumber(MinDirectionalEdgeForHighScore) ||
-      MinImpulseZForSignal < 0.0 || MaxExhaustionAtr <= 0.0 ||
-      MinBasketAgreementForHighScore <= BASKET_AGREEMENT_SCORE_FLOOR ||
-      MinBasketAgreementForHighScore > 1.0 ||
-      MinDirectionalEdgeForHighScore <= 0.0)
-   {
-      PrintFormat("FXNews: impulse or basket-quality inputs are outside supported bounds. "
-                  "MinBasketAgreementForHighScore must be above %.2f and at most 1.00; "
-                  "MinDirectionalEdgeForHighScore must be above 0.",
-                  BASKET_AGREEMENT_SCORE_FLOOR);
-      return false;
-   }
-
-   // Both reject levels are the lower edge of a rising ramp. A value at or above
-   // the upper edge would score moves against the signal as confirmation.
-   if(!MathIsValidNumber(M5RejectAtr) || !MathIsValidNumber(M15RejectAtr) ||
-      M5RejectAtr >= M5_CONTEXT_FULL_ATR || M15RejectAtr >= M15_CONTEXT_FULL_ATR ||
-      M5RejectAtr < -5.0 || M15RejectAtr < -5.0)
-   {
-      PrintFormat("FXNews: multi-timeframe reject levels are outside supported bounds. "
-                  "M5RejectAtr must be below %.2f and M15RejectAtr below %.2f.",
-                  M5_CONTEXT_FULL_ATR, M15_CONTEXT_FULL_ATR);
-      return false;
-   }
-
-   if(!MathIsValidNumber(TickRateBaselinePerSec) || !MathIsValidNumber(TickVolumeRatioScale) ||
-      TickRateBaselinePerSec <= 0.0 || TickRateBaselinePerSec > 100.0 ||
-      TickVolumeRatioScale <= 0.0 || TickVolumeRatioScale > 10.0)
-   {
-      Print("FXNews: tick-activity calibration inputs must be positive and within range.");
-      return false;
-   }
-
-   if(CalendarLookbackMinutes < 0 || CalendarLookbackMinutes > MAX_CALENDAR_WINDOW_MINUTES ||
-      CalendarLookaheadMinutes < 0 || CalendarLookaheadMinutes > MAX_CALENDAR_WINDOW_MINUTES ||
-      CalendarPreNewsBlockMinutes < 0 || CalendarPreNewsBlockMinutes > CalendarLookaheadMinutes)
-   {
-      PrintFormat("FXNews: calendar minutes must be between 0 and %d, and CalendarPreNewsBlockMinutes "
-                  "must not exceed CalendarLookaheadMinutes.", MAX_CALENDAR_WINDOW_MINUTES);
-      return false;
-   }
-
-   // Equal hours would silently disable the rollover block while the input
-   // says it is on; sessions with equal hours are documented as disabled.
-   if(IgnoreRolloverTime && RolloverStartHourServer == RolloverEndHourServer)
-   {
-      Print("FXNews: RolloverStartHourServer and RolloverEndHourServer must differ while IgnoreRolloverTime is on.");
-      return false;
-   }
-
-   if(RolloverStartHourServer < 0 || RolloverStartHourServer > 23 ||
-      RolloverEndHourServer < 0 || RolloverEndHourServer > 23 ||
-      AsiaStartHourServer < 0 || AsiaStartHourServer > 23 || AsiaEndHourServer < 0 || AsiaEndHourServer > 23 ||
-      LondonStartHourServer < 0 || LondonStartHourServer > 23 || LondonEndHourServer < 0 || LondonEndHourServer > 23 ||
-      NewYorkStartHourServer < 0 || NewYorkStartHourServer > 23 || NewYorkEndHourServer < 0 || NewYorkEndHourServer > 23 ||
-      LondonNYOverlapStartHourServer < 0 || LondonNYOverlapStartHourServer > 23 ||
-      LondonNYOverlapEndHourServer < 0 || LondonNYOverlapEndHourServer > 23)
-   {
-      Print("FXNews: session and rollover hours must be between 0 and 23.");
-      return false;
-   }
-
-   if(OutcomeHorizonMinutes1 < 1 || OutcomeHorizonMinutes2 < OutcomeHorizonMinutes1 ||
-      OutcomeHorizonMinutes3 < OutcomeHorizonMinutes2 || OutcomeHorizonMinutes3 > MAX_OUTCOME_HORIZON_MINUTES ||
-      !MathIsValidNumber(OutcomeTargetAtr) || !MathIsValidNumber(OutcomeStopAtr) ||
-      OutcomeTargetAtr <= 0.0 || OutcomeStopAtr <= 0.0)
-   {
-      Print("FXNews: outcome inputs are inconsistent.");
-      return false;
-   }
-
-   if(BaselineLookbackSamples < 50 || BaselineLookbackSamples > MAX_BASELINE_SAMPLES || MinBaselineSamples < 10 ||
-      MinBaselineSamples > BaselineLookbackSamples)
-   {
-      Print("FXNews: session baseline inputs are inconsistent.");
-      return false;
-   }
-
-   if(!MathIsValidNumber(RecentListMinScore) || RecentListMinScore < MinDisplayConfidence ||
-      RecentListMinScore > 100.0)
-   {
-      Print("FXNews: RecentListMinScore must be between MinDisplayConfidence and 100.");
-      return false;
-   }
-
-   if(MaxDashboardRows < 1 || MaxDashboardRows > DASHBOARD_MAX_OBJECTS - SIGNAL_FIRST_ROW_INDEX ||
-      SignalTTLSeconds < 30 || SignalTTLSeconds > 3600 ||
-      DisplayUpdateSeconds > 3600 || ScanIntervalSeconds > 3600 ||
-      CopyTicksLookbackSeconds < 5 || CopyTicksLookbackSeconds > MAX_TICK_LOOKBACK_SECONDS ||
-      MinCopyTicksForGoodQuality < 1 || MinCopyTicksForGoodQuality > MAX_COPY_TICKS)
-   {
-      Print("FXNews: dashboard, lifecycle, or tick-quality inputs are inconsistent.");
-      return false;
-   }
-
-   if(HistoricalLookbackDays < 1 || HistoricalLookbackDays > MAX_HISTORICAL_LOOKBACK_DAYS ||
-      HistoricalStepMinutes < 1 || HistoricalStepMinutes > 60 || HistoricalWarmupBars < 100 ||
-      HistoricalWarmupBars > MAX_HISTORICAL_WARMUP_BARS || HistoricalMaxBoundariesPerProfile < 10 ||
-      HistoricalMaxBoundariesPerProfile > MAX_HISTORICAL_BOUNDARIES_PER_PROFILE ||
-      HistoricalHistoryWaitSeconds < 0 ||
-      HistoricalHistoryWaitSeconds > MAX_HISTORICAL_HISTORY_WAIT_SECONDS ||
-      AutotuneMinSignals < 10)
-   {
-      Print("FXNews: historical validation/autotune inputs are inconsistent.");
       return false;
    }
 
@@ -2021,6 +2185,118 @@ void SelfTestHistoryRefresh()
    SelfTestGroup("history refresh", before);
 }
 
+// One case per guard block in ValidateInputsCore, because the validation only ran at
+// OnInit and nothing could reach its rejection paths: the inputs are read-only, so
+// before the extraction no test could make one fail. Baseline first, then each field
+// perturbed out of range on its own, so a guard that quietly disappears is caught.
+void SelfTestInputValidation()
+{
+   int before = g_selftest_failed;
+
+   string reason = "";
+   ValidationInputs base = CurrentValidationInputs();
+   SelfTestCheck(ValidateInputsCore(base, reason),
+                 "input validation: the configured inputs are accepted");
+
+   ValidationInputs p = base;
+   p.scan_interval_seconds = 0;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: a non-positive scan interval is rejected");
+
+   p = base;
+   p.max_quote_age_seconds = MAX_QUOTE_AGE_SECONDS + 1;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: a quote age above the ceiling is rejected (F-017)");
+
+   p = base;
+   p.min_display_confidence = 0.5;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: a sub-1 display confidence is rejected");
+
+   p = base;
+   p.atr_period = 1;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: an ATR period below two is rejected");
+
+   p = base;
+   p.max_spread_pips = 0.0;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: a non-positive spread filter is rejected");
+
+   p = base;
+   p.failed_signal_cooldown_seconds = 0;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: a non-positive cooldown is rejected");
+
+   p = base;
+   p.max_spread_to_atr_ratio = 0.0;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: a non-positive execution gate is rejected");
+
+   p = base;
+   p.full_hold_score_seconds = MAX_FULL_HOLD_SCORE_SECONDS + 1;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: a hold requirement above the ceiling is rejected (F-017)");
+
+   p = base;
+   p.min_basket_agreement_for_high_score = 0.0;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: a basket floor at the score floor is rejected");
+
+   p = base;
+   p.m5_reject_atr = M5_CONTEXT_FULL_ATR;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: a reject level at the ramp ceiling is rejected");
+
+   p = base;
+   p.tick_rate_baseline_per_sec = 0.0;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: a non-positive tick calibration is rejected");
+
+   p = base;
+   p.calendar_pre_news_block_minutes = MAX_CALENDAR_WINDOW_MINUTES + 1;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: an out-of-range calendar window is rejected");
+
+   p = base;
+   p.ignore_rollover_time = true;
+   p.rollover_start_hour_server = p.rollover_end_hour_server;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: equal rollover hours are rejected while the block is on");
+
+   p = base;
+   p.asia_start_hour_server = 24;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: an hour above 23 is rejected");
+
+   p = base;
+   p.outcome_horizon_minutes2 = p.outcome_horizon_minutes1 - 1;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: unordered outcome horizons are rejected");
+
+   p = base;
+   p.min_baseline_samples = 5;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: too few baseline samples is rejected");
+
+   p = base;
+   p.recent_list_min_score = 0.0;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: a recent-list score below the display floor is rejected");
+
+   p = base;
+   p.max_dashboard_rows = 0;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: a zero dashboard row budget is rejected");
+
+   p = base;
+   p.autotune_min_signals = 1;
+   SelfTestCheck(!ValidateInputsCore(p, reason) && StringLen(reason) > 0,
+                 "input validation: too few autotune signals is rejected");
+
+   SelfTestGroup("input validation", before);
+}
+
 // Whether a historical sample supports the score's own ranking claim. The reports
 // used to assert that claim unconditionally, including on the AUTOTUNE run whose
 // buckets fell the wrong way, so the comparison is now a pure function with a test
@@ -2290,6 +2566,7 @@ void RunSelfTest()
    SelfTestComposerEngineGating();
    SelfTestSignalLifecycle();
    SelfTestHistoryRefresh();
+   SelfTestInputValidation();
    SelfTestRankingCheck();
    SelfTestHistoricalEngine();
    SelfTestSignalHistory();

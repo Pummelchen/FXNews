@@ -123,8 +123,26 @@ case "$MODE" in
 esac
 
 # Windows ini files are read as ANSI; the content is pure ASCII so no BOM is needed.
+#
+# The historical modes need the chart ON M1. Measured 2026-09-16 (F-054): the terminal builds the M1
+# series for the chart symbol only when the chart itself is on M1. On an M5 chart,
+# CopyRates(chart_symbol, PERIOD_M1, from, to) returns ERR_HISTORY_NOT_FOUND (4401), while every other
+# symbol in the list downloads on demand - so the one symbol that was always skipped was the chart
+# symbol, which is the symbol an operator is most likely to be evaluating. Chart=EURUSD on M5 gave
+# "Symbols 1/2" with EURUSD skipped; the same run on M1 gives "Symbols 2/2". The plain self-test does
+# not read history, so it keeps the M5 chart it was written against.
+#
+# An M1 chart is necessary but not sufficient for a long window: the chart symbol's M1 series holds
+# only what the chart itself loaded, so a 2900-day request for the chart symbol still fails while
+# every other symbol downloads on demand. For windows far beyond the chart's own load, point the
+# chart at a symbol OUTSIDE the evaluation list with FXNEWS_CHART_SYMBOL, and all of them load.
+# Measured: chart=EURUSD on M1 gave 7/7 for a 90-day window and 6/7 for 2900 days, with EURUSD the
+# one skipped; the 2900-day window with the chart on EURGBP (not in the list) gave 7/7.
+CHART_PERIOD="M5"
+[ "$MODE" != "selftest" ] && CHART_PERIOD="M1"
+CHART_SYMBOL="${FXNEWS_CHART_SYMBOL:-EURUSD}"
 CONFIG="$WORK/fxnews-selftest.ini"
-printf '[StartUp]\r\nSymbol=EURUSD\r\nPeriod=M5\r\nScript=FXNewsSelfTest\r\nScriptParameters=FXNewsHarness.set\r\nShutdownTerminal=1\r\n' >"$CONFIG"
+printf '[StartUp]\r\nSymbol=%s\r\nPeriod=%s\r\nScript=FXNewsSelfTest\r\nScriptParameters=FXNewsHarness.set\r\nShutdownTerminal=1\r\n' "$CHART_SYMBOL" "$CHART_PERIOD" >"$CONFIG"
 
 LOG_DIR="$MT5/MQL5/Logs"
 STAMP="$(date +%Y%m%d)"

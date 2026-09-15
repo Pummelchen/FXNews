@@ -1969,6 +1969,52 @@ void SelfTestSignalLifecycle()
    SelfTestGroup("signal lifecycle", before);
 }
 
+// The visible signal history backs g_signal_history_dirty, the flag that schedules
+// the whole dashboard update, so consuming that flag must not depend on which
+// display mode happens to be drawing. The call site that guarantees the refresh
+// runs unconditionally is pinned structurally by tools/contracts.py, because
+// driving UpdateDashboard here would create chart objects and could overwrite the
+// harness's own verdict label.
+void SelfTestHistoryRefresh()
+{
+   int before = g_selftest_failed;
+
+   if(ArrayResize(g_profiles, 1) != 1)
+   {
+      SelfTestCheck(false, "history refresh: synthetic allocation");
+      SelfTestGroup("history refresh", before);
+      return;
+   }
+
+   ResetProfile(g_profiles[0], "S0", PERIOD_M5, "M5");
+   ClearSignalHistory();
+   g_signal_history[0].used = true;
+   g_signal_history[0].symbol = "S0";
+   g_signal_history[0].timeframe_label = "M5";
+   g_signal_history[0].direction = DIR_UP;
+   g_signal_history[0].local_time = D'2026.09.15 10:00';
+   g_signal_history[0].score = 90.0;
+   g_signal_history[0].text = "S0 M5 UP 90%";
+   g_signal_history[0].reason = "reason";
+   g_signal_history_count = 1;
+
+   g_signal_history_dirty = true;
+   RefreshVisibleSignalHistoryIfDue();
+   SelfTestCheck(!g_signal_history_dirty,
+                 "history refresh: the dirty flag is consumed by the refresh");
+   SelfTestCheck(g_visible_signal_history_count == 1,
+                 "history refresh: a displayable entry reaches the visible list");
+
+   // The list threshold is stricter than the live display threshold.
+   g_signal_history[0].score = 0.0;
+   g_signal_history_dirty = true;
+   RefreshVisibleSignalHistoryIfDue();
+   SelfTestCheck(g_visible_signal_history_count == 0,
+                 "history refresh: a sub-threshold entry is not published to the list");
+
+   SelfTestGroup("history refresh", before);
+}
+
 // The historical engine on a synthetic minute series with a known shape and
 // a deliberate ten-minute gap after bar 250.
 void SelfTestHistoricalEngine()
@@ -2191,6 +2237,7 @@ void RunSelfTest()
    SelfTestExhaustionAvailability();
    SelfTestComposerEngineGating();
    SelfTestSignalLifecycle();
+   SelfTestHistoryRefresh();
    SelfTestHistoricalEngine();
    SelfTestSignalHistory();
 
@@ -7407,6 +7454,13 @@ void UpdateDashboard()
    int first_row = row;
    int max_row = DashboardSignalRowLimit();
 
+   // Maintain the visible history on every update, not only when it is the thing
+   // being drawn. It backs g_signal_history_dirty, the flag that schedules this whole
+   // function: leaving it unrefreshed while active rows rendered kept the flag set,
+   // so ScanAll rebuilt the entire dashboard on every scan and DisplayUpdateSeconds
+   // had no effect at all.
+   RefreshVisibleSignalHistoryIfDue();
+
    if(ShowActiveSignalRows)
    {
       DashboardSignal signals[];
@@ -7419,10 +7473,9 @@ void UpdateDashboard()
       }
    }
 
-   // With active rows disabled this is the only signal display, so it always runs.
+   // With active rows disabled the history list is the only signal display.
    if(row == first_row)
    {
-      RefreshVisibleSignalHistoryIfDue();
       for(int i = 0; i < g_visible_signal_history_count && row < max_row; i++)
       {
          SetDashboardRow(row, g_visible_signal_history[i].text, g_visible_signal_history[i].reason, clrWhite);

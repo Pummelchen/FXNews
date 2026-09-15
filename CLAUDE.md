@@ -42,14 +42,16 @@ Alongside the build, run the other two gates:
 
 ```bash
 tools/census.py            # dead-code and placeholder census, exits non-zero on any finding
+tools/contracts.py         # cross-file string contracts between the indicator, the harness and the gates
 ./tools/selftest-macos.sh  # self-test in the terminal; --validation / --autotune run
                            # a short historical pass and require a complete report
 ```
 
 The self-test covers the pure helpers, the shared composer, the historical engine on
-synthetic bars and the recent-signal list. It does not cover the live signal lifecycle,
+synthetic bars, the recent-signal list and the live signal lifecycle. It does not cover
 correlation grouping, alert dispatch or dashboard rendering; those are verified by manual
-runtime observation.
+runtime observation. `tools/contracts.py` covers the string contracts between the
+indicator, the harness and these scripts, which no compiler sees.
 
 ## Version bumps touch three locations plus the wiki
 

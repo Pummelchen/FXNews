@@ -44,6 +44,12 @@ tools/census.py
 runs the dead-code and placeholder census (Python 3.14) and exits non-zero on any finding, and
 
 ```bash
+tools/contracts.py
+```
+
+checks the string contracts that tie the indicator, the harness and the gate scripts together — verdict labels, the result line, the report fields the gate parses and the harness install path — plus one structural invariant the compiler cannot see. It exits non-zero on any violation, and `./tools/selftest-macos.sh` runs it before compiling.
+
+```bash
 ./tools/selftest-macos.sh
 ```
 

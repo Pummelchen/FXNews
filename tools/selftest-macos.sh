@@ -51,6 +51,13 @@ fi
 # shellcheck disable=SC1003  # tr '\\' is a literal backslash, not a quote escape
 to_win() { printf 'Z:%s' "$(printf '%s' "$1" | tr '/' '\\')"; }
 
+# The cross-file string contracts first: they cost nothing and a broken one turns
+# this gate into a timeout or a silent pass, which is exactly what it is here to
+# prevent. Run before any compile so the failure is reported as a contract, not as
+# a missing journal line.
+echo "selftest: checking cross-file contracts"
+python3 "$HERE/contracts.py" "$ROOT" || { echo "selftest: a cross-file contract is broken; see above" >&2; exit 2; }
+
 echo "selftest: compiling indicator"
 "$HERE/build-macos.sh" "$ROOT/FXNews.mq5" || exit 2
 echo "selftest: compiling harness script"

@@ -1041,6 +1041,23 @@
       "commit": "6e59498",
       "notes": "DISPROVES A HYPOTHESIS OF MINE. I had suggested the 75-79 bucket looked inverted because events capped down by weak_hold_cap (74) and overextended_cap (75) concentrate there. That does not explain the result: bucketing on the score before ANY cap applied fails in the same direction and by a larger margin. The lead was wrong and is recorded as wrong. WHAT THIS DOES NOT ESTABLISH: that the score is broken. The product documents the score as an event-quality ranking, not a probability or a trade instruction, and nothing here tests event quality - only whether it ranks forward return. The measured statement is narrower: on one symbol over 48.8 days the score did not rank 30m outcomes, and the caps are not why. Whether the score SHOULD rank returns, and whether a longer or multi-symbol sample would show an edge this one cannot, remain human decisions. No weights were changed, because tuning them against the sample that exposed the failure is curve-fitting.",
       "blockedReason": null
+    },
+    {
+      "id": "F-054",
+      "severity": "S3",
+      "module": "reporting",
+      "file": "FXNews.mq5 (historical symbol skip message)",
+      "title": "The historical skip message advised a remedy that was measured not to work",
+      "category": "docs",
+      "status": "DONE",
+      "hostUsed": "node3",
+      "discoveredBy": "attempting to give F-053's conclusion a second symbol",
+      "evidenceBefore": "The message read 'has no M1 history in the window (error %d) and is skipped; open a chart of the symbol so the terminal downloads it, then re-run.' On the audit terminal EURUSD triggers it while being the CHART symbol, so following the advice is impossible: it is already what the operator would have done.",
+      "fixSummary": "The message now names the window, the error, the wait already spent, and the Symbols dialog as the place to check, and points at the report's Symbols line. It no longer asserts a remedy that was measured not to work.",
+      "evidenceAfter": "The new text appears verbatim in a --validation run: 'EURUSD returned no M1 bars for the 90-day window (error 4401) after waiting up to 60 s, and is skipped. Check the symbol's history in the terminal's Symbols dialog (Ctrl+U) and re-run; the report's Symbols line names how many were usable.' Build 0/0; census 0; contracts 0/9; selftest 218/0.",
+      "commit": "9ca78e0",
+      "notes": "ROOT CAUSE NOT ESTABLISHED, and the entry says so. Measured and ruled out: the M1 .hcc files exist for both symbols (2018-2026 under Bases/ICMarketsSC-MT5-4/history), so it is not missing data on disk; SymbolSelect(symbol, true) before the request changes nothing; raising the history wait from 60 s to 420 s changes nothing; swapping which symbol is requested first changes nothing, so it is EURUSD specifically. GBPUSD returns 50 000 bars in the same window so the code path works. The engine's behaviour is correct and safe either way - skip, report, continue - which is why only the message changed. The SymbolSelect change was made to test the hypothesis, did not fix it, and was REVERTED rather than kept unproven. CONSEQUENCE FOR F-053: its ranking conclusion is single-symbol (GBPUSD, 48.8 days) and both the ledger and the changelog say so; the second symbol could not be obtained on this terminal.",
+      "blockedReason": null
     }
   ]
 }

@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 59 | done 58 | open 0 | blocked 1 | S0:1 S1:14 S2:18 S3:26**
+**total 60 | done 59 | open 0 | blocked 1 | S0:1 S1:14 S2:18 S3:27**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -68,6 +68,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-044 | S3 | docs | DONE | `FXNews.mq5:4401-4425` | The ATR definition (simple mean of true range, not Wilder smoothing) is undocumented |
 | F-045 | S3 | tooling | DONE | `tools/build-macos.sh:150-156` | --install creates the destination directory silently and never verifies the terminal can load the binary |
 | F-051 | S3 | testing | DONE | `FXNews.mq5 (UpdateDashboard, SetDashboardRow, DeleteDashboardRowsFrom)` | Dashboard row rendering and the signal-history eviction dwell still have no automated coverage |
+| F-054 | S3 | reporting | DONE | `FXNews.mq5 (historical symbol skip message)` | The historical skip message advised a remedy that was measured not to work |
 
 ## Detail
 
@@ -832,3 +833,16 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 - **Fix:** Dashboard row creation, the label budget and stale-row deletion are covered by running against the harness's real chart; the history eviction rule moved into a pure SignalHistoryEvictionSlot with four boundary assertions. The F-042 contract was repointed at the new function.
 - **Evidence (after):** BEFORE A (deletion off-by-one): 197 passed, 2 failed of 199, exit 1. BEFORE B (dwell ignored): 198 passed, 1 failed of 199, exit 1. AFTER: 199 passed, 0 failed of 199. Assertions 191 -> 199. Build 0/0; census 0; contracts 0/9. SECOND PASS: new self-test group 'active signal rows', 14 assertions, three mutations each failing exactly one assertion (217/1 of 218). Assertions 204 -> 218.
 - **Notes:** The ShowActiveSignalRows path is not covered by a new test and the ledger says so: it needs a running scan. Its defect-prone property - refresh before the branch on display mode - is already pinned structurally by the dashboard-refresh contract added with F-011. Two fixtures of mine failed first against correct code (a non-tie 'tie' in F-049, and a non-monotonic eviction fixture here); both were test errors and are recorded in the tests. RESOLVED PROPERLY in a second pass: the two decisions the branch makes are now pure functions with fourteen assertions and three separate fail-before mutations, so the gap this entry recorded is closed for selection and ordering. Still uncovered and stated as such: the row text and tooltip builders, which read profile globals and are exercised only by rendering.
+
+### F-054 (S3, reporting) — The historical skip message advised a remedy that was measured not to work
+
+- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** 9ca78e0
+- **Location:** `FXNews.mq5 (historical symbol skip message)`
+- **Discovered by:** attempting to give F-053's conclusion a second symbol
+- **Evidence (before):**
+
+  > The message read 'has no M1 history in the window (error %d) and is skipped; open a chart of the symbol so the terminal downloads it, then re-run.' On the audit terminal EURUSD triggers it while being the CHART symbol, so following the advice is impossible: it is already what the operator would have done.
+
+- **Fix:** The message now names the window, the error, the wait already spent, and the Symbols dialog as the place to check, and points at the report's Symbols line. It no longer asserts a remedy that was measured not to work.
+- **Evidence (after):** The new text appears verbatim in a --validation run: 'EURUSD returned no M1 bars for the 90-day window (error 4401) after waiting up to 60 s, and is skipped. Check the symbol's history in the terminal's Symbols dialog (Ctrl+U) and re-run; the report's Symbols line names how many were usable.' Build 0/0; census 0; contracts 0/9; selftest 218/0.
+- **Notes:** ROOT CAUSE NOT ESTABLISHED, and the entry says so. Measured and ruled out: the M1 .hcc files exist for both symbols (2018-2026 under Bases/ICMarketsSC-MT5-4/history), so it is not missing data on disk; SymbolSelect(symbol, true) before the request changes nothing; raising the history wait from 60 s to 420 s changes nothing; swapping which symbol is requested first changes nothing, so it is EURUSD specifically. GBPUSD returns 50 000 bars in the same window so the code path works. The engine's behaviour is correct and safe either way - skip, report, continue - which is why only the message changed. The SymbolSelect change was made to test the hypothesis, did not fix it, and was REVERTED rather than kept unproven. CONSEQUENCE FOR F-053: its ranking conclusion is single-symbol (GBPUSD, 48.8 days) and both the ledger and the changelog say so; the second symbol could not be obtained on this terminal.

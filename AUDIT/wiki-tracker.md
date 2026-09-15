@@ -2,7 +2,7 @@
 
 Independent pre-production audit of the whole repository, run on branch `audit/2026-09-15` from base commit `71ce980`, and merged by pull request only after the final phase passed. The authoritative ledger lives in the repository at `AUDIT/ledger.md` / `AUDIT/ledger.json`; this page mirrors it and the ledger wins on any conflict.
 
-**total 59 | done 58 | open 0 | blocked 1 | S0:1 S1:14 S2:18 S3:26**
+**total 60 | done 59 | open 0 | blocked 1 | S0:1 S1:14 S2:18 S3:27**
 
 ### Open items
 
@@ -76,3 +76,4 @@ _None._
 | F-044 | S3 | docs | The ATR definition (simple mean of true range, not Wilder smoothing) is undocumented | New self-test group 'atr definition' on a three-bar series with true ranges 14, 5, 4: simple mean 7.667 against Wilder 8.667. BEFORE (genuine Wilder recursion substituted): 181 passed, 1 failed of 182, exit 1. AFTER: 182 passed, 0 failed. Build 0/0; census 0; contracts 0/9. |
 | F-045 | S3 | tooling | --install creates the destination directory silently and never verifies the terminal can load the binary | Against the real prefix: first run 'install target absent, creating: ...' then 'installed FXNews.ex5 ... (246424 bytes, verified)' with the installed file measuring 246424 bytes against a 246424-byte source; second run reports 'install target exists' and verifies again. The size guard was reproduced in isolation with a 3-byte file against a 10-byte source and reports REJECTED, exiting 2. shfmt -d and shellcheck tools/*.sh are clean. |
 | F-051 | S3 | testing | Dashboard row rendering and the signal-history eviction dwell still have no automated coverage | BEFORE A (deletion off-by-one): 197 passed, 2 failed of 199, exit 1. BEFORE B (dwell ignored): 198 passed, 1 failed of 199, exit 1. AFTER: 199 passed, 0 failed of 199. Assertions 191 -> 199. Build 0/0; census 0; contracts 0/9. SECOND PASS: new self-test group 'active signal rows', 14 assertions, three mutations each failing exactly one assertion (217/1 of 218). Assertions 204 -> 218. |
+| F-054 | S3 | reporting | The historical skip message advised a remedy that was measured not to work | The new text appears verbatim in a --validation run: 'EURUSD returned no M1 bars for the 90-day window (error 4401) after waiting up to 60 s, and is skipped. Check the symbol's history in the terminal's Symbols dialog (Ctrl+U) and re-run; the report's Symbols line names how many were usable.' Build 0/0; census 0; contracts 0/9; selftest 218/0. |

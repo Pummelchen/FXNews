@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 55 | done 49 | open 6 | blocked 0 | S0:1 S1:13 S2:16 S3:25**
+**total 55 | done 51 | open 4 | blocked 0 | S0:1 S1:13 S2:16 S3:25**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -59,11 +59,11 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-038 | S3 | scoring | DONE | `FXNews.mq5:4948-4949` | Unreachable guard: total_weight can never be zero |
 | F-039 | S3 | docs | DONE | `FXNews.mq5:396,5012-5041` | The age_free_score field comment understates what the value excludes |
 | F-040 | S3 | logic | DONE | `FXNews.mq5:5044-5045` | The hard 95 ceiling is the only cap that records no reason string |
-| F-041 | S3 | logic | START | `FXNews.mq5:6187,6410` | Redundant threshold re-check in IsConfirmedSignal for CONFIRM_BAR_CLOSE |
+| F-041 | S3 | logic | DONE | `FXNews.mq5:6187,6410` | The BAR_CLOSE confirmation rule was unreachable by any test, and its threshold clause is redundant |
 | F-042 | S3 | dashboard | DONE | `FXNews.mq5:7261-7262` | PushSignalHistory's shift loop copies empty slots when the list is not yet full |
 | F-043 | S3 | logic | DONE | `FXNews.mq5:8198-8208` | DISPROVED: SmoothStep's edge re-orientation is a tested fix for a pre-1.4 defect |
 | F-044 | S3 | docs | DONE | `FXNews.mq5:4401-4425` | The ATR definition (simple mean of true range, not Wilder smoothing) is undocumented |
-| F-045 | S3 | tooling | START | `tools/build-macos.sh:150-156` | --install creates the destination directory silently and never verifies the terminal can load the binary |
+| F-045 | S3 | tooling | DONE | `tools/build-macos.sh:150-156` | --install creates the destination directory silently and never verifies the terminal can load the binary |
 
 ## Detail
 
@@ -703,15 +703,17 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 - **Evidence (after):** BEFORE (silent clamp restored): contracts reports two violations naming F-040, exit 1. AFTER: 0 violations across 8 contracts. Build 0/0; census 0; selftest 177 passed, 0 failed of 177.
 - **Notes:** The contract's first pattern was wrong ('double ComposeSignalScore' for a void function) and reported the function missing against correct code; the pattern was corrected rather than the check loosened.
 
-### F-041 (S3, logic) — Redundant threshold re-check in IsConfirmedSignal for CONFIRM_BAR_CLOSE
+### F-041 (S3, logic) — The BAR_CLOSE confirmation rule was unreachable by any test, and its threshold clause is redundant
 
-- **Status:** START  |  **Category:** dead  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** dead  |  **Host:** node3  |  **Commit:** e0f7cbf
 - **Location:** `FXNews.mq5:6187,6410`
 - **Discovered by:** Phase B L2 + dashboard audit
 - **Evidence (before):**
 
   > ':6187' re-tests MeetsThreshold(score, MinDisplayConfidence) although every call site already gated on it (:6410 and the candidate path), so the branch is unreachable in the failing direction.
 
+- **Fix:** The rule moved into a pure BarCloseConfirms(candidate_bar_time, trigger_bar_time, score, min_confidence), which was the only way to exercise it because SignalConfirmationMode is an input variable. The threshold clause is kept: it is redundant at both call sites (PickBestDirection already required MinDisplayConfidence, and the reversal path requires the stronger StrongAlertConfidence) but it is what makes the branch mean 'still valid at the bar close' on its own terms, and it fails safe.
+- **Evidence (after):** Four assertions, the load-bearing one being that a surviving candidate below the floor does NOT confirm. BEFORE (threshold clause dropped): 180 passed, 1 failed of 181, exit 1. AFTER: 181 passed, 0 failed of 181. Build 0/0; census 0; contracts 0/9.
 
 ### F-042 (S3, dashboard) — PushSignalHistory's shift loop copies empty slots when the list is not yet full
 
@@ -754,11 +756,13 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-045 (S3, tooling) — --install creates the destination directory silently and never verifies the terminal can load the binary
 
-- **Status:** START  |  **Category:** docs  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** e28ad4b
 - **Location:** `tools/build-macos.sh:150-156`
 - **Discovered by:** Phase B L7
 - **Evidence (before):**
 
   > ':152' runs 'mkdir -p "$DEST"' and ':153' copies the .ex5, printing success. CLAUDE.md warns that a stale .ex5 beside a current .mq5 is a trap because MT5 loads the binary, but nothing in the workflow reports which one the terminal will see.
 
-- **Notes:** A post-install check that the copied .ex5 is newer than its .mq5, or at least an explicit printed warning, closes the trap.
+- **Fix:** --install now reports whether the target directory existed or was created, compares the installed file's length with the source's and exits 2 on a mismatch, and warns when a stale .mq5 sits beside the fresh .ex5. The size mismatch message names both lengths.
+- **Evidence (after):** Against the real prefix: first run 'install target absent, creating: ...' then 'installed FXNews.ex5 ... (246424 bytes, verified)' with the installed file measuring 246424 bytes against a 246424-byte source; second run reports 'install target exists' and verifies again. The size guard was reproduced in isolation with a 3-byte file against a 10-byte source and reports REJECTED, exiting 2. shfmt -d and shellcheck tools/*.sh are clean.
+- **Notes:** shellcheck on a SINGLE file reports SC1091 because it cannot follow the lib-mt5.sh source; that is an artefact of the invocation, not a regression - it appears twice on the previous version under the same call - and the gate's own invocation over tools/*.sh is clean.

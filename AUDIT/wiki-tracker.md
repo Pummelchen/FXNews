@@ -2,7 +2,7 @@
 
 Independent pre-production audit of the whole repository, run on branch `audit/2026-09-15` from base commit `71ce980`, and merged by pull request only after the final phase passed. The authoritative ledger lives in the repository at `AUDIT/ledger.md` / `AUDIT/ledger.json`; this page mirrors it and the ledger wins on any conflict.
 
-**total 55 | done 49 | open 6 | blocked 0 | S0:1 S1:13 S2:16 S3:25**
+**total 55 | done 51 | open 4 | blocked 0 | S0:1 S1:13 S2:16 S3:25**
 
 ### Open items
 
@@ -12,8 +12,6 @@ Independent pre-production audit of the whole repository, run on branch `audit/2
 | F-049 | S2 | START | tests | Alert dispatch, correlation grouping and dashboard rendering still have no automated coverage |
 | F-036 | S3 | START | docs | The tracker describes itself as open tasks and known bugs while showing 120/120 done, and its line-number baseline still says version 2.3 |
 | F-037 | S3 | START | docs | The documented version-bump procedure requires a deployment clone at MQL5/Indicators/FXNews/ that does not exist on this machine |
-| F-041 | S3 | START | logic | Redundant threshold re-check in IsConfirmedSignal for CONFIRM_BAR_CLOSE |
-| F-045 | S3 | START | tooling | --install creates the destination directory silently and never verifies the terminal can load the binary |
 
 ### Blocked items
 
@@ -69,6 +67,8 @@ _None._
 | F-038 | S3 | scoring | Unreachable guard: total_weight can never be zero | No observable test exists for this branch and none is claimed: the branch cannot be taken, so nothing can fail before or pass after. The invariant it protects is covered by the composer's existing 'all optional components unmeasured' assertions, which exercise the smallest total_weight. |
 | F-039 | S3 | docs | The age_free_score field comment understates what the value excludes | New contract 'score-ceiling-reasons' checks the documented claim mechanically: it fails if the capture moves after the event-age caps. Verified by moving it after late_event_cap, which produces the F-039 violation, exit 1. Restored: 0 violations across 8 contracts. |
 | F-040 | S3 | logic | The hard 95 ceiling is the only cap that records no reason string | BEFORE (silent clamp restored): contracts reports two violations naming F-040, exit 1. AFTER: 0 violations across 8 contracts. Build 0/0; census 0; selftest 177 passed, 0 failed of 177. |
+| F-041 | S3 | logic | The BAR_CLOSE confirmation rule was unreachable by any test, and its threshold clause is redundant | Four assertions, the load-bearing one being that a surviving candidate below the floor does NOT confirm. BEFORE (threshold clause dropped): 180 passed, 1 failed of 181, exit 1. AFTER: 181 passed, 0 failed of 181. Build 0/0; census 0; contracts 0/9. |
 | F-042 | S3 | dashboard | PushSignalHistory's shift loop copies empty slots when the list is not yet full | New contract 'signal-history-shift' pins the property that is checkable. BEFORE (free-slot search removed): contracts fails with the F-042 message, exit 1. AFTER: 0 violations across 9 contracts. Stated limit: the resulting list is identical before and after, so no behavioural test can distinguish them - which is why the finding survived review. |
 | F-043 | S3 | logic | DISPROVED: SmoothStep's edge re-orientation is a tested fix for a pre-1.4 defect | Grepping every call site found exactly three reversed literal pairs, all of them self-test assertions (SmoothStep(0.50,0.35,0.20) < ...(0.60), and ...(1.0,0.0,0.5) == 0.5). No production caller passes reversed edges, and the adjacent comment already recorded that before the fix the ramp ran backwards and scored 1.00 for moves against the signal. Build 0/0; census 0; contracts 0/9; selftest 177/0. |
 | F-044 | S3 | docs | The ATR definition (simple mean of true range, not Wilder smoothing) is undocumented | New self-test group 'atr definition' on a three-bar series with true ranges 14, 5, 4: simple mean 7.667 against Wilder 8.667. BEFORE (genuine Wilder recursion substituted): 181 passed, 1 failed of 182, exit 1. AFTER: 182 passed, 0 failed. Build 0/0; census 0; contracts 0/9. |
+| F-045 | S3 | tooling | --install creates the destination directory silently and never verifies the terminal can load the binary | Against the real prefix: first run 'install target absent, creating: ...' then 'installed FXNews.ex5 ... (246424 bytes, verified)' with the installed file measuring 246424 bytes against a 246424-byte source; second run reports 'install target exists' and verifies again. The size guard was reproduced in isolation with a 3-byte file against a 10-byte source and reports REJECTED, exiting 2. shfmt -d and shellcheck tools/*.sh are clean. |

@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 52 | done 18 | open 34 | blocked 0 | S0:1 S1:11 S2:19 S3:21**
+**total 52 | done 19 | open 33 | blocked 0 | S0:1 S1:11 S2:18 S3:22**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -32,7 +32,6 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-017 | S2 | validation | START | `FXNews.mq5:942,988-995` | MaxQuoteAgeSeconds and FullHoldScoreSeconds have no upper bound, so extreme values silently disable the freshness gate or make the HYBRID hold clause unreachable |
 | F-018 | S2 | scoring | DONE | `FXNews.mq5:5026-5031` | single_feature_cap is applied without checking that the feature it measures was evaluated |
 | F-019 | S2 | scoring | DONE | `FXNews.mq5:4958-4959` | The +0.05 synergy bonus is awarded on component scores without checking that either engine passed or was measured |
-| F-020 | S2 | scoring | START | `FXNews.mq5:8266-8270,4661,5114-5116` | RobustZ returns 0 for degenerate dispersion while the caller still reports the z as available |
 | F-021 | S2 | dashboard | START | `FXNews.mq5:7482,7419` | WrapLabelText wraps report lines at 63 characters but SetDashboardRow re-clips them to the measured pixel limit, truncating the wrapped tail |
 | F-022 | S2 | dashboard | START | `FXNews.mq5:6817-6825,6747` | UpdateActivityStatusLine recomputes CountDashboardObjects (up to 40 ObjectFind calls) on every scan that skips the full dashboard |
 | F-023 | S2 | tests | START | `FXNews.mq5:930-1109` | No test exercises any ValidateInputs rejection path |
@@ -41,6 +40,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-048 | S2 | historical | START | `FXNews.mq5 (BuildAutotuneReport / BuildValidationReport interpretation lines)` | The historical reports print the same generic interpretation whether or not higher score buckets actually produced better outcomes |
 | F-049 | S2 | tests | START | `FXNews.mq5 (UpdateAlertGroups, DispatchPendingAlerts, UpdateDashboard, BuildDiagnosticsLines)` | Alert dispatch, correlation grouping and dashboard rendering still have no automated coverage |
 | F-010 | S3 | historical | START | `FXNews.mq5:2926-2930,3039` | The 85+ bucket in the historical report is unreachable (now empirically confirmed; the wiki already documents the empty bucket, so only the unannotated report row remains) |
+| F-020 | S3 | scoring | DONE | `FXNews.mq5:8266-8270,4661,5114-5116` | RobustZ returning 0 on degenerate dispersion is the correct z, not an imputation (filed as a false-measured spread_z; disproved) |
 | F-026 | S3 | tooling | START | `tools/census.py:273,274` | ruff F541: two f-strings without placeholders |
 | F-027 | S3 | tooling | START | `tools/census.py` | ruff format drift: the only Python file is not formatted to the formatter's standard |
 | F-028 | S3 | tooling | START | `tools/build-macos.sh; tools/selftest-macos.sh` | shfmt drift in both shell scripts |
@@ -347,17 +347,6 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 - **Evidence (after):** New self-test group 'composer engine gating'. BEFORE (both rules reverted to their ungated form): 2 assertions FAILED; RESULT 140 passed, 2 failed of 142; exit 1. AFTER: RESULT 142 passed, 0 failed of 142; exit 0. Historical regression after the shared-composer change: --validation exit 0 with 2589 boundaries, Signals=605, Avg score=74.7, PF=0.80 - no material change from the pre-change run (2589/601/74.7/0.79). Build 0/0; census 0 findings.
 - **Notes:** Shares one root cause with F-018 and is committed with it. Deliberate behaviour change: single-engine configurations lose the synergy bonus they previously received only because the absent second engine scored zero, which was imputed agreement. Documented in the commit message.
 
-### F-020 (S2, scoring) — RobustZ returns 0 for degenerate dispersion while the caller still reports the z as available
-
-- **Status:** START  |  **Category:** logic  |  **Host:** node3  |  **Commit:** -
-- **Location:** `FXNews.mq5:8266-8270,4661,5114-5116`
-- **Discovered by:** Phase B L3 + scoring audit
-- **Evidence (before):**
-
-  > RobustZ returns 0.0 when the denominator is below 1e-7 (:8269-8270). spread_z_available is set from median/session readiness alone (:5114) and spread_z is then a genuine-looking 0.0 (:5115-5116, :4661) which BlendExecutionScore weights at 0.14 (:5196).
-
-- **Notes:** The RobustZ doc comment itself says degenerate dispersion carries no information; the availability flag should follow that.
-
 ### F-021 (S2, dashboard) — WrapLabelText wraps report lines at 63 characters but SetDashboardRow re-clips them to the measured pixel limit, truncating the wrapped tail
 
 - **Status:** START  |  **Category:** logic  |  **Host:** node3  |  **Commit:** -
@@ -444,6 +433,19 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
   > Flow is never populated in a historical run, so ComposeSignalScore always applies flow_absent_cap at 84.0 (:4969-4972); ScoreBucketFloor can therefore never return 85 for a historical score, AddHistoricalBucketStats never increments bucket85_count (:2926-2930), and the report row (:3039) always prints zero. Empirically confirmed on 2026-09-15: the AUTOTUNE report prints '85+ : 0 | +0.000 R' across 2584 evaluated boundaries and 603 signals.
 
 - **Notes:** SCOPE NOTE on the original finding: the code claim is unchanged and now has runtime evidence, but the wiki already states 'the 85+ bucket stays empty by construction' (Validation-and-Autotune.md:15), so the *fact* was disclosed. What remains is that the report still prints a permanently-zero row with no annotation, which reads as an absent measurement rather than a structural ceiling. Severity lowered from S2 to S3 for that residual scope; the original scope is recorded here rather than dropped.
+
+### F-020 (S3, scoring) — RobustZ returning 0 on degenerate dispersion is the correct z, not an imputation (filed as a false-measured spread_z; disproved)
+
+- **Status:** DONE  |  **Category:** logic  |  **Host:** node3  |  **Commit:** -
+- **Location:** `FXNews.mq5:8266-8270,4661,5114-5116`
+- **Discovered by:** Phase B L3 + scoring audit
+- **Evidence (before):**
+
+  > RobustZ returns 0.0 when the denominator is below 1e-7 (:8269-8270). spread_z_available is set from median/session readiness alone (:5114) and spread_z is then a genuine-looking 0.0 (:5115-5116, :4661) which BlendExecutionScore weights at 0.14 (:5196).
+
+- **Fix:** No code change. The finding was disproved by tracing the guarantees of the computation: AddSpreadSample inserts the current spread into the ring before UpdateSpreadStatistics runs, and RobustZ returns 0 only when mad == 0, which means every ring value including the current one equals the median. The numerator (value - median) is then exactly 0, so 0 is the exact z rather than a neutral stand-in, and awarding the term full credit is correct.
+- **Evidence (after):** Proof by the computation's own invariants: FXNews.mq5 AddSpreadSample precedes UpdateSpreadStatistics in UpdateMarketData; RobustZ (FXNews.mq5:~8680) returns 0 only when MathMax(mad * MAD_TO_SIGMA, sigma_floor) <= 1e-7, and with sigma_floor = 0 (the spread call) that requires mad == 0, i.e. every ring sample equals the median. The same argument holds for BaselineZ on a zero-variance session baseline, where an EWMA mean equal to the value gives sd = 0 and (value - mean) = 0. The genuinely degenerate case that would matter - a value differing from a zero-dispersion centre - cannot occur, because the value is itself one of the samples that established the zero dispersion.
+- **Notes:** SCOPE NOTE on the original finding, per the rule against closing a task by narrowing it. The filed claim was: 'RobustZ returns 0 for degenerate dispersion while spread_z_available stays true, so a genuine-looking 0.0 is weighted at 0.14 as if measured'. The availability half is accurate; the 'imputed neutral' half is false, because a 0 in that branch is the exact z. Severity drops from S2 to S3 and the residual is a documentation point: the RobustZ comment already explains the sigma_floor contract, but nothing states that a degenerate spread ring implies value == median. No defect means no fail-before test; the evidence is the invariant proof above. This is the third finding this audit has disproved rather than fixed, alongside F-001's original framing and F-010's.
 
 ### F-026 (S3, tooling) — ruff F541: two f-strings without placeholders
 

@@ -31,11 +31,10 @@ esac
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null || dirname "$HERE")"
 
-WINE="/Applications/MetaTrader 5.app/Contents/SharedSupport/wine/bin/wine64"
-export WINEPREFIX="$HOME/Library/Application Support/net.metaquotes.wine.metatrader5"
-MT5="$WINEPREFIX/drive_c/Program Files/MetaTrader 5"
-TERMINAL="$MT5/terminal64.exe"
-export WINEDEBUG="${WINEDEBUG:--all}"
+# Paths and Wine/Rosetta handling live in one place, shared with build-macos.sh.
+# shellcheck source=tools/lib-mt5.sh
+. "$HERE/lib-mt5.sh" || { echo "selftest: cannot load $HERE/lib-mt5.sh" >&2; exit 2; }
+mt5_configure
 TIMEOUT_SECONDS="${FXNEWS_SELFTEST_TIMEOUT:-240}"
 if [ "$MODE" != "selftest" ]; then
   TIMEOUT_SECONDS="${FXNEWS_SELFTEST_TIMEOUT:-900}"
@@ -43,6 +42,7 @@ fi
 
 [ -x "$WINE" ]     || { echo "selftest: wine64 not found at $WINE" >&2; exit 2; }
 [ -f "$TERMINAL" ] || { echo "selftest: terminal64.exe not found at $TERMINAL" >&2; exit 2; }
+mt5_require_wine "selftest"
 if pgrep -f 'terminal64.exe' >/dev/null 2>&1; then
   echo "selftest: MetaTrader 5 is already running; close it and retry" >&2
   exit 2

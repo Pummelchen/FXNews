@@ -12,11 +12,16 @@ no CI workflow.
 | # | Unit | Language | Build system | Entry points | Host class | Ships to users |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | `FXNews.mq5` (8 307 lines) | MQL5 | MetaEditor 64-bit under MetaQuotes Wine | `OnInit`, `OnDeinit`, `OnTimer`, `OnCalculate`, `OnChartEvent`; modes LIVE / VALIDATION / AUTOTUNE / SELFTEST | **macOS only** (x86_64 Wine → Rosetta 2 on arm64) | **yes** — the product |
-| 2 | `tools/build-macos.sh` (141 lines) | Bash 3.2+ | none (script) | CLI flags `[path] [--install] [-h]` | macOS only | no — build gate |
-| 3 | `tools/selftest-macos.sh` (157 lines) | Bash 3.2+ | none (script) | CLI flags `[--validation\|--autotune]` | macOS only | no — test gate |
-| 4 | `tools/census.py` (355 lines) | Python 3.14 | none (script, stdlib only) | CLI `[source] [--allow FILE] [--json]` | **any** (cross-platform) | no — analysis gate |
-| 5 | `tools/mql5/FXNewsSelfTest.mq5` (86 lines) | MQL5 | MetaEditor 64-bit under Wine | `OnStart` | macOS only | no — test harness |
-| 6 | `README.md`, `CLAUDE.md`, `LICENSE`, `.gitignore`, `.github/traffic.json` | Markdown/JSON | n/a | n/a | any | docs/metadata |
+| 2 | `tools/lib-mt5.sh` (52 lines) | Bash 3.2+ | none (sourced library) | n/a — sourced by both gate scripts | **any** (path-independent) | no — shared environment |
+| 3 | `tools/build-macos.sh` (141 lines) | Bash 3.2+ | none (script) | CLI flags `[path] [--install] [-h]` | macOS only | no — build gate |
+| 4 | `tools/selftest-macos.sh` (157 lines) | Bash 3.2+ | none (script) | CLI flags `[--validation\|--autotune]` | macOS only | no — test gate |
+| 5 | `tools/census.py` (355 lines) | Python 3.14 | none (script, stdlib only) | CLI `[source] [--allow FILE] [--json]` | **any** (cross-platform) | no — analysis gate |
+| 6 | `tools/mql5/FXNewsSelfTest.mq5` (86 lines) | MQL5 | MetaEditor 64-bit under Wine | `OnStart` | macOS only | no — test harness |
+| 7 | `README.md`, `CLAUDE.md`, `LICENSE`, `.gitignore`, `.github/traffic.json` | Markdown/JSON | n/a | n/a | any | docs/metadata |
+
+`tools/lib-mt5.sh` was added during this audit by F-014/F-024. It holds the Wine
+prefix, the MetaTrader paths and the runnability probe that both gate scripts used
+to duplicate — and that one of them used to go without entirely.
 
 **Language-standard coverage (§1):** Swift — **N/A, none present**. C#/.NET — **N/A, none
 present**. C — **N/A, none present**. Python — present in exactly one file

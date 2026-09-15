@@ -2,7 +2,7 @@
 
 Independent pre-production audit of the whole repository, run on branch `audit/2026-09-15` from base commit `71ce980`, and merged by pull request only after the final phase passed. The authoritative ledger lives in the repository at `AUDIT/ledger.md` / `AUDIT/ledger.json`; this page mirrors it and the ledger wins on any conflict.
 
-**total 52 | done 18 | open 34 | blocked 0 | S0:1 S1:11 S2:19 S3:21**
+**total 52 | done 19 | open 33 | blocked 0 | S0:1 S1:11 S2:18 S3:22**
 
 ### Open items
 
@@ -15,7 +15,6 @@ Independent pre-production audit of the whole repository, run on branch `audit/2
 | F-015 | S2 | START | tooling | The indicator, the harness and the gate script are coupled by undocumented string literals with no contract test |
 | F-016 | S2 | START | ops | No CI workflow: the three release gates are never run automatically |
 | F-017 | S2 | START | validation | MaxQuoteAgeSeconds and FullHoldScoreSeconds have no upper bound, so extreme values silently disable the freshness gate or make the HYBRID hold clause unreachable |
-| F-020 | S2 | START | scoring | RobustZ returns 0 for degenerate dispersion while the caller still reports the z as available |
 | F-021 | S2 | START | dashboard | WrapLabelText wraps report lines at 63 characters but SetDashboardRow re-clips them to the measured pixel limit, truncating the wrapped tail |
 | F-022 | S2 | START | dashboard | UpdateActivityStatusLine recomputes CountDashboardObjects (up to 40 ObjectFind calls) on every scan that skips the full dashboard |
 | F-023 | S2 | START | tests | No test exercises any ValidateInputs rejection path |
@@ -67,5 +66,6 @@ _None._
 | F-009 | S2 | scoring | session_baseline_ready is a single flag for three independent baselines, so a z-score can be reported as measured when its own baseline never received samples | New self-test group 'session baselines'. BEFORE (temporary restore of shared-counter readiness): 'session baseline: a single rate sample is not yet a baseline' FAILED; RESULT 122 passed, 1 failed of 123 assertions; selftest exit 1. AFTER: RESULT 123 passed, 0 failed of 123; exit 0. Build 0 errors/0 warnings; census 0 findings; shellcheck clean; ruff/mypy --strict/bandit clean. |
 | F-018 | S2 | scoring | single_feature_cap is applied without checking that the feature it measures was evaluated | New self-test group 'composer engine gating'. BEFORE (both rules reverted to their ungated form): 2 assertions FAILED; RESULT 140 passed, 2 failed of 142; exit 1. AFTER: RESULT 142 passed, 0 failed of 142; exit 0. Historical regression after the shared-composer change: --validation exit 0 with 2589 boundaries, Signals=605, Avg score=74.7, PF=0.80 - no material change from the pre-change run (2589/601/74.7/0.79). Build 0/0; census 0 findings. |
 | F-019 | S2 | scoring | The +0.05 synergy bonus is awarded on component scores without checking that either engine passed or was measured | New self-test group 'composer engine gating'. BEFORE (both rules reverted to their ungated form): 2 assertions FAILED; RESULT 140 passed, 2 failed of 142; exit 1. AFTER: RESULT 142 passed, 0 failed of 142; exit 0. Historical regression after the shared-composer change: --validation exit 0 with 2589 boundaries, Signals=605, Avg score=74.7, PF=0.80 - no material change from the pre-change run (2589/601/74.7/0.79). Build 0/0; census 0 findings. |
+| F-020 | S3 | scoring | RobustZ returning 0 on degenerate dispersion is the correct z, not an imputation (filed as a false-measured spread_z; disproved) | Proof by the computation's own invariants: FXNews.mq5 AddSpreadSample precedes UpdateSpreadStatistics in UpdateMarketData; RobustZ (FXNews.mq5:~8680) returns 0 only when MathMax(mad * MAD_TO_SIGMA, sigma_floor) <= 1e-7, and with sigma_floor = 0 (the spread call) that requires mad == 0, i.e. every ring sample equals the median. The same argument holds for BaselineZ on a zero-variance session baseline, where an EWMA mean equal to the value gives sd = 0 and (value - mean) = 0. The genuinely degenerate case that would matter - a value differing from a zero-dispersion centre - cannot occur, because the value is itself one of the samples that established the zero dispersion. |
 | F-032 | S3 | docs | The gate script's header comment states the wrong assertion count (72; actual 117) | grep -rnE '[0-9]+ (pure-helper )?assertions' README.md CLAUDE.md tools/ returns no match; the gate still reports its total at runtime ('RESULT: 130 passed, 0 failed of 130 assertions'). |
 | F-033 | S3 | docs | The wiki Testing page hard-codes the assertion total on the same page that promises it never has to | Wiki commit 'docs: stop hard-coding the self-test assertion total'; Testing-and-Validation.md:11 and Architecture.md:49 reworded. |

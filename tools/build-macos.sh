@@ -26,8 +26,9 @@ for arg in "$@"; do
   esac
 done
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 2
+
 if [ -z "$SRC" ]; then
-  HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 2
   # tools/ sits directly under the repository root; git resolves it in a clone,
   # the fallback covers an exported tree.
   ROOT="$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null || dirname "$HERE")"
@@ -37,15 +38,15 @@ fi
 SRC_DIR="$(cd "$(dirname "$SRC")" && pwd)" || { echo "build: cannot resolve $SRC" >&2; exit 2; }
 SRC="$SRC_DIR/$(basename "$SRC")"
 
-WINE="/Applications/MetaTrader 5.app/Contents/SharedSupport/wine/bin/wine64"
-export WINEPREFIX="$HOME/Library/Application Support/net.metaquotes.wine.metatrader5"
-MT5="$WINEPREFIX/drive_c/Program Files/MetaTrader 5"
-ME="$MT5/MetaEditor64.exe"
-export WINEDEBUG="${WINEDEBUG:--all}"
+# Paths and Wine/Rosetta handling live in one place, shared with selftest-macos.sh.
+# shellcheck source=tools/lib-mt5.sh
+. "$HERE/lib-mt5.sh" || { echo "build: cannot load $HERE/lib-mt5.sh" >&2; exit 2; }
+mt5_configure
 BUILD_TIMEOUT="${BUILD_TIMEOUT:-300}"
 
 [ -x "$WINE" ] || { echo "build: wine64 not found at $WINE" >&2; exit 2; }
 [ -f "$ME" ]   || { echo "build: MetaEditor64.exe not found at $ME" >&2; exit 2; }
+mt5_require_wine "build"
 
 # The work directory is created under a space-free location: MetaEditor's
 # /compile: and /log: switches cannot handle a path containing a space (they

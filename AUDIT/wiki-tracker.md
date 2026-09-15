@@ -2,16 +2,14 @@
 
 Independent pre-production audit of the whole repository, run on branch `audit/2026-09-15` from base commit `71ce980`, and merged by pull request only after the final phase passed. The authoritative ledger lives in the repository at `AUDIT/ledger.md` / `AUDIT/ledger.json`; this page mirrors it and the ledger wins on any conflict.
 
-**total 47 | done 8 | open 39 | blocked 0 | S0:1 S1:9 S2:17 S3:20**
+**total 47 | done 10 | open 37 | blocked 0 | S0:1 S1:8 S2:18 S3:20**
 
 ### Open items
 
 | # | Sev | Status | Area | What |
 | --- | --- | --- | --- | --- |
-| F-001 | S1 | START | scoring | Breakout hold_score is imputed at 0 with a full 0.20 weight when the price is not outside the box, instead of leaving the normaliser |
 | F-003 | S1 | START | scoring | movement_5m_pips falls back to a 0.0 sentinel when the M1 copy fails and is then consumed as a measured value by three components |
 | F-006 | S1 | START | historical | Two composite caps are structurally inert in history, so historical scores are systematically less penalised than live scores |
-| F-007 | S1 | START | tests | The availability-and-composer self-test assertion cannot detect an exclusion regression |
 | F-008 | S1 | START | tests | The live signal lifecycle, correlation grouping, alert dispatch and dashboard rendering have no automated coverage |
 | F-010 | S2 | START | historical | The 85+ bucket in the historical report is unreachable dead code |
 | F-011 | S2 | START | dashboard | g_signal_history_dirty is never cleared while active signal rows are rendered, forcing a full dashboard rebuild every scan |
@@ -61,6 +59,8 @@ _None._
 | F-002 | S1 | scoring | UpdateSessionBaseline folds active_trigger_tick_volume into the tick-volume baseline unguarded, while the adjacent line explicitly guards the tick rate | New self-test group 'session baselines'. BEFORE (temporary restore of shared-counter readiness): 'session baseline: a single rate sample is not yet a baseline' FAILED; RESULT 122 passed, 1 failed of 123 assertions; selftest exit 1. AFTER: RESULT 123 passed, 0 failed of 123; exit 0. Build 0 errors/0 warnings; census 0 findings; shellcheck clean; ruff/mypy --strict/bandit clean. |
 | F-004 | S1 | historical | Historical impulse evaluation forces acceleration_available and continuation_available to true, hard-coding weights for inputs that may be unmeasurable | New self-test group 'impulse availability'. BEFORE (forced flags restored): 1 assertion FAILED - 'impulse blend: unavailable terms leave the normaliser (got 0.600000, expected 1.000000)'; RESULT 129 passed, 1 failed of 130; exit 1. AFTER: RESULT 130 passed, 0 failed of 130; exit 0. Build 0/0; census 0 findings; shellcheck clean. |
 | F-005 | S1 | historical | Historical execution gate applies cost_to_atr unconditionally, so VALIDATION/AUTOTUNE do not reproduce the live filter set when UseStrictExecutionGate is off | New self-test group 'execution gate'. BEFORE (unconditional ceiling restored): 2 assertions FAILED ('a high cost-to-ATR passes when the strict gate is off', 'the spread-z ceiling is strict-gated as well'); RESULT 126 passed, 2 failed of 128; exit 1. AFTER: RESULT 128 passed, 0 failed of 128; exit 0. Build 0/0; census 0 findings. |
+| F-007 | S1 | tests | The availability-and-composer self-test assertion cannot detect an exclusion regression | BEFORE (imputing weight restored): the new assertion FAILED - 'leaves the blend unchanged when a component is unmeasured (got 27.257710, expected 53.943724)'; RESULT 129 passed, 2 failed of 131; exit 1. AFTER: RESULT 131 passed, 0 failed of 131; exit 0. Build 0/0; census 0 findings; shellcheck clean. |
+| F-001 | S2 | scoring | ComputeBreakoutStructure did not initialise its own output, so the documented pure shared function returned garbage to a direct caller (originally filed as a hold_score imputation) | New self-test group 'breakout hold'. BEFORE (caller-dependent form restored): 2 assertions FAILED ('an unbroken box is measured, not passing, zero hold', 'weights a sustained hold above a zero hold'); RESULT 131 passed, 2 failed of 133; exit 1. AFTER: RESULT 133 passed, 0 failed of 133; exit 0. Build 0/0; census 0 findings. |
 | F-009 | S2 | scoring | session_baseline_ready is a single flag for three independent baselines, so a z-score can be reported as measured when its own baseline never received samples | New self-test group 'session baselines'. BEFORE (temporary restore of shared-counter readiness): 'session baseline: a single rate sample is not yet a baseline' FAILED; RESULT 122 passed, 1 failed of 123 assertions; selftest exit 1. AFTER: RESULT 123 passed, 0 failed of 123; exit 0. Build 0 errors/0 warnings; census 0 findings; shellcheck clean; ruff/mypy --strict/bandit clean. |
 | F-032 | S3 | docs | The gate script's header comment states the wrong assertion count (72; actual 117) | grep -rnE '[0-9]+ (pure-helper )?assertions' README.md CLAUDE.md tools/ returns no match; the gate still reports its total at runtime ('RESULT: 130 passed, 0 failed of 130 assertions'). |
 | F-033 | S3 | docs | The wiki Testing page hard-codes the assertion total on the same page that promises it never has to | Wiki commit 'docs: stop hard-coding the self-test assertion total'; Testing-and-Validation.md:11 and Architecture.md:49 reworded. |

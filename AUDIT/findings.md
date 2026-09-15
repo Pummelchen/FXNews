@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 47 | done 8 | open 39 | blocked 0 | S0:1 S1:9 S2:17 S3:20**
+**total 47 | done 10 | open 37 | blocked 0 | S0:1 S1:8 S2:18 S3:20**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -11,14 +11,14 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | --- | --- | --- | --- | --- | --- |
 | E-1 | S0 | tooling | DONE | `tools/build-macos.sh:40` | Build and self-test gates cannot execute: bundled wine64 is x86_64 and Rosetta 2 was absent on all four Macs |
 | E-2 | S1 | tooling | DONE | `tools/selftest-macos.sh:34` | No MQL5 formatter, linter, static analyzer, SAST scanner or coverage tool exists |
-| F-001 | S1 | scoring | START | `FXNews.mq5:5222,5310,5324` | Breakout hold_score is imputed at 0 with a full 0.20 weight when the price is not outside the box, instead of leaving the normaliser |
 | F-002 | S1 | scoring | DONE | `FXNews.mq5:4502` | UpdateSessionBaseline folds active_trigger_tick_volume into the tick-volume baseline unguarded, while the adjacent line explicitly guards the tick rate |
 | F-003 | S1 | scoring | START | `FXNews.mq5:4268,4704,5418,5917` | movement_5m_pips falls back to a 0.0 sentinel when the M1 copy fails and is then consumed as a measured value by three components |
 | F-004 | S1 | historical | DONE | `FXNews.mq5:2728` | Historical impulse evaluation forces acceleration_available and continuation_available to true, hard-coding weights for inputs that may be unmeasurable |
 | F-005 | S1 | historical | DONE | `FXNews.mq5:2667` | Historical execution gate applies cost_to_atr unconditionally, so VALIDATION/AUTOTUNE do not reproduce the live filter set when UseStrictExecutionGate is off |
 | F-006 | S1 | historical | START | `FXNews.mq5:2693,5310-5318,4984-4989` | Two composite caps are structurally inert in history, so historical scores are systematically less penalised than live scores |
-| F-007 | S1 | tests | START | `FXNews.mq5:1455-1459` | The availability-and-composer self-test assertion cannot detect an exclusion regression |
+| F-007 | S1 | tests | DONE | `FXNews.mq5:1455-1459` | The availability-and-composer self-test assertion cannot detect an exclusion regression |
 | F-008 | S1 | tests | START | `README.md:50; FXNews.mq5` | The live signal lifecycle, correlation grouping, alert dispatch and dashboard rendering have no automated coverage |
+| F-001 | S2 | scoring | DONE | `FXNews.mq5:5222,5310,5324` | ComputeBreakoutStructure did not initialise its own output, so the documented pure shared function returned garbage to a direct caller (originally filed as a hold_score imputation) |
 | F-009 | S2 | scoring | DONE | `FXNews.mq5:4476-4477,7956-7957` | session_baseline_ready is a single flag for three independent baselines, so a z-score can be reported as measured when its own baseline never received samples |
 | F-010 | S2 | historical | START | `FXNews.mq5:2926-2930,3039` | The 85+ bucket in the historical report is unreachable dead code |
 | F-011 | S2 | dashboard | START | `FXNews.mq5:3788,6802-6804,7182` | g_signal_history_dirty is never cleared while active signal rows are rendered, forcing a full dashboard rebuild every scan |
@@ -85,17 +85,6 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 - **Evidence (after):** AUDIT/environment.md section 2 records the gap and the compensating controls
 - **Notes:** Not BLOCKED: a real substitute exists and was used.
 
-### F-001 (S1, scoring) — Breakout hold_score is imputed at 0 with a full 0.20 weight when the price is not outside the box, instead of leaving the normaliser
-
-- **Status:** START  |  **Category:** logic  |  **Host:** node3  |  **Commit:** -
-- **Location:** `FXNews.mq5:5222,5310,5324`
-- **Discovered by:** Phase B L2/L3 + scoring audit
-- **Evidence (before):**
-
-  > EvaluateBreakoutStructure resets hold_score=0.0 at :5222; outside_seconds is -1.0 when the price is not outside (:5237); ComputeBreakoutStructure assigns hold_score only inside 'if(outside_seconds >= 0.0)' (:5310); the blend nevertheless always puts hold_score*0.20 in the numerator and 0.20 in total_weight (:5324-5325). A profile whose impulse engine passes while the breakout is measured-but-not-outside therefore carries a worst-case zero for an unmeasured term. This contradicts CLAUDE.md:75-86 ('A component that could not be measured is excluded ... This applies inside every component too').
-
-- **Notes:** Two readings exist: 'never held outside' as a measurement (current behaviour) versus as unmeasured (documented rule). Must be resolved explicitly and the self-test extended either way. Cross-checked independently by the scoring audit.
-
 ### F-002 (S1, scoring) — UpdateSessionBaseline folds active_trigger_tick_volume into the tick-volume baseline unguarded, while the adjacent line explicitly guards the tick rate
 
 - **Status:** DONE  |  **Category:** logic  |  **Host:** node3  |  **Commit:** 2388b22
@@ -158,14 +147,16 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-007 (S1, tests) — The availability-and-composer self-test assertion cannot detect an exclusion regression
 
-- **Status:** START  |  **Category:** test  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** test  |  **Host:** node3  |  **Commit:** eb29ef7
 - **Location:** `FXNews.mq5:1455-1459`
 - **Discovered by:** Phase B L6 + scoring audit
 - **Evidence (before):**
 
   > With the weights in force (0.76 total when flow and calendar are absent), excluding an unmeasured component and imputing 0 for it both produce a displayed score of 84 because flow_absent_cap binds first, so the assertion passes under either implementation. This is the exact class of defect the self-test exists to catch (CLAUDE.md:44-48).
 
-- **Notes:** Must be strengthened with an assertion that distinguishes exclusion from imputation, e.g. on raw_score or on the normaliser directly.
+- **Fix:** The composer exclusion assertion now drives every measured component at equal quality and asserts on raw_score, taken before the cap ladder, so exclusion (uniform average unchanged) is numerically distinct from imputation (dragged down by the excluded weight's share). Flow is the component under test so the breakout/impulse synergy term cancels.
+- **Evidence (after):** BEFORE (imputing weight restored): the new assertion FAILED - 'leaves the blend unchanged when a component is unmeasured (got 27.257710, expected 53.943724)'; RESULT 129 passed, 2 failed of 131; exit 1. AFTER: RESULT 131 passed, 0 failed of 131; exit 0. Build 0/0; census 0 findings; shellcheck clean.
+- **Notes:** Must be strengthened with an assertion that distinguishes exclusion from imputation, e.g. on raw_score or on the normaliser directly. Refined by experiment: the pre-existing assertion did react to a flow imputation (because a second component had shifted), but is blind to an impulse imputation, which is the case the scoring audit analysed. The new assertion distinguishes imputation directly on raw_score rather than depending on a cap binding.
 
 ### F-008 (S1, tests) — The live signal lifecycle, correlation grouping, alert dispatch and dashboard rendering have no automated coverage
 
@@ -177,6 +168,19 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
   > Known-Limitations.md:8 and CLAUDE.md:52-54 state these areas are verified only by manual runtime observation. Several of the audit's behaviour findings (F-011, F-013, F-018) live exactly in that uncovered region, which is why they survived the 3.0 audit.
 
 - **Notes:** Disclosed honestly by the project, but the audit brief treats a missing critical test as S1. Scope: at minimum a deterministic lifecycle state-machine test driven from synthetic scores.
+
+### F-001 (S2, scoring) — ComputeBreakoutStructure did not initialise its own output, so the documented pure shared function returned garbage to a direct caller (originally filed as a hold_score imputation)
+
+- **Status:** DONE  |  **Category:** logic  |  **Host:** node3  |  **Commit:** e3c87f6
+- **Location:** `FXNews.mq5:5222,5310,5324`
+- **Discovered by:** Phase B L2/L3 + scoring audit
+- **Evidence (before):**
+
+  > EvaluateBreakoutStructure resets hold_score=0.0 at :5222; outside_seconds is -1.0 when the price is not outside (:5237); ComputeBreakoutStructure assigns hold_score only inside 'if(outside_seconds >= 0.0)' (:5310); the blend nevertheless always puts hold_score*0.20 in the numerator and 0.20 in total_weight (:5324-5325). A profile whose impulse engine passes while the breakout is measured-but-not-outside therefore carries a worst-case zero for an unmeasured term. This contradicts CLAUDE.md:75-86 ('A component that could not be measured is excluded ... This applies inside every component too').
+
+- **Fix:** ComputeBreakoutStructure now initialises all eleven output fields from its own arguments, making it genuinely pure; hold_score is assigned as one explicit either/or instead of a guarded write.
+- **Evidence (after):** New self-test group 'breakout hold'. BEFORE (caller-dependent form restored): 2 assertions FAILED ('an unbroken box is measured, not passing, zero hold', 'weights a sustained hold above a zero hold'); RESULT 131 passed, 2 failed of 133; exit 1. AFTER: RESULT 133 passed, 0 failed of 133; exit 0. Build 0/0; census 0 findings.
+- **Notes:** SCOPE NOTE, recorded on the original finding rather than by narrowing it. The filed S1 reading (hold_score imputed at 0 instead of excluded) was REJECTED by reachability analysis: atr_trigger > 0 implies has_trigger, so UpdateOutsideTimers has already classified inside/outside, and a negative outside_seconds is a genuine measurement of zero hold. Weighting it is intended, so the invariant is not violated and severity drops to S2. Writing the characterisation test for that intended behaviour exposed a different real defect at the same site - the uninitialised output - which is what this task now fixes. Both facts are recorded; nothing was dropped.
 
 ### F-009 (S2, scoring) — session_baseline_ready is a single flag for three independent baselines, so a z-score can be reported as measured when its own baseline never received samples
 

@@ -312,7 +312,7 @@ def check_score_ceiling_reasons(violations: list[Violation], indicator: str) -> 
 
 
 def check_signal_history_shift(violations: list[Violation], indicator: str) -> None:
-    """PushSignalHistory must evict at the list's own end when it is partly filled (F-042).
+    """The history eviction slot must be the list's own end when the list is partly filled.
 
     A structural check because the defect has no observable behavioural difference: the
     old tail-first scan returned the last slot for a partly-filled list, so the shift walked
@@ -321,21 +321,22 @@ def check_signal_history_shift(violations: list[Violation], indicator: str) -> N
     What can be pinned is that the eviction slot is located by looking for a free slot
     rather than assuming the array is full.
     """
-    match = re.search(r"void PushSignalHistory\(.*?\n\}", indicator, re.DOTALL)
+    match = re.search(r"int SignalHistoryEvictionSlot\(.*?\n\}", indicator, re.DOTALL)
     if match is None:
         violations.append(
             Violation(
-                "signal-history-shift", "PushSignalHistory not found in FXNews.mq5"
+                "signal-history-shift",
+                "SignalHistoryEvictionSlot not found in FXNews.mq5",
             )
         )
         return
     body = match.group(0)
-    if "!g_signal_history[i].used" not in body:
+    if "!entries[i].used" not in body:
         violations.append(
             Violation(
                 "signal-history-shift",
-                "PushSignalHistory no longer looks for the first unused slot, so its shift can walk "
-                "past the end of a partly-filled list (F-042)",
+                "SignalHistoryEvictionSlot no longer looks for the first unused slot, so the shift can "
+                "walk past the end of a partly-filled list (F-042)",
             )
         )
 

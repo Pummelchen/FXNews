@@ -2391,6 +2391,98 @@ void SelfTestAlertDispatch()
    SelfTestGroup("alert dispatch", before);
 }
 
+// Dashboard row objects, which the self-test CAN reach because the harness runs on a real chart.
+// F-049 named dashboard rendering as uncovered and F-051 carries that remainder; this covers the
+// row lifecycle that does not need a running scan - creation, the label budget, and the
+// stale-row deletion whose failure mode is a dashboard that keeps showing rows the current scan
+// no longer produces.
+void SelfTestDashboardRows()
+{
+   int before = g_selftest_failed;
+
+   int row = SIGNAL_FIRST_ROW_INDEX;
+   SetDashboardRow(row, "selftest row one", "tooltip one", clrWhite);
+   SetDashboardRow(row + 1, "selftest row two", "tooltip two", clrWhite);
+   SelfTestCheck(ObjectFind(0, DashboardName(row)) >= 0 &&
+                 ObjectFind(0, DashboardName(row + 1)) >= 0,
+                 "dashboard: writing a row creates its label object (F-051)");
+
+   // The terminal keeps only DASHBOARD_MAX_TEXT_CHARS characters, so no written row may exceed
+   // it whatever the measured width says.
+   string written = ObjectGetString(0, DashboardName(row), OBJPROP_TEXT);
+   SelfTestCheck(StringLen(written) <= DASHBOARD_MAX_TEXT_CHARS,
+                 "dashboard: a written row respects the label character budget (F-051)");
+
+   // Deletion starts AT the row and removes everything above it. An off-by-one here leaves
+   // exactly the row the caller asked to remove on screen.
+   DeleteDashboardRowsFrom(row);
+   SelfTestCheck(ObjectFind(0, DashboardName(row)) < 0,
+                 "dashboard: deleting from a row removes that row (F-051)");
+
+   int survivors = 0;
+   for(int i = row; i < DASHBOARD_MAX_OBJECTS; i++)
+      if(ObjectFind(0, DashboardName(i)) >= 0)
+         survivors++;
+   SelfTestCheck(survivors == 0,
+                 "dashboard: no row above the deletion point survives (F-051)");
+
+   // Leave the chart as it was found: the dashboard is otherwise rebuilt by the next scan, and a
+   // self-test that leaves labels behind would corrupt the diagnostics object count.
+   CleanupDashboardObjects();
+
+   SelfTestGroup("dashboard rows", before);
+}
+
+// The signal-history eviction dwell, named by F-049 and carried into F-051. The rule decides
+// which entry a burst of new signals is allowed to sweep off the chart, so its boundaries are
+// worth asserting rather than observing.
+void SelfTestHistoryEviction()
+{
+   int before = g_selftest_failed;
+
+   SignalHistoryEntry entries[4];
+   datetime now = D'2026.09.15 12:00:00';
+   for(int i = 0; i < 4; i++)
+   {
+      entries[i].used = true;
+      entries[i].local_time = now - 5;
+   }
+
+   // A partly-filled list has room, so the new entry goes to the list's own end and nothing is
+   // evicted - including the empty slot BELOW a used one, which would reorder the list.
+   entries[2].used = false;
+   SelfTestCheck(SignalHistoryEvictionSlot(entries, 4, now, SIGNAL_MESSAGE_MIN_VISIBLE_SECONDS) == 2,
+                 "history eviction: a free slot is used instead of evicting (F-051)");
+
+   entries[2].used = true;
+
+   // Every slot is still within its dwell, so capacity wins and the tail goes.
+   SelfTestCheck(SignalHistoryEvictionSlot(entries, 4, now, SIGNAL_MESSAGE_MIN_VISIBLE_SECONDS) == 3,
+                 "history eviction: with every slot inside its dwell the tail is evicted (F-051)");
+
+   // Realistic ordering matters here: entries are newest-first, so index 0 is the newest and the
+   // highest index is the oldest. The first version of this case gave a middle entry the oldest
+   // timestamp, which no real list can produce, and it failed against correct code.
+   entries[0].local_time = now - 2;
+   entries[1].local_time = now - 5;
+   entries[2].local_time = now - 40;
+   entries[3].local_time = now - 45;
+
+   // The OLDEST entry that has met its dwell is the one evicted, so rows that just appeared are
+   // never the ones swept away.
+   SelfTestCheck(SignalHistoryEvictionSlot(entries, 4, now, SIGNAL_MESSAGE_MIN_VISIBLE_SECONDS) == 3,
+                 "history eviction: the oldest entry that has met its dwell is evicted (F-051)");
+
+   // The boundary is inclusive: exactly the dwell qualifies and one second short does not, so the
+   // scan falls through to the next-oldest qualifying entry.
+   entries[2].local_time = now - SIGNAL_MESSAGE_MIN_VISIBLE_SECONDS;
+   entries[3].local_time = now - SIGNAL_MESSAGE_MIN_VISIBLE_SECONDS + 1;
+   SelfTestCheck(SignalHistoryEvictionSlot(entries, 4, now, SIGNAL_MESSAGE_MIN_VISIBLE_SECONDS) == 2,
+                 "history eviction: exactly the dwell qualifies and one second short does not");
+
+   SelfTestGroup("history eviction", before);
+}
+
 // One case per guard block in ValidateInputsCore, because the validation only ran at
 // OnInit and nothing could reach its rejection paths: the inputs are read-only, so
 // before the extraction no test could make one fail. Baseline first, then each field
@@ -2772,6 +2864,8 @@ void RunSelfTest()
    SelfTestComposerEngineGating();
    SelfTestSignalLifecycle();
    SelfTestHistoryRefresh();
+   SelfTestDashboardRows();
+   SelfTestHistoryEviction();
    SelfTestAlertDispatch();
    SelfTestAtrDefinition();
    SelfTestBarCloseConfirmation();
@@ -8643,6 +8737,31 @@ int SignalHistoryScorePercent(const double score)
    return (int)MathRound(Clamp(score, 0.0, 100.0));
 }
 
+// Which slot a new history entry takes. Entries are held newest-first and contiguously from
+// slot 0, so a free slot is the list's own end and means nothing is dropped. Only when every
+// slot is in use is the oldest entry that has met its minimum dwell evicted, and if none has,
+// the tail goes anyway because capacity is a hard bound. Pure so the dwell rule can be tested
+// without a terminal (F-051).
+int SignalHistoryEvictionSlot(const SignalHistoryEntry &entries[],
+                              const int count,
+                              const datetime now,
+                              const int min_visible_seconds)
+{
+   for(int i = 0; i < count; i++)
+   {
+      if(!entries[i].used)
+         return i;
+   }
+
+   for(int i = count - 1; i >= 0; i--)
+   {
+      if(now - entries[i].local_time >= min_visible_seconds)
+         return i;
+   }
+
+   return count - 1;
+}
+
 void PushSignalHistory(const int index,
                        const int direction,
                        const double score,
@@ -8669,32 +8788,15 @@ void PushSignalHistory(const int index,
    // is still within its dwell the tail goes anyway: capacity is a hard bound. Removing a
    // slot from the tail region preserves newest-first order for everything that stays.
    //
-   // The eviction slot is the list's own end when there is a free one. Scanning from the tail
-   // first used to return the last slot for a partly-filled list, so the shift below walked
-   // every empty slot above the last entry, copying nothing into nothing. The observable list
-   // was identical, which is why no behavioural test could catch it (F-042).
-   int evict = SIGNAL_HISTORY_SIZE - 1;
-   bool full = true;
-   for(int i = 0; i < SIGNAL_HISTORY_SIZE; i++)
-   {
-      if(!g_signal_history[i].used)
-      {
-         evict = i;
-         full = false;
-         break;
-      }
-   }
-   if(full)
-   {
-      for(int i = SIGNAL_HISTORY_SIZE - 1; i >= 0; i--)
-      {
-         if(local_time - g_signal_history[i].local_time >= SIGNAL_MESSAGE_MIN_VISIBLE_SECONDS)
-         {
-            evict = i;
-            break;
-         }
-      }
-   }
+   // The rule itself is SignalHistoryEvictionSlot, so it is covered by the self-test. Scanning
+   // from the tail directly used to return the last slot for a partly-filled list, so the shift
+   // below walked every empty slot above the last entry, copying nothing into nothing; the
+   // observable list was identical, which is why no behavioural test caught it at the time
+   // (F-042, F-051).
+   int evict = SignalHistoryEvictionSlot(g_signal_history,
+                                         SIGNAL_HISTORY_SIZE,
+                                         local_time,
+                                         SIGNAL_MESSAGE_MIN_VISIBLE_SECONDS);
 
    for(int i = evict; i > 0; i--)
       CopySignalHistoryEntry(g_signal_history[i - 1], g_signal_history[i]);

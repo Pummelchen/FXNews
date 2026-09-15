@@ -142,15 +142,32 @@ if [ "$MODE" = "selftest" ]; then
   exit 1
 fi
 
-# A historical run passes when the ready label appeared and the Journal holds
-# the report's signal line; ABORTED or a timeout fails.
+# A historical run passes when the ready label appeared AND the Journal holds the
+# report's signal line AND the run actually read history; ABORTED or a timeout
+# fails. The history check exists because a report over no data used to pass: on
+# 2026-09-15 a VALIDATION run reported "Symbols 0/2 ... M1 bars=0" and the gate
+# still printed OK, so the mode whose whole purpose is to exercise the historical
+# engine end to end gave a green result while reading zero bars. A quiet market
+# legitimately yields zero signals, so the gate requires loaded bars, not signals.
 SIGNALS="$(printf '%s' "$JOURNAL" | grep -o 'signals=[0-9]*\|Signals=[0-9]*' | tail -1)"
+BARS="$(printf '%s' "$JOURNAL" | grep -o 'M1 bars=[0-9]*' | tail -1 | grep -o '[0-9]*$')"
+LOADED="$(printf '%s' "$JOURNAL" | grep -o 'Symbols [0-9]*/[0-9]*' | tail -1 | sed -n 's#Symbols \([0-9]*\)/.*#\1#p')"
+SCANNED="$(printf '%s' "$JOURNAL" | grep -o 'evaluated [0-9]* of' | tail -1 | grep -o '[0-9]*')"
 case "$VERDICT" in
   *"VALIDATION ready"*|*"AUTOTUNE ready"*)
-    if [ -n "$SIGNALS" ]; then
-      echo "selftest: OK ($MODE report complete, $SIGNALS)"
-      exit 0
+    if [ -z "$SIGNALS" ]; then
+      echo "selftest: FAILED ($VERDICT; the journal holds no report signal line)" >&2
+      exit 1
     fi
+    if [ "${LOADED:-0}" -le 0 ] || [ "${BARS:-0}" -le 0 ]; then
+      echo "selftest: FAILED ($MODE read no history: ${LOADED:-0} symbol(s) loaded, ${BARS:-0} M1 bar(s), ${SCANNED:-0} boundar(ies) evaluated)" >&2
+      echo "  The historical engine cannot be exercised without M1 history: the report" >&2
+      echo "  is empty, not quiet. Open an M1 chart for each symbol so the terminal" >&2
+      echo "  downloads it, confirm the terminal is connected, then re-run." >&2
+      exit 1
+    fi
+    echo "selftest: OK ($MODE report complete, $SIGNALS, ${LOADED} symbol(s), ${BARS} bar(s), ${SCANNED:-0} boundar(ies))"
+    exit 0
     ;;
 esac
 echo "selftest: FAILED ($VERDICT)" >&2

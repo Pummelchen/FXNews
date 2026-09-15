@@ -1,0 +1,12 @@
+# Exceptions for tools/census.py.
+#
+# One identifier per line. Blank lines and lines starting with '#' are ignored. Anything
+# listed here is reported as "allowed" and does not affect the exit status. Prefer deleting
+# the dead identifier or writing the test that uses it; an entry here is a written admission
+# that the identifier is unreachable and is being kept deliberately, so say why on the line
+# above it.
+#
+# The file is empty on purpose: the census is clean (0 findings, 0 allowed), and the file
+# exists so that the path in census.py's usage text and in the wiki's Testing page resolves.
+# Before this it was documented and defaulted to while being absent, which made the
+# documented workflow unreachable (F-029).

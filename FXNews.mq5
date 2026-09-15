@@ -147,6 +147,12 @@ input int HistoricalWarmupBars = 500;
 // Boundaries (scan-timeframe bar closes) evaluated per profile at most; denser
 // history is sub-sampled uniformly and the report prints the coverage.
 input int HistoricalMaxBoundariesPerProfile = 2000;
+// M1 history is downloaded on demand: the first CopyRates for a window the
+// terminal has not cached returns 0 while the download runs, which is not a
+// verdict about the symbol. The historical modes poll for up to this many seconds
+// per symbol before declaring it unavailable, so a fresh terminal produces a
+// report instead of an empty one. 0 restores the old single-attempt behaviour.
+input int HistoricalHistoryWaitSeconds = 60;
 input int AutotuneMinSignals = 100;
 
 
@@ -202,6 +208,10 @@ input int AutotuneMinSignals = 100;
 #define MAX_HISTORICAL_LOOKBACK_DAYS 365
 #define MAX_HISTORICAL_WARMUP_BARS 10000
 #define MAX_HISTORICAL_BOUNDARIES_PER_PROFILE 20000
+// Upper bound on the on-demand history wait, so a mistyped value cannot stall a
+// validation run for an hour per symbol. Declared here so the bound enforced in
+// ValidateInputs() stays tied to the value actually used.
+#define MAX_HISTORICAL_HISTORY_WAIT_SECONDS 600
 // Historical model constants: an aggregated bar or an outcome window needs
 // this share of its minutes present; spread and volume baselines look back
 // this far; the minute-scale acceleration proxy ramps over this ATR/minute.
@@ -1108,6 +1118,8 @@ bool ValidateInputs()
       HistoricalStepMinutes < 1 || HistoricalStepMinutes > 60 || HistoricalWarmupBars < 100 ||
       HistoricalWarmupBars > MAX_HISTORICAL_WARMUP_BARS || HistoricalMaxBoundariesPerProfile < 10 ||
       HistoricalMaxBoundariesPerProfile > MAX_HISTORICAL_BOUNDARIES_PER_PROFILE ||
+      HistoricalHistoryWaitSeconds < 0 ||
+      HistoricalHistoryWaitSeconds > MAX_HISTORICAL_HISTORY_WAIT_SECONDS ||
       AutotuneMinSignals < 10)
    {
       Print("FXNews: historical validation/autotune inputs are inconsistent.");
@@ -2363,11 +2375,36 @@ int LoadHistoricalM1Rates(const string symbol, MqlRates &rates[])
       last_closed = TimeCurrent() - 60;
 
    datetime from_time = last_closed - (datetime)HistoricalLookbackDays * 86400;
-   ResetLastError();
    ArraySetAsSeries(rates, false);
-   int copied = CopyRates(symbol, PERIOD_M1, from_time, last_closed, rates);
+
+   // CopyRates starts an on-demand download for an uncached window and returns 0
+   // until it has data, so the first empty result is not a verdict about the
+   // symbol. Treating it as one produced an empty report on a terminal that had
+   // simply not opened the symbol yet. Poll inside a bounded budget, honour
+   // IsStopped so the terminal can still abort, and report a real wait once so a
+   // slow download stays distinguishable from a genuine data gap.
+   uint wait_started = GetTickCount();
+   int copied = 0;
+   for(;;)
+   {
+      ResetLastError();
+      copied = CopyRates(symbol, PERIOD_M1, from_time, last_closed, rates);
+      if(copied > 0)
+         break;
+      if(IsStopped())
+         return 0;
+      if((int)((GetTickCount() - wait_started) / 1000) >= HistoricalHistoryWaitSeconds)
+         break;
+      Sleep(250);
+   }
+
    if(copied <= 0)
       return 0;
+
+   int waited_seconds = (int)((GetTickCount() - wait_started) / 1000);
+   if(waited_seconds >= 2)
+      PrintFormat("FXNews %s: waited %d s for %d M1 bars to download.",
+                  symbol, waited_seconds, ArraySize(rates));
 
    return ArraySize(rates);
 }

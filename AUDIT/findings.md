@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 52 | done 29 | open 23 | blocked 0 | S0:1 S1:11 S2:18 S3:22**
+**total 53 | done 30 | open 23 | blocked 0 | S0:1 S1:11 S2:19 S3:22**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -39,6 +39,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-025 | S2 | ops | START | `session credential handling` | A live-looking GitHub PAT was supplied in plaintext and is present in the agent session transcript |
 | F-048 | S2 | historical | START | `FXNews.mq5 (BuildAutotuneReport / BuildValidationReport interpretation lines)` | The historical reports print the same generic interpretation whether or not higher score buckets actually produced better outcomes |
 | F-049 | S2 | tests | START | `FXNews.mq5 (UpdateAlertGroups, DispatchPendingAlerts, UpdateDashboard, BuildDiagnosticsLines)` | Alert dispatch, correlation grouping and dashboard rendering still have no automated coverage |
+| F-050 | S2 | tooling | DONE | `.github/workflows/ci.yml; tools/selftest-macos.sh:89-96` | The CI workflow pinned every analysis tool except shellcheck, and the unpinned one failed the build |
 | F-010 | S3 | historical | START | `FXNews.mq5:2926-2930,3039` | The 85+ bucket in the historical report is unreachable (now empirically confirmed; the wiki already documents the empty bucket, so only the unannotated report row remains) |
 | F-020 | S3 | scoring | DONE | `FXNews.mq5:8266-8270,4661,5114-5116` | RobustZ returning 0 on degenerate dispersion is the correct z, not an imputation (filed as a false-measured spread_z; disproved) |
 | F-026 | S3 | tooling | DONE | `tools/census.py:273,274` | ruff F541: two f-strings without placeholders |
@@ -316,8 +317,8 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
   > .github contains only traffic.json; there is no workflow. Known-Limitations.md:7 lists this. The MQL5 compile gate cannot run on a stock GitHub runner, but census.py, shellcheck, ruff, mypy, the secret scan and the new contract test all can, and they are exactly the gates that catch the classes of defect this audit found.
 
 - **Fix:** New .github/workflows/ci.yml runs the Linux-runnable gates on every push and pull request: census, contracts, ruff check, ruff format --check, mypy --strict, bandit, shellcheck, shfmt -d and a gitleaks scan of the full history (fetch-depth 0). Tool versions are pinned in the workflow and match AUDIT/environment.md. The workflow states in its own header, and the README and wiki now state, that the two MetaTrader gates are NOT covered and a green workflow is not a release gate.
-- **Evidence (after):** All nine CI steps were run locally and pass (census, contracts, ruff check, ruff format --check, mypy --strict, bandit, shellcheck, shfmt -d, gitleaks). The pinned release downloads were verified reachable (HTTP 200 for shfmt 3.14.1 and gitleaks 8.30.1) and the three PyPI pins exist. The workflow YAML parses: 1 job, 12 steps. This task was only possible after F-026, F-027 and F-028 cleared the findings that would have made the first run red.
-- **Notes:** Deliberately does not attempt the MQL5 gates in CI. Doing so would require installing Wine, Rosetta 2 and MetaTrader with broker history on a hosted runner, and a workflow that pretended to cover them would be worse than none.
+- **Evidence (after):** All nine CI steps were run locally and pass (census, contracts, ruff check, ruff format --check, mypy --strict, bandit, shellcheck, shfmt -d, gitleaks). The pinned release downloads were verified reachable (HTTP 200 for shfmt 3.14.1 and gitleaks 8.30.1) and the three PyPI pins exist. The workflow YAML parses: 1 job, 12 steps. This task was only possible after F-026, F-027 and F-028 cleared the findings that would have made the first run red. HONEST ADDENDUM: the first real CI run FAILED at shell lint, which the local run had passed. The workflow pinned every tool except shellcheck and used the runner image's older release, which reports a trap-invoked function body as unreachable (SC2317) while shellcheck 0.11.0 does not. Filed as F-050 and fixed; the run after the fix is the evidence that matters, and the local pass alone was not sufficient evidence.
+- **Notes:** Deliberately does not attempt the MQL5 gates in CI. Doing so would require installing Wine, Rosetta 2 and MetaTrader with broker history on a hosted runner, and a workflow that pretended to cover them would be worse than none. The unpinned shellcheck was a reproducibility defect in this task's own deliverable, not in the product, and CI caught it - which is the point of adding CI in the first place.
 
 ### F-017 (S2, validation) — MaxQuoteAgeSeconds and FullHoldScoreSeconds have no upper bound, so extreme values silently disable the freshness gate or make the HYBRID hold clause unreachable
 
@@ -433,6 +434,19 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
   > F-008's original scope named four areas and CLAUDE.md records that all four were verified only by manual runtime observation. The lifecycle is now covered by the self-test group 'signal lifecycle'. Still uncovered: UpdateAlertGroups (group binding and leader election with hysteresis), DispatchPendingAlerts (the 10/minute, 2/scan and 30 s/profile rate limits, bounded retries, and the downgrade of a faded strong upgrade), and the dashboard (row composition to the 63-character budget, stale-row deletion, the ShowActiveSignalRows path, and the signal-history eviction dwell). Two of this audit's findings - F-011 (g_signal_history_dirty never cleared) and F-013 (every timeframe of a symbol shares a group) - live in that uncovered region.
 
 - **Notes:** Alert dispatch can be tested without a terminal if the notification side effects are separated from the decision logic: extract the rate-limit and leader-election decisions into pure predicates taking the current time, then assert them the way the lifecycle test asserts UpdateSignalState. Dashboard rendering is harder because it writes chart objects; the tractable part is the pure text composition (DashboardRowText, FitDashboardText, WrapLabelText, FormatSignalHistoryText), which already has partial coverage, plus the eviction rule in PushSignalHistory operating on a synthetic history array. Rejected alternative: drive the harness to assert chart objects through the terminal - it would catch real rendering regressions but makes the gate depend on chart state and is far more brittle.
+
+### F-050 (S2, tooling) — The CI workflow pinned every analysis tool except shellcheck, and the unpinned one failed the build
+
+- **Status:** DONE  |  **Category:** deps  |  **Host:** node3 + GitHub runner  |  **Commit:** -
+- **Location:** `.github/workflows/ci.yml; tools/selftest-macos.sh:89-96`
+- **Discovered by:** the first real CI run of F-016 - found by CI, not by review
+- **Evidence (before):**
+
+  > Run 34980126739 (branch audit/2026-09-15) failed at the 'Shell lint' step with exit 1 while the identical command passed locally. The log names the cause: SC2317 (info) 'Command appears to be unreachable' on the three commands inside cleanup(), at tools/selftest-macos.sh lines 92-94. That function is reached only through 'trap cleanup EXIT', which the runner's older shellcheck (Ubuntu 24.04 provides 0.9.0) cannot see, so it reports the body as unreachable. Locally shellcheck is 0.11.0, which does not enable SC2317 by default and so passed. The workflow pinned ruff, mypy, bandit, shfmt and gitleaks but took shellcheck from the runner image, making the pipeline's result depend on the image version.
+
+- **Fix:** Two changes, because there were two problems. (1) Reproducibility: shellcheck is now pinned via SHELLCHECK_VERSION 0.11.0 and installed from its release tarball, so a local pass means a CI pass. (2) The false positive itself is removed rather than suppressed: the cleanup function is inlined into the trap command, so no indirect invocation exists for a static analyser to mis-read, and the pre-existing '# shellcheck disable=SC2329' directive is deleted. No disable directive was added - the brief forbids weakening a check to make it pass, and shellcheck's own message says the finding is for indirect invocation.
+- **Evidence (after):** shfmt -d clean and shellcheck 0.11.0 clean on all three scripts, with zero 'shellcheck disable' directives remaining in them except the two pre-existing SC1003 lexical notes. The pinned URL returns HTTP 200. The EXIT trap was verified to still clean up: after a full gate run the harness install directory, the harness script and the preset are all removed, and the gate reports 145 passed, 0 failed of 145. The workflow YAML still parses with six pinned versions.
+- **Notes:** This is the failure mode F-016 exists to prevent, occurring in F-016's own deliverable within minutes of it being pushed, and caught by CI rather than by review. Recorded rather than quietly fixed, because it is also the strongest available evidence that the workflow does something.
 
 ### F-010 (S3, historical) — The 85+ bucket in the historical report is unreachable (now empirically confirmed; the wiki already documents the empty bucket, so only the unannotated report row remains)
 

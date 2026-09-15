@@ -87,13 +87,12 @@ cp "$ROOT/FXNews.ex5" "$INSTALL_DIR/FXNews.ex5" || exit 2
 cp "$ROOT/tools/mql5/FXNewsSelfTest.ex5" "$SCRIPT_DIR/FXNewsSelfTest.ex5" || exit 2
 
 WORK="$(mktemp -d -t fxnews-selftest)"
-# shellcheck disable=SC2329  # invoked through the EXIT trap
-cleanup() {
-  rm -rf "$WORK"
-  rm -rf "$INSTALL_DIR"
-  rm -f "$SCRIPT_DIR/FXNewsSelfTest.ex5" "$PRESET"
-}
-trap cleanup EXIT
+# Inlined rather than defined as a function and referenced by `trap cleanup EXIT`:
+# a function reached only through a trap is invisible to static analysis, which
+# reported its body as unreachable (SC2317 on shellcheck 0.9, and SC2329 on newer
+# versions, which is why the older code needed a disable directive). Naming the
+# commands directly removes the need to suppress anything.
+trap 'rm -rf "$WORK"; rm -rf "$INSTALL_DIR"; rm -f "$SCRIPT_DIR/FXNewsSelfTest.ex5" "$PRESET"' EXIT
 
 # The script's inputs travel through a preset file; the historical modes get a
 # small basket so a run finishes in minutes rather than the full default sweep.

@@ -10,7 +10,7 @@
 #      with zero failed assertions
 #
 # Usage:  ./tools/selftest-macos.sh [--validation | --autotune]
-#   default      run the built-in self-test (72 pure-helper assertions)
+#   default      run the built-in self-test; the result line prints the total
 #   --validation run a VALIDATION pass over EURUSD,GBPUSD on M5,H1 and require
 #                a complete report (exercises the historical engine end to end)
 #   --autotune   the same for an AUTOTUNE sweep

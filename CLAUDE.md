@@ -42,7 +42,7 @@ Alongside the build, run the other two gates:
 
 ```bash
 tools/census.py            # dead-code and placeholder census, exits non-zero on any finding
-./tools/selftest-macos.sh  # 123 assertions in the terminal; --validation / --autotune run
+./tools/selftest-macos.sh  # self-test in the terminal; --validation / --autotune run
                            # a short historical pass and require a complete report
 ```
 

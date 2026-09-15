@@ -47,7 +47,7 @@ runs the dead-code and placeholder census (Python 3.14) and exits non-zero on an
 ./tools/selftest-macos.sh
 ```
 
-compiles the indicator, runs its built-in self-test (123 assertions) headlessly in the terminal and exits non-zero unless every assertion passes; `--validation` and `--autotune` run a short historical pass the same way. See [Testing and Validation](https://github.com/Pummelchen/FXNews/wiki/Testing-and-Validation).
+compiles the indicator, runs its built-in self-test headlessly in the terminal and exits non-zero unless every assertion passes (`--validation` and `--autotune` run a short historical pass the same way; the self-test prints its own assertion total, so no count is duplicated here). See [Testing and Validation](https://github.com/Pummelchen/FXNews/wiki/Testing-and-Validation).
 
 ## Documentation
 

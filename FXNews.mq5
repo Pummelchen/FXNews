@@ -2267,6 +2267,28 @@ void SelfTestAlertGroupIdentity()
    SelfTestGroup("alert group", before);
 }
 
+// The BAR_CLOSE confirmation rule, which no other test could reach because the mode is an
+// input. The first assertion pins the redundancy F-041 reported - the caller has already
+// checked the floor - and the second pins the defence that redundancy represents.
+void SelfTestBarCloseConfirmation()
+{
+   int before = g_selftest_failed;
+
+   SelfTestCheck(BarCloseConfirms(D'2026.09.15 10:00', D'2026.09.15 10:05', 90.0, 50.0),
+                 "bar-close confirmation: a surviving candidate above the floor confirms");
+
+   SelfTestCheck(!BarCloseConfirms(D'2026.09.15 10:00', D'2026.09.15 10:05', 40.0, 50.0),
+                 "bar-close confirmation: a surviving candidate below the floor does not confirm (F-041)");
+
+   SelfTestCheck(!BarCloseConfirms(0, D'2026.09.15 10:05', 90.0, 50.0),
+                 "bar-close confirmation: no candidate bar means no confirmation");
+
+   SelfTestCheck(!BarCloseConfirms(D'2026.09.15 10:00', D'2026.09.15 10:00', 90.0, 50.0),
+                 "bar-close confirmation: the trigger bar must be later than the candidate bar");
+
+   SelfTestGroup("bar-close confirmation", before);
+}
+
 // One case per guard block in ValidateInputsCore, because the validation only ran at
 // OnInit and nothing could reach its rejection paths: the inputs are read-only, so
 // before the extraction no test could make one fail. Baseline first, then each field
@@ -2648,6 +2670,7 @@ void RunSelfTest()
    SelfTestComposerEngineGating();
    SelfTestSignalLifecycle();
    SelfTestHistoryRefresh();
+   SelfTestBarCloseConfirmation();
    SelfTestAlertGroupIdentity();
    SelfTestBreakoutBlend();
    SelfTestInputValidation();
@@ -7377,6 +7400,26 @@ bool IsActiveState(const BreakoutEventState state)
    return (state == STATE_ACTIVE_CONFIRMED);
 }
 
+// BAR_CLOSE confirmation: the candidate has survived to the close of the next bar and its
+// score still meets the display floor. Pure over its arguments because SignalConfirmationMode
+// is an input variable and a self-test cannot set it, so this is the only way to exercise the
+// branch at all (F-041).
+//
+// The threshold clause is redundant at both current call sites - PickBestDirection has already
+// required MeetsThreshold(best_score, MinDisplayConfidence), and the reversal path requires
+// the stronger StrongAlertConfidence - and it is kept deliberately. It makes the branch mean
+// "still valid at the bar close" on its own terms rather than depending on a caller
+// precondition a future edit could drop, and the self-test below asserts it is enforced.
+bool BarCloseConfirms(const datetime candidate_bar_time,
+                      const datetime trigger_bar_time,
+                      const double score,
+                      const double min_confidence)
+{
+   return (candidate_bar_time > 0 &&
+           trigger_bar_time > candidate_bar_time &&
+           MeetsThreshold(score, min_confidence));
+}
+
 bool IsConfirmedSignal(const int index,
                        const int direction,
                        const double score,
@@ -7386,9 +7429,10 @@ bool IsConfirmedSignal(const int index,
       return true;
    if(SignalConfirmationMode == CONFIRM_BAR_CLOSE)
    {
-      return (g_profiles[index].candidate_bar_time > 0 &&
-              g_profiles[index].trigger_bar_time > g_profiles[index].candidate_bar_time &&
-              MeetsThreshold(score, MinDisplayConfidence));
+      return BarCloseConfirms(g_profiles[index].candidate_bar_time,
+                              g_profiles[index].trigger_bar_time,
+                              score,
+                              MinDisplayConfidence);
    }
 
    double hold = (direction == DIR_UP ?

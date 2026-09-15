@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 53 | done 30 | open 23 | blocked 0 | S0:1 S1:11 S2:19 S3:22**
+**total 53 | done 31 | open 22 | blocked 0 | S0:1 S1:11 S2:19 S3:22**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -37,7 +37,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-023 | S2 | tests | START | `FXNews.mq5:930-1109` | No test exercises any ValidateInputs rejection path |
 | F-024 | S2 | tooling | DONE | `tools/build-macos.sh:47,116-120` | build-macos.sh cannot distinguish 'Wine cannot execute' from 'the compiler produced no result line', and reports the wrong exit code |
 | F-025 | S2 | ops | START | `session credential handling` | A live-looking GitHub PAT was supplied in plaintext and is present in the agent session transcript |
-| F-048 | S2 | historical | START | `FXNews.mq5 (BuildAutotuneReport / BuildValidationReport interpretation lines)` | The historical reports print the same generic interpretation whether or not higher score buckets actually produced better outcomes |
+| F-048 | S2 | historical | DONE | `FXNews.mq5 (BuildAutotuneReport / BuildValidationReport interpretation lines)` | The historical reports print the same generic interpretation whether or not higher score buckets actually produced better outcomes |
 | F-049 | S2 | tests | START | `FXNews.mq5 (UpdateAlertGroups, DispatchPendingAlerts, UpdateDashboard, BuildDiagnosticsLines)` | Alert dispatch, correlation grouping and dashboard rendering still have no automated coverage |
 | F-050 | S2 | tooling | DONE | `.github/workflows/ci.yml; tools/selftest-macos.sh:89-96` | The CI workflow pinned every analysis tool except shellcheck, and the unpinned one failed the build |
 | F-010 | S3 | historical | START | `FXNews.mq5:2926-2930,3039` | The 85+ bucket in the historical report is unreachable (now empirically confirmed; the wiki already documents the empty bucket, so only the unannotated report row remains) |
@@ -415,14 +415,16 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-048 (S2, historical) — The historical reports print the same generic interpretation whether or not higher score buckets actually produced better outcomes
 
-- **Status:** START  |  **Category:** docs  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** da55cbc
 - **Location:** `FXNews.mq5 (BuildAutotuneReport / BuildValidationReport interpretation lines)`
 - **Discovered by:** Phase D - the first successful AUTOTUNE run in this audit
 - **Evidence (before):**
 
   > The report prints 'Interpretation: score is a ranking metric. A useful score should show better R/PF in higher buckets.' unconditionally. On the 2026-09-15 AUTOTUNE run (GBPUSD, 2584 boundaries, 603 signals, 48.8 days) the observed bucket AvgR30 was <65 -0.068, 65-69 -0.105, 70-74 -0.075, 75-79 -0.237, 80-84 -0.110 - i.e. no monotone improvement, and the 75-79 bucket was the worst. All buckets were negative and no candidate beat CURRENT (improvement +0.000 on every metric). The report nevertheless ended with 'Recommended settings: ...' and the same generic interpretation, so an operator reading only the tail of the Journal would not learn that the ranking failed to hold on the very sample the recommendation came from.
 
-- **Notes:** Correct fix is to compute the bucket monotonicity the report already assembles and state the outcome explicitly: whether higher buckets produced better R, and if not, that the score showed no ranking edge on this sample and the recommendation rests on an unvalidated ordering. Rejected alternative: suppress the recommendation entirely - the product deliberately keeps Autotune advisory and never writes settings, and there is no principled threshold for suppression; disclosure is the honest change. Note this is a reporting gap, not a scoring defect: whether the score *should* rank better is a strategy question for a human, and this audit does not claim the score is wrong, only that the report does not tell the truth about what it observed.
+- **Fix:** New pure EvaluateHistoricalRanking + AddHistoricalRankingVerdict report whether the sample supports the score's ranking claim, with the bucket numbers; both report builders call it and the generic Interpretation line no longer asserts the claim. Disclosure rather than suppression: Autotune stays advisory.
+- **Evidence (after):** New self-test group 'ranking check' (4 assertions) including the exact falling profile the AUTOTUNE run produced. BEFORE (comparison inverted): 147 passed, 2 failed of 149, exit 1. AFTER: 149 passed, 0 failed of 149. New contract 'ranking-disclosure' pins both call sites; with the call removed from BuildAutotuneReport only, contracts fails with a precise message. End-to-end --validation exit 0 prints 'Ranking check: NOT SUPPORTED on this sample - the highest populated bucket (80+) averaged -0.095 R against -0.094 R in the lowest (60+), and only 3 of 4 adjacent pairs improved.' Build 0/0; census 0; contracts 0 across 6.
+- **Notes:** The observation behind this finding stands and is material to a go-live decision: on this single-symbol 48.8-day sample the score showed no ranking edge and no candidate beat CURRENT. This task fixes the reporting, not the scoring; whether the score should rank better is a strategy question for a human, and the audit does not claim the score is wrong.
 
 ### F-049 (S2, tests) — Alert dispatch, correlation grouping and dashboard rendering still have no automated coverage
 

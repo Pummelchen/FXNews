@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 52 | done 21 | open 31 | blocked 0 | S0:1 S1:11 S2:18 S3:22**
+**total 52 | done 23 | open 29 | blocked 0 | S0:1 S1:11 S2:18 S3:22**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -23,11 +23,11 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-047 | S1 | historical | DONE | `FXNews.mq5:2140 (LoadHistoricalM1Rates), 2060 (ProcessHistoricalProfile)` | The historical modes treat the first empty M1 copy as final, so a history download in progress yields an empty report |
 | F-001 | S2 | scoring | DONE | `FXNews.mq5:5222,5310,5324` | ComputeBreakoutStructure did not initialise its own output, so the documented pure shared function returned garbage to a direct caller (originally filed as a hold_score imputation) |
 | F-009 | S2 | scoring | DONE | `FXNews.mq5:4476-4477,7956-7957` | session_baseline_ready is a single flag for three independent baselines, so a z-score can be reported as measured when its own baseline never received samples |
-| F-011 | S2 | dashboard | START | `FXNews.mq5:3788,6802-6804,7182` | g_signal_history_dirty is never cleared while active signal rows are rendered, forcing a full dashboard rebuild every scan |
+| F-011 | S2 | dashboard | DONE | `FXNews.mq5:3788,6802-6804,7182` | g_signal_history_dirty is never cleared while active signal rows are rendered, forcing a full dashboard rebuild every scan |
 | F-012 | S2 | scoring | START | `FXNews.mq5:5330-5331` | wick_rejection_penalty is subtracted from the breakout blend without its weight being added to the normaliser |
 | F-013 | S2 | dashboard | START | `FXNews.mq5:6325,6246` | DominantCurrencyFlow's own_group key makes every timeframe of one symbol share a correlation group, so at most one of them can ever alert |
 | F-014 | S2 | tooling | DONE | `tools/build-macos.sh:40-43; tools/selftest-macos.sh:38-40` | The Wine path, WINEPREFIX and MT5 path constants are duplicated across the two gate scripts and can drift |
-| F-015 | S2 | tooling | START | `FXNews.mq5:1725; tools/mql5/FXNewsSelfTest.mq5:14,32-34; tools/selftest-macos.sh:72,139,159-163` | The indicator, the harness and the gate script are coupled by undocumented string literals with no contract test |
+| F-015 | S2 | tooling | DONE | `FXNews.mq5:1725; tools/mql5/FXNewsSelfTest.mq5:14,32-34; tools/selftest-macos.sh:72,139,159-163` | The indicator, the harness and the gate script are coupled by undocumented string literals with no contract test |
 | F-016 | S2 | ops | START | `.github/` | No CI workflow: the three release gates are never run automatically |
 | F-017 | S2 | validation | START | `FXNews.mq5:942,988-995` | MaxQuoteAgeSeconds and FullHoldScoreSeconds have no upper bound, so extreme values silently disable the freshness gate or make the HYBRID hold clause unreachable |
 | F-018 | S2 | scoring | DONE | `FXNews.mq5:5026-5031` | single_feature_cap is applied without checking that the feature it measures was evaluated |
@@ -247,14 +247,16 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-011 (S2, dashboard) — g_signal_history_dirty is never cleared while active signal rows are rendered, forcing a full dashboard rebuild every scan
 
-- **Status:** START  |  **Category:** perf  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** perf  |  **Host:** node3  |  **Commit:** 1abef21
 - **Location:** `FXNews.mq5:3788,6802-6804,7182`
 - **Discovered by:** Phase B L5 + dashboard audit
 - **Evidence (before):**
 
   > The flag is set at ':7240' and ':7265' and cleared only in RefreshVisibleSignalHistory (:7182), which is reachable only through RefreshVisibleSignalHistoryIfDue (:7135-7145) from the 'if(row == first_row)' branch of UpdateDashboard (:6802-6804). With ShowActiveSignalRows=true and at least one ranked row, that branch is skipped, the flag stays true, and ScanAll's condition at ':3788' forces UpdateDashboard every scan, defeating DisplayUpdateSeconds. Verified by grepping every write site of the flag.
 
-- **Notes:** The default ShowActiveSignalRows=false masks it.
+- **Fix:** UpdateDashboard now calls RefreshVisibleSignalHistoryIfDue() before it branches on the display mode, so the cache behind g_signal_history_dirty is always current and the flag is always consumed; the branch now decides only what to render.
+- **Evidence (after):** BEFORE (refresh moved back inside the display branch): tools/contracts.py FAILS with 'UpdateDashboard refreshes the history only after if(ShowActiveSignalRows); with active rows enabled the dirty flag is then never cleared and the dashboard rebuilds every scan (F-011)', exit 1. AFTER: 0 violations, exit 0. New self-test group 'history refresh' asserts the flag-consume contract directly; full gate 145 passed, 0 failed of 145. Build 0/0; census 0 findings; shellcheck clean.
+- **Notes:** The call-site part of this fix has no runtime unit test by design: driving UpdateDashboard inside the self-test creates chart objects and could overwrite the harness's own verdict label. It is machine-checked structurally by tools/contracts.py instead, which is what makes the regression guard real rather than a comment.
 
 ### F-012 (S2, scoring) — wick_rejection_penalty is subtracted from the breakout blend without its weight being added to the normaliser
 
@@ -293,14 +295,16 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-015 (S2, tooling) — The indicator, the harness and the gate script are coupled by undocumented string literals with no contract test
 
-- **Status:** START  |  **Category:** unsafe  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** unsafe  |  **Host:** node3  |  **Commit:** 1abef21
 - **Location:** `FXNews.mq5:1725; tools/mql5/FXNewsSelfTest.mq5:14,32-34; tools/selftest-macos.sh:72,139,159-163`
 - **Discovered by:** Phase B L1
 - **Evidence (before):**
 
   > Four implicit contracts: the verdict labels 'SELFTEST PASSED'/'VALIDATION ready'/'AUTOTUNE ready'/'ABORTED'; the result line 'RESULT: N passed, M failed'; the harness indicator path 'FXNews-selftest\FXNews'; and the install directory. Rewording a label in the indicator silently turns the gate into a timeout failure with no indication of the cause.
 
-- **Notes:** Fix is a contract test that asserts the literals agree across all three files, so a rename fails loudly at the gate instead of timing out.
+- **Fix:** New tools/contracts.py checks five cross-file contracts across FXNews.mq5, tools/mql5/FXNewsSelfTest.mq5 and tools/selftest-macos.sh - verdict labels, the result line, the report fields the gate parses, the harness install path - plus the F-011 structural invariant. selftest-macos.sh runs it before compiling; CLAUDE.md and README.md document it as a gate.
+- **Evidence (after):** BEFORE (one verdict label reworded in the harness only): contracts.py FAILS with 'FXNewsSelfTest.mq5 no longer contains SELFTEST PASSED', exit 1. AFTER: 0 violations across 5 contracts, exit 0. contracts.py itself passes ruff check, ruff format, mypy --strict and bandit. Two mistakes in the checker were found by running it and fixed rather than loosened: it first demanded 'SELFTEST FAILED' in the shell gate, which only needs to recognise the passing verdict, and ruff flagged a nested if.
+- **Notes:** Not BLOCKED and not partial: the checker covers every contract identified in the inventory's dependency graph. An unenforced checker would have been worthless, which is why it was wired into the gate in the same commit.
 
 ### F-016 (S2, ops) — No CI workflow: the three release gates are never run automatically
 

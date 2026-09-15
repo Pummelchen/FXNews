@@ -1632,6 +1632,37 @@ void SelfTestExecutionGate()
    SelfTestGroup("execution gate", before);
 }
 
+// An impulse term whose inputs do not exist must leave the blend and the
+// normaliser, not enter them at zero. This is the shared pure blend, so the test
+// pins the contract for the live scanner and the validator alike; the validator
+// used to force both weights on, which made its scores incomparable with live on
+// thin history.
+void SelfTestImpulseAvailability()
+{
+   int before = g_selftest_failed;
+
+   ImpulseQuality impulse;
+   impulse.measured = true;
+   impulse.atr_expansion_score = 1.0;
+   impulse.acceleration_score = 0.0;      // a zero reading, but only if measured
+   impulse.tick_volume_available = false;
+   impulse.tick_volume_z = 0.0;
+   impulse.tick_rate_available = false;
+   impulse.tick_rate_z = 0.0;
+
+   // Speed (0.25) and ATR expansion (0.20) measured at full quality, everything
+   // else unavailable: the blend must be exactly 1.0, i.e. nothing was imputed.
+   BlendImpulseScore(impulse, 1.0, false, false, 0.0);
+   SelfTestNear(impulse.score, 1.0, "impulse blend: unavailable terms leave the normaliser");
+
+   // With the same zero readings declared available they carry weight, so the
+   // score must drop to 0.45/0.75. If the two differ, exclusion is real.
+   BlendImpulseScore(impulse, 1.0, true, true, 0.0);
+   SelfTestNear(impulse.score, 0.60, "impulse blend: an available zero term carries weight");
+
+   SelfTestGroup("impulse availability", before);
+}
+
 // The historical engine on a synthetic minute series with a known shape and
 // a deliberate ten-minute gap after bar 250.
 void SelfTestHistoricalEngine()
@@ -1849,6 +1880,7 @@ void RunSelfTest()
    SelfTestAvailabilityAndComposer();
    SelfTestSessionBaselines();
    SelfTestExecutionGate();
+   SelfTestImpulseAvailability();
    SelfTestHistoricalEngine();
    SelfTestSignalHistory();
 
@@ -1974,9 +2006,11 @@ struct HistoricalBoundaryFeatures
    bool speed_ready[SPEED_WINDOW_COUNT];
    double speed_z_up[SPEED_WINDOW_COUNT];   // signed for DIR_UP; negate for DIR_DOWN
    double acceleration_up;                  // ATR per minute, signed for DIR_UP
+   bool acceleration_available;             // both the 5- and the 30-minute window exist
    bool tick_volume_available;
    double tick_volume_z;
    double move5_atr_up;                     // five-minute close move in ATR, signed for DIR_UP
+   bool continuation_available;             // the 5-minute window exists
    bool m5_available;
    double m5_move_up;                       // last closed 5-minute bar move / ATR5
    bool m15_available;
@@ -2755,8 +2789,14 @@ bool BuildHistoricalBoundaryFeatures(const int profile_index,
    int index30 = HistoricalIndexAtOrBefore(rates, copied, rates[index].time - 1800);
    double move5_pips = (index5 >= 0 ? (rates[index].close - rates[index5].close) / pip_size : 0.0);
    double move30_pips = (index30 >= 0 ? (rates[index].close - rates[index30].close) / pip_size : 0.0);
-   features.move5_atr_up = (index5 >= 0 ? move5_pips / features.atr_pips : 0.0);
-   features.acceleration_up = (index5 >= 0 && index30 >= 0 ?
+   // A window that does not exist is unmeasured, not zero: the blend must drop
+   // the term's weight rather than fold a neutral 0 in. Without these flags the
+   // historical validator forced both weights on, which is why its scores were
+   // not comparable with the live scanner's on thin history.
+   features.continuation_available = (index5 >= 0);
+   features.acceleration_available = (index5 >= 0 && index30 >= 0);
+   features.move5_atr_up = (features.continuation_available ? move5_pips / features.atr_pips : 0.0);
+   features.acceleration_up = (features.acceleration_available ?
                                (move5_pips / 5.0 - move30_pips / 30.0) / features.atr_pips : 0.0);
 
    features.tick_volume_available = HistoricalTickVolumeZ(bars, bars_needed, features.tick_volume_z);
@@ -2852,7 +2892,8 @@ void ScoreHistoricalBoundary(const HistoricalBoundaryFeatures &features,
          double move5 = features.move5_atr_up * (double)direction;
          double continuation = SmoothStep(0.0, 0.80, move5);
          score.impulse.exhaustion_penalty = SmoothStep(MaxExhaustionAtr, MaxExhaustionAtr * 1.70, move5);
-         BlendImpulseScore(score.impulse, speed_score, true, true, continuation);
+         BlendImpulseScore(score.impulse, speed_score,
+                           features.acceleration_available, features.continuation_available, continuation);
          score.impulse.pass = (speed_max >= params.minute_impulse_z || score.impulse.atr_expansion_score >= 0.45);
       }
    }

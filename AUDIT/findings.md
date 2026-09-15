@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 55 | done 47 | open 8 | blocked 0 | S0:1 S1:13 S2:16 S3:25**
+**total 55 | done 49 | open 6 | blocked 0 | S0:1 S1:13 S2:16 S3:25**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -39,7 +39,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-048 | S2 | historical | DONE | `FXNews.mq5 (BuildAutotuneReport / BuildValidationReport interpretation lines)` | The historical reports print the same generic interpretation whether or not higher score buckets actually produced better outcomes |
 | F-049 | S2 | tests | START | `FXNews.mq5 (UpdateAlertGroups, DispatchPendingAlerts, UpdateDashboard, BuildDiagnosticsLines)` | Alert dispatch, correlation grouping and dashboard rendering still have no automated coverage |
 | F-050 | S2 | tooling | DONE | `.github/workflows/ci.yml; tools/selftest-macos.sh:89-96` | The CI workflow pinned every analysis tool except shellcheck, and the unpinned one failed the build |
-| F-010 | S3 | historical | START | `FXNews.mq5:2926-2930,3039` | The 85+ bucket in the historical report is unreachable (now empirically confirmed; the wiki already documents the empty bucket, so only the unannotated report row remains) |
+| F-010 | S3 | historical | DONE | `FXNews.mq5:2926-2930,3039` | The 85+ bucket in the historical report is unreachable (now empirically confirmed; the wiki already documents the empty bucket, so only the unannotated report row remains) |
 | F-012 | S3 | scoring | DONE | `FXNews.mq5:5330-5331` | DISPROVED: the wick penalty's missing denominator entry is the correct arrangement |
 | F-013 | S3 | dashboard | DONE | `FXNews.mq5:6325,6246` | DOMINANT FLOW's fallback group id is shared by every timeframe of a symbol - deliberate, not a defect |
 | F-020 | S3 | scoring | DONE | `FXNews.mq5:8266-8270,4661,5114-5116` | RobustZ returning 0 on degenerate dispersion is the correct z, not an imputation (filed as a false-measured spread_z; disproved) |
@@ -62,7 +62,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-041 | S3 | logic | START | `FXNews.mq5:6187,6410` | Redundant threshold re-check in IsConfirmedSignal for CONFIRM_BAR_CLOSE |
 | F-042 | S3 | dashboard | DONE | `FXNews.mq5:7261-7262` | PushSignalHistory's shift loop copies empty slots when the list is not yet full |
 | F-043 | S3 | logic | DONE | `FXNews.mq5:8198-8208` | DISPROVED: SmoothStep's edge re-orientation is a tested fix for a pre-1.4 defect |
-| F-044 | S3 | docs | START | `FXNews.mq5:4401-4425` | The ATR definition (simple mean of true range, not Wilder smoothing) is undocumented |
+| F-044 | S3 | docs | DONE | `FXNews.mq5:4401-4425` | The ATR definition (simple mean of true range, not Wilder smoothing) is undocumented |
 | F-045 | S3 | tooling | START | `tools/build-macos.sh:150-156` | --install creates the destination directory silently and never verifies the terminal can load the binary |
 
 ## Detail
@@ -454,14 +454,16 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-010 (S3, historical) — The 85+ bucket in the historical report is unreachable (now empirically confirmed; the wiki already documents the empty bucket, so only the unannotated report row remains)
 
-- **Status:** START  |  **Category:** dead  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** dead  |  **Host:** node3  |  **Commit:** ba05024
 - **Location:** `FXNews.mq5:2926-2930,3039`
 - **Discovered by:** Phase B L1 + historical audit
 - **Evidence (before):**
 
   > Flow is never populated in a historical run, so ComposeSignalScore always applies flow_absent_cap at 84.0 (:4969-4972); ScoreBucketFloor can therefore never return 85 for a historical score, AddHistoricalBucketStats never increments bucket85_count (:2926-2930), and the report row (:3039) always prints zero. Empirically confirmed on 2026-09-15: the AUTOTUNE report prints '85+ : 0 | +0.000 R' across 2584 evaluated boundaries and 603 signals.
 
-- **Notes:** SCOPE NOTE on the original finding: the code claim is unchanged and now has runtime evidence, but the wiki already states 'the 85+ bucket stays empty by construction' (Validation-and-Autotune.md:15), so the *fact* was disclosed. What remains is that the report still prints a permanently-zero row with no annotation, which reads as an absent measurement rather than a structural ceiling. Severity lowered from S2 to S3 for that residual scope; the original scope is recorded here rather than dropped.
+- **Fix:** AddHistoricalBucketLines prints an explanation under the bucket table whenever the 85+ bucket is empty, stating that the historical model caps at 84 without a basket reading so the row is structurally unreachable. Both report builders use that function, so validation and autotune both carry it.
+- **Evidence (after):** --validation exit 0 prints the zero row followed by the explanation line. Build 0/0; census 0; contracts 0/9; selftest 182/0.
+- **Notes:** The wiki already documented the unreachable bucket; this closes the gap between the documentation and the report an operator actually reads. Disproof was not appropriate here - the zeros are real, the risk was their interpretation.
 
 ### F-012 (S3, scoring) — DISPROVED: the wick penalty's missing denominator entry is the correct arrangement
 
@@ -739,14 +741,16 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-044 (S3, docs) — The ATR definition (simple mean of true range, not Wilder smoothing) is undocumented
 
-- **Status:** START  |  **Category:** docs  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** aee3e23
 - **Location:** `FXNews.mq5:4401-4425`
 - **Discovered by:** Phase B L3 + scoring audit
 - **Evidence (before):**
 
   > CalculateATRFromRates returns the arithmetic mean of true range over ATRPeriod. No wiki page states whether ATR is Wilder-smoothed; Configuration.md and Signal-Logic.md both discuss ATR thresholds without defining it.
 
-- **Notes:** Every threshold expressed in ATR inherits this definition, so it belongs in the wiki.
+- **Fix:** Both ATR sites now document the definition: a simple arithmetic mean of the last period true ranges, not Wilder smoothing, so it deliberately differs from MT5's ATR indicator; and the live and historical paths must share it so a historical score describes live behaviour on the same bars.
+- **Evidence (after):** New self-test group 'atr definition' on a three-bar series with true ranges 14, 5, 4: simple mean 7.667 against Wilder 8.667. BEFORE (genuine Wilder recursion substituted): 181 passed, 1 failed of 182, exit 1. AFTER: 182 passed, 0 failed. Build 0/0; census 0; contracts 0/9.
+- **Notes:** The first mutation seeded the recursion with the mean, making it a fixed point, so it changed nothing and proved nothing; it was replaced with a genuine Wilder seeding rather than reported as evidence.
 
 ### F-045 (S3, tooling) — --install creates the destination directory silently and never verifies the terminal can load the binary
 

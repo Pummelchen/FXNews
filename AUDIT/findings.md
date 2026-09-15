@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 50 | done 14 | open 36 | blocked 0 | S0:1 S1:11 S2:18 S3:20**
+**total 50 | done 15 | open 35 | blocked 0 | S0:1 S1:11 S2:18 S3:20**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -13,7 +13,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | E-2 | S1 | tooling | DONE | `tools/selftest-macos.sh:34` | No MQL5 formatter, linter, static analyzer, SAST scanner or coverage tool exists |
 | E-3 | S1 | verification | DONE | `n/a (environment)` | The historical end-to-end gates cannot reach green in this environment until M1 history is available at run time |
 | F-002 | S1 | scoring | DONE | `FXNews.mq5:4502` | UpdateSessionBaseline folds active_trigger_tick_volume into the tick-volume baseline unguarded, while the adjacent line explicitly guards the tick rate |
-| F-003 | S1 | scoring | START | `FXNews.mq5:4268,4704,5418,5917` | movement_5m_pips falls back to a 0.0 sentinel when the M1 copy fails and is then consumed as a measured value by three components |
+| F-003 | S1 | scoring | DONE | `FXNews.mq5:4268,4704,5418,5917` | movement_5m_pips falls back to a 0.0 sentinel when the M1 copy fails and is then consumed as a measured value by three components |
 | F-004 | S1 | historical | DONE | `FXNews.mq5:2728` | Historical impulse evaluation forces acceleration_available and continuation_available to true, hard-coding weights for inputs that may be unmeasurable |
 | F-005 | S1 | historical | DONE | `FXNews.mq5:2667` | Historical execution gate applies cost_to_atr unconditionally, so VALIDATION/AUTOTUNE do not reproduce the live filter set when UseStrictExecutionGate is off |
 | F-006 | S1 | historical | DONE | `FXNews.mq5:2693,5310-5318,4984-4989` | Two composite caps are structurally inert in history, so historical scores are systematically less penalised than live scores |
@@ -116,14 +116,16 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-003 (S1, scoring) — movement_5m_pips falls back to a 0.0 sentinel when the M1 copy fails and is then consumed as a measured value by three components
 
-- **Status:** START  |  **Category:** logic  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** logic  |  **Host:** node3  |  **Commit:** 5c21284
 - **Location:** `FXNews.mq5:4268,4704,5418,5917`
 - **Discovered by:** Phase B L3
 - **Evidence (before):**
 
   > ':4268' sets movement_5m_pips = 0.0 when copied_m1 <= 5; there is no availability flag. It is consumed at ':4704' (currency-strength five-minute normaliser n5m), ':5418' (impulse exhaustion_penalty) and ':5917' (basket-agreement pair_move). A zero reads as 'no move', which suppresses exhaustion and biases both the flow and agreement terms.
 
-- **Notes:** Same class as the tracker's closed tasks 21-29 (exclude-don't-impute); this instance was missed.
+- **Fix:** SymbolProfile carries has_movement_5m, set together with the value and copied on the sibling-context path. Currency strength drops the 5-minute term and its 0.30 weight from the normaliser when unmeasured; basket agreement skips an unmeasured peer instead of scoring it as a neutral half-agreement; ImpulseQuality carries exhaustion_available and overextended_cap is gated on it. The historical path sets exhaustion_available from continuation_available.
+- **Evidence (after):** New self-test group 'exhaustion availability'. BEFORE (availability gate removed): 1 assertion FAILED - 'ComposeSignalScore ignores an overextension reading that was not measured'; RESULT 134 passed, 1 failed of 135; exit 1. AFTER: RESULT 135 passed, 0 failed of 135; exit 0. Historical regression: --validation still reports 50000 bars, 2589 boundaries, Signals=601, Avg score=74.7, PF=0.79 - identical to before the change, confirming the live path was the one affected. Build 0/0; census 0 findings; shellcheck clean.
+- **Notes:** Same class as the tracker's closed tasks 21-29 (exclude-don't-impute); this instance was missed. Coverage limit recorded honestly: the two aggregation exclusions (currency strength, basket agreement) are verified by review and the historical regression run, not by a unit assertion, because exercising them needs a live profile set with resolved currency indices, spreads and snapshot history.
 
 ### F-004 (S1, historical) — Historical impulse evaluation forces acceleration_available and continuation_available to true, hard-coding weights for inputs that may be unmeasurable
 

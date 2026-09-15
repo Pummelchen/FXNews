@@ -233,6 +233,33 @@ def check_ranking_disclosure(violations: list[Violation], indicator: str) -> Non
             )
 
 
+def check_diagnostics_object_count(violations: list[Violation], indicator: str) -> None:
+    """The diagnostics must read the cached object count, not recount labels per scan.
+
+    Dashboard rows are created and deleted only inside UpdateDashboard, so the count is
+    refreshed there and cached. BuildDiagnosticsLines runs on the light path too, which
+    only updates the status tooltip, and used to walk up to DASHBOARD_MAX_OBJECTS labels
+    with ObjectFind every scan (F-022).
+    """
+    body = re.search(r"void BuildDiagnosticsLines\(.*?\n\}", indicator, re.DOTALL)
+    if body is None:
+        violations.append(
+            Violation(
+                "diagnostics-object-count",
+                "BuildDiagnosticsLines not found in FXNews.mq5",
+            )
+        )
+        return
+    if "CountDashboardObjects()" in body.group(0):
+        violations.append(
+            Violation(
+                "diagnostics-object-count",
+                "BuildDiagnosticsLines calls CountDashboardObjects() directly; it must read the cached "
+                "g_dashboard_object_count so the light scan path does not recount every label (F-022)",
+            )
+        )
+
+
 def main(argv: list[str]) -> int:
     """Run every contract check against the repository at argv[0] or the parent of tools/."""
     root = (
@@ -251,11 +278,12 @@ def main(argv: list[str]) -> int:
     check_harness_path(violations, harness, shell)
     check_dashboard_refresh(violations, indicator)
     check_ranking_disclosure(violations, indicator)
+    check_diagnostics_object_count(violations, indicator)
 
     for violation in violations:
         print(violation.as_text())
     print(
-        f"contracts: {len(violations)} violation(s) across 6 contracts, root {root.name}"
+        f"contracts: {len(violations)} violation(s) across 7 contracts, root {root.name}"
     )
     return 1 if violations else 0
 

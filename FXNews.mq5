@@ -758,6 +758,11 @@ MqlRates g_rates_m15[];
 MqlTick g_ticks_scratch[];
 int g_scan_sequence = 0;            // increments once per ScanAll
 bool g_dashboard_needs_refit = false;
+// Dashboard rows are only ever created or deleted inside UpdateDashboard, so the
+// object count is refreshed there and read from here everywhere else. The
+// diagnostics used to recount up to DASHBOARD_MAX_OBJECTS labels with ObjectFind on
+// every scan, including the light path that only updates the status tooltip.
+int g_dashboard_object_count = 0;
 double g_dashboard_char_pixels = 0.0;   // measured once per font/DPI
 bool g_symbol_identity_dirty = true;
 bool g_selftest_done = false;
@@ -801,6 +806,7 @@ void ResetRuntimeState()
    g_symbol_identity_dirty = true;
    g_scan_sequence = 0;
    g_dashboard_needs_refit = false;
+   g_dashboard_object_count = 0;
    g_dashboard_char_pixels = 0.0;
 
    for(int i = 0; i < CURRENCY_COUNT; i++)
@@ -7538,7 +7544,7 @@ void BuildDiagnosticsLines(string &line1, string &line2)
                         g_average_scan_ms,
                         g_max_scan_ms,
                         BaselineHorizonMinutes(),
-                        CountDashboardObjects(),
+                        g_dashboard_object_count,
                         DASHBOARD_MAX_OBJECTS);
 }
 
@@ -7628,6 +7634,8 @@ void UpdateDashboard()
    }
 
    DeleteDashboardRowsFrom(row);
+   // Exactly the rows this function just wrote, so the cached count cannot drift.
+   g_dashboard_object_count = CountDashboardObjects();
 
    ChartRedraw(0);
 }

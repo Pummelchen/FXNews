@@ -21,7 +21,10 @@ INSTALL=0
 for arg in "$@"; do
   case "$arg" in
     --install) INSTALL=1 ;;
-    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
+    -h | --help)
+      sed -n '2,19p' "$0"
+      exit 0
+      ;;
     *) SRC="$arg" ;;
   esac
 done
@@ -34,18 +37,33 @@ if [ -z "$SRC" ]; then
   ROOT="$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null || dirname "$HERE")"
   SRC="$ROOT/FXNews.mq5"
 fi
-[ -f "$SRC" ] || { echo "build: no such source file: $SRC" >&2; exit 2; }
-SRC_DIR="$(cd "$(dirname "$SRC")" && pwd)" || { echo "build: cannot resolve $SRC" >&2; exit 2; }
+[ -f "$SRC" ] || {
+  echo "build: no such source file: $SRC" >&2
+  exit 2
+}
+SRC_DIR="$(cd "$(dirname "$SRC")" && pwd)" || {
+  echo "build: cannot resolve $SRC" >&2
+  exit 2
+}
 SRC="$SRC_DIR/$(basename "$SRC")"
 
 # Paths and Wine/Rosetta handling live in one place, shared with selftest-macos.sh.
 # shellcheck source=tools/lib-mt5.sh
-. "$HERE/lib-mt5.sh" || { echo "build: cannot load $HERE/lib-mt5.sh" >&2; exit 2; }
+. "$HERE/lib-mt5.sh" || {
+  echo "build: cannot load $HERE/lib-mt5.sh" >&2
+  exit 2
+}
 mt5_configure
 BUILD_TIMEOUT="${BUILD_TIMEOUT:-300}"
 
-[ -x "$WINE" ] || { echo "build: wine64 not found at $WINE" >&2; exit 2; }
-[ -f "$ME" ]   || { echo "build: MetaEditor64.exe not found at $ME" >&2; exit 2; }
+[ -x "$WINE" ] || {
+  echo "build: wine64 not found at $WINE" >&2
+  exit 2
+}
+[ -f "$ME" ] || {
+  echo "build: MetaEditor64.exe not found at $ME" >&2
+  exit 2
+}
 mt5_require_wine "build"
 
 # The work directory is created under a space-free location: MetaEditor's
@@ -55,7 +73,10 @@ mt5_require_wine "build"
 # source and log paths are guarded. Compiling in place under
 # "MQL5/Indicators/..." is therefore impossible; compile from the repository
 # and copy the .ex5 across (see --install), or press F7 in MetaEditor.
-WORK="$(mktemp -d /tmp/mql5build.XXXXXX)" || { echo "build: mktemp failed" >&2; exit 2; }
+WORK="$(mktemp -d /tmp/mql5build.XXXXXX)" || {
+  echo "build: mktemp failed" >&2
+  exit 2
+}
 trap 'rm -rf "$WORK"' EXIT
 LOG="$WORK/build.log"
 for guarded in "$SRC" "$LOG"; do
@@ -113,7 +134,7 @@ OUT="$(printf '%s' "$OUT" | tr -d '\r' | sed '1s/^\xEF\xBB\xBF//')"
 printf '%s\n' "$OUT" | grep -vE 'information: (generating code( [0-9]+%)?|code generated)$' | sed '/^[[:space:]]*$/d'
 
 RESULT="$(printf '%s' "$OUT" | grep -o 'Result: [0-9]* errors, [0-9]* warnings' | tail -1)"
-ERRORS="$(printf '%s' "$RESULT"  | sed -n 's/Result: \([0-9]*\) errors.*/\1/p')"
+ERRORS="$(printf '%s' "$RESULT" | sed -n 's/Result: \([0-9]*\) errors.*/\1/p')"
 WARNINGS="$(printf '%s' "$RESULT" | sed -n 's/.*, \([0-9]*\) warnings/\1/p')"
 
 if [ -z "$RESULT" ]; then
@@ -135,7 +156,10 @@ echo "build: OK ($RESULT)"
 if [ "$INSTALL" -eq 1 ]; then
   EX5="${SRC%.mq5}.ex5"
   DEST="$MT5/MQL5/Indicators/FXNews"
-  [ -f "$EX5" ] || { echo "build: expected $EX5 after a clean compile" >&2; exit 2; }
+  [ -f "$EX5" ] || {
+    echo "build: expected $EX5 after a clean compile" >&2
+    exit 2
+  }
   mkdir -p "$DEST" || exit 2
   cp "$EX5" "$DEST/" || exit 2
   echo "build: installed $(basename "$EX5") to $DEST"

@@ -25,7 +25,10 @@ case "${1:-}" in
   "") ;;
   --validation) MODE="validation" ;;
   --autotune) MODE="autotune" ;;
-  *) echo "selftest: unknown option $1" >&2; exit 2 ;;
+  *)
+    echo "selftest: unknown option $1" >&2
+    exit 2
+    ;;
 esac
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,15 +36,24 @@ ROOT="$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null || dirname "$HERE")
 
 # Paths and Wine/Rosetta handling live in one place, shared with build-macos.sh.
 # shellcheck source=tools/lib-mt5.sh
-. "$HERE/lib-mt5.sh" || { echo "selftest: cannot load $HERE/lib-mt5.sh" >&2; exit 2; }
+. "$HERE/lib-mt5.sh" || {
+  echo "selftest: cannot load $HERE/lib-mt5.sh" >&2
+  exit 2
+}
 mt5_configure
 TIMEOUT_SECONDS="${FXNEWS_SELFTEST_TIMEOUT:-240}"
 if [ "$MODE" != "selftest" ]; then
   TIMEOUT_SECONDS="${FXNEWS_SELFTEST_TIMEOUT:-900}"
 fi
 
-[ -x "$WINE" ]     || { echo "selftest: wine64 not found at $WINE" >&2; exit 2; }
-[ -f "$TERMINAL" ] || { echo "selftest: terminal64.exe not found at $TERMINAL" >&2; exit 2; }
+[ -x "$WINE" ] || {
+  echo "selftest: wine64 not found at $WINE" >&2
+  exit 2
+}
+[ -f "$TERMINAL" ] || {
+  echo "selftest: terminal64.exe not found at $TERMINAL" >&2
+  exit 2
+}
 mt5_require_wine "selftest"
 if pgrep -f 'terminal64.exe' >/dev/null 2>&1; then
   echo "selftest: MetaTrader 5 is already running; close it and retry" >&2
@@ -56,7 +68,10 @@ to_win() { printf 'Z:%s' "$(printf '%s' "$1" | tr '/' '\\')"; }
 # prevent. Run before any compile so the failure is reported as a contract, not as
 # a missing journal line.
 echo "selftest: checking cross-file contracts"
-python3 "$HERE/contracts.py" "$ROOT" || { echo "selftest: a cross-file contract is broken; see above" >&2; exit 2; }
+python3 "$HERE/contracts.py" "$ROOT" || {
+  echo "selftest: a cross-file contract is broken; see above" >&2
+  exit 2
+}
 
 echo "selftest: compiling indicator"
 "$HERE/build-macos.sh" "$ROOT/FXNews.mq5" || exit 2
@@ -84,16 +99,19 @@ trap cleanup EXIT
 # small basket so a run finishes in minutes rather than the full default sweep.
 case "$MODE" in
   selftest)
-    printf 'HarnessMode=3\r\nHarnessSymbols=\r\nHarnessTimeframes=\r\nHarnessTimeoutSeconds=90\r\n' > "$PRESET" ;;
+    printf 'HarnessMode=3\r\nHarnessSymbols=\r\nHarnessTimeframes=\r\nHarnessTimeoutSeconds=90\r\n' >"$PRESET"
+    ;;
   validation)
-    printf 'HarnessMode=1\r\nHarnessSymbols=EURUSD,GBPUSD\r\nHarnessTimeframes=M5,H1\r\nHarnessTimeoutSeconds=%d\r\n' "$((TIMEOUT_SECONDS - 60))" > "$PRESET" ;;
+    printf 'HarnessMode=1\r\nHarnessSymbols=EURUSD,GBPUSD\r\nHarnessTimeframes=M5,H1\r\nHarnessTimeoutSeconds=%d\r\n' "$((TIMEOUT_SECONDS - 60))" >"$PRESET"
+    ;;
   autotune)
-    printf 'HarnessMode=2\r\nHarnessSymbols=EURUSD,GBPUSD\r\nHarnessTimeframes=M5,H1\r\nHarnessTimeoutSeconds=%d\r\n' "$((TIMEOUT_SECONDS - 60))" > "$PRESET" ;;
+    printf 'HarnessMode=2\r\nHarnessSymbols=EURUSD,GBPUSD\r\nHarnessTimeframes=M5,H1\r\nHarnessTimeoutSeconds=%d\r\n' "$((TIMEOUT_SECONDS - 60))" >"$PRESET"
+    ;;
 esac
 
 # Windows ini files are read as ANSI; the content is pure ASCII so no BOM is needed.
 CONFIG="$WORK/fxnews-selftest.ini"
-printf '[StartUp]\r\nSymbol=EURUSD\r\nPeriod=M5\r\nScript=FXNewsSelfTest\r\nScriptParameters=FXNewsHarness.set\r\nShutdownTerminal=1\r\n' > "$CONFIG"
+printf '[StartUp]\r\nSymbol=EURUSD\r\nPeriod=M5\r\nScript=FXNewsSelfTest\r\nScriptParameters=FXNewsHarness.set\r\nShutdownTerminal=1\r\n' >"$CONFIG"
 
 LOG_DIR="$MT5/MQL5/Logs"
 STAMP="$(date +%Y%m%d)"
@@ -161,7 +179,7 @@ BARS="$(printf '%s' "$JOURNAL" | grep -o 'M1 bars=[0-9]*' | tail -1 | grep -o '[
 LOADED="$(printf '%s' "$JOURNAL" | grep -o 'Symbols [0-9]*/[0-9]*' | tail -1 | sed -n 's#Symbols \([0-9]*\)/.*#\1#p')"
 SCANNED="$(printf '%s' "$JOURNAL" | grep -o 'evaluated [0-9]* of' | tail -1 | grep -o '[0-9]*')"
 case "$VERDICT" in
-  *"VALIDATION ready"*|*"AUTOTUNE ready"*)
+  *"VALIDATION ready"* | *"AUTOTUNE ready"*)
     if [ -z "$SIGNALS" ]; then
       echo "selftest: FAILED ($VERDICT; the journal holds no report signal line)" >&2
       exit 1

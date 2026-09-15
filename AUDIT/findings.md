@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 52 | done 16 | open 36 | blocked 0 | S0:1 S1:11 S2:19 S3:21**
+**total 52 | done 18 | open 34 | blocked 0 | S0:1 S1:11 S2:19 S3:21**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -30,8 +30,8 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-015 | S2 | tooling | START | `FXNews.mq5:1725; tools/mql5/FXNewsSelfTest.mq5:14,32-34; tools/selftest-macos.sh:72,139,159-163` | The indicator, the harness and the gate script are coupled by undocumented string literals with no contract test |
 | F-016 | S2 | ops | START | `.github/` | No CI workflow: the three release gates are never run automatically |
 | F-017 | S2 | validation | START | `FXNews.mq5:942,988-995` | MaxQuoteAgeSeconds and FullHoldScoreSeconds have no upper bound, so extreme values silently disable the freshness gate or make the HYBRID hold clause unreachable |
-| F-018 | S2 | scoring | START | `FXNews.mq5:5026-5031` | single_feature_cap is applied without checking that the feature it measures was evaluated |
-| F-019 | S2 | scoring | START | `FXNews.mq5:4958-4959` | The +0.05 synergy bonus is awarded on component scores without checking that either engine passed or was measured |
+| F-018 | S2 | scoring | DONE | `FXNews.mq5:5026-5031` | single_feature_cap is applied without checking that the feature it measures was evaluated |
+| F-019 | S2 | scoring | DONE | `FXNews.mq5:4958-4959` | The +0.05 synergy bonus is awarded on component scores without checking that either engine passed or was measured |
 | F-020 | S2 | scoring | START | `FXNews.mq5:8266-8270,4661,5114-5116` | RobustZ returns 0 for degenerate dispersion while the caller still reports the z as available |
 | F-021 | S2 | dashboard | START | `FXNews.mq5:7482,7419` | WrapLabelText wraps report lines at 63 characters but SetDashboardRow re-clips them to the measured pixel limit, truncating the wrapped tail |
 | F-022 | S2 | dashboard | START | `FXNews.mq5:6817-6825,6747` | UpdateActivityStatusLine recomputes CountDashboardObjects (up to 40 ObjectFind calls) on every scan that skips the full dashboard |
@@ -323,23 +323,29 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-018 (S2, scoring) — single_feature_cap is applied without checking that the feature it measures was evaluated
 
-- **Status:** START  |  **Category:** logic  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** logic  |  **Host:** node3  |  **Commit:** 3224f81
 - **Location:** `FXNews.mq5:5026-5031`
 - **Discovered by:** Phase B L3 + scoring audit
 - **Evidence (before):**
 
   > ':5026-5031' caps at 79 when execution.score < 0.78 or max(breakout.score, impulse.score) < 0.60, with no gate on the engine being enabled or the component being measured, while the very next cap block (:5033-5035) is explicitly gated and comments on that reasoning. With UseTechnicalBreakoutEngine=false and impulse unmeasured, an unmeasured 0 caps a strong score.
 
+- **Fix:** Composer rules now require the engine to be enabled and measured. The synergy bonus takes breakout_confirms && impulse_confirms from (enabled && measured && score >= 0.45) for each engine; single_feature_cap compares the strongest reading among enabled-and-measured engines.
+- **Evidence (after):** New self-test group 'composer engine gating'. BEFORE (both rules reverted to their ungated form): 2 assertions FAILED; RESULT 140 passed, 2 failed of 142; exit 1. AFTER: RESULT 142 passed, 0 failed of 142; exit 0. Historical regression after the shared-composer change: --validation exit 0 with 2589 boundaries, Signals=605, Avg score=74.7, PF=0.80 - no material change from the pre-change run (2589/601/74.7/0.79). Build 0/0; census 0 findings.
+- **Notes:** Shares one root cause with F-019 and is committed with it as audit(F-018,F-019). Test-design note recorded: the first draft could not reach the cap's own '> 80' gate once the unmeasured engine's weight left the normaliser, so the assertion failed against the fixed code; the values were corrected so the test actually reaches the branch it targets.
 
 ### F-019 (S2, scoring) — The +0.05 synergy bonus is awarded on component scores without checking that either engine passed or was measured
 
-- **Status:** START  |  **Category:** logic  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** logic  |  **Host:** node3  |  **Commit:** 3224f81
 - **Location:** `FXNews.mq5:4958-4959`
 - **Discovered by:** Phase B L3 + scoring audit
 - **Evidence (before):**
 
   > ':4958-4959' adds 0.05 to raw01 when breakout.score >= 0.45 and impulse.score >= 0.45. Nothing guarantees those scores came from measured components; the zeroing in ResetCompositeSignalScore makes values from a previous evaluation sticky only for measured paths, so the interaction with F-001/F-018 is a real risk.
 
+- **Fix:** Composer rules now require the engine to be enabled and measured. The synergy bonus takes breakout_confirms && impulse_confirms from (enabled && measured && score >= 0.45) for each engine; single_feature_cap compares the strongest reading among enabled-and-measured engines.
+- **Evidence (after):** New self-test group 'composer engine gating'. BEFORE (both rules reverted to their ungated form): 2 assertions FAILED; RESULT 140 passed, 2 failed of 142; exit 1. AFTER: RESULT 142 passed, 0 failed of 142; exit 0. Historical regression after the shared-composer change: --validation exit 0 with 2589 boundaries, Signals=605, Avg score=74.7, PF=0.80 - no material change from the pre-change run (2589/601/74.7/0.79). Build 0/0; census 0 findings.
+- **Notes:** Shares one root cause with F-018 and is committed with it. Deliberate behaviour change: single-engine configurations lose the synergy bonus they previously received only because the absent second engine scored zero, which was imputed agreement. Documented in the commit message.
 
 ### F-020 (S2, scoring) — RobustZ returns 0 for degenerate dispersion while the caller still reports the z as available
 

@@ -2185,6 +2185,44 @@ void SelfTestHistoryRefresh()
    SelfTestGroup("history refresh", before);
 }
 
+// The breakout blend's ceiling, which is the whole substance of F-012. All sub-scores at
+// their maximum with no rejection wick must reach 1.00, because every other component can.
+// The case was filed as a normaliser defect and re-examined rather than assumed: the
+// penalty is deducted after normalisation, so folding its 0.15 into total_weight would
+// drop this assertion to 0.95/1.10 and fail it.
+void SelfTestBreakoutBlend()
+{
+   int before = g_selftest_failed;
+
+   BreakoutStructure b;
+   b.pass = false;
+   b.measured = true;
+   b.candle_measured = false;
+   b.score = 0.0;
+   b.compression_score = 1.0;
+   b.distance_score = 1.0;
+   b.close_location_score = 0.0;
+   b.hold_score = 1.0;
+   b.body_quality_score = 0.0;
+   b.wick_rejection_penalty = 0.0;
+   b.fakeout_penalty = 0.0;
+
+   SelfTestNear(BlendBreakoutScore(b, false), 1.0,
+                "breakout blend: a candle-less maximum reaches 1.00");
+
+   b.candle_measured = true;
+   b.close_location_score = 1.0;
+   b.body_quality_score = 1.0;
+   SelfTestNear(BlendBreakoutScore(b, true), 1.0,
+                "breakout blend: a flawless measured candle still reaches 1.00 (F-012)");
+
+   b.wick_rejection_penalty = 1.0;
+   SelfTestNear(BlendBreakoutScore(b, true), 0.80 / 0.95,
+                "breakout blend: a full rejection wick costs 0.15 of the 0.95 positive weight");
+
+   SelfTestGroup("breakout blend", before);
+}
+
 // One case per guard block in ValidateInputsCore, because the validation only ran at
 // OnInit and nothing could reach its rejection paths: the inputs are read-only, so
 // before the extraction no test could make one fail. Baseline first, then each field
@@ -2566,6 +2604,7 @@ void RunSelfTest()
    SelfTestComposerEngineGating();
    SelfTestSignalLifecycle();
    SelfTestHistoryRefresh();
+   SelfTestBreakoutBlend();
    SelfTestInputValidation();
    SelfTestRankingCheck();
    SelfTestHistoricalEngine();
@@ -6269,6 +6308,32 @@ double BlendExecutionScore(const ExecutionQuality &execution,
    return Clamp01(weighted / total_weight);
 }
 
+// The weighted sum over the breakout sub-scores. Extracted from EvaluateBreakoutStructure
+// so the self-test can pin its ceiling behaviour without market data.
+//
+// The wick penalty is deducted AFTER normalisation, on purpose. Filed as F-012 because
+// the code reads inconsistently - 'weighted -= wick*0.15' next to 'total_weight += 0.17 +
+// 0.17' - and it was re-examined rather than assumed: with the penalty at zero the
+// numerator is 0.95 and the denominator is 0.95, so a flawless candle reaches 1.00 like
+// every other component. Folding 0.15 into total_weight instead would cap this component
+// at 0.95/1.10 = 0.86 for every candle, so the apparent inconsistency is the correct
+// arrangement. A full rejection wick costs 0.15/0.95, about 15.8% of this component.
+double BlendBreakoutScore(const BreakoutStructure &breakout, const bool candle_measured)
+{
+   double weighted = breakout.compression_score * 0.17 +
+                     breakout.distance_score * 0.24 +
+                     breakout.hold_score * 0.20;
+   double total_weight = 0.17 + 0.24 + 0.20;
+   if(candle_measured)
+   {
+      weighted += breakout.close_location_score * 0.17 +
+                  breakout.body_quality_score * 0.17;
+      total_weight += 0.17 + 0.17;
+      weighted -= breakout.wick_rejection_penalty * 0.15;
+   }
+   return Clamp01(weighted / total_weight);
+}
+
 void EvaluateBreakoutStructure(const int index,
                                const int direction,
                                const datetime now,
@@ -6402,18 +6467,7 @@ void ComputeBreakoutStructure(const int direction,
 
    // The snapback (fakeout) penalty acts once, through range_snapback_cap in
    // the composite, rather than being subtracted here as well.
-   double weighted = breakout.compression_score * 0.17 +
-                     breakout.distance_score * 0.24 +
-                     breakout.hold_score * 0.20;
-   double total_weight = 0.17 + 0.24 + 0.20;
-   if(breakout.candle_measured)
-   {
-      weighted += breakout.close_location_score * 0.17 +
-                  breakout.body_quality_score * 0.17 -
-                  breakout.wick_rejection_penalty * 0.15;
-      total_weight += 0.17 + 0.17;
-   }
-   breakout.score = Clamp01(weighted / total_weight);
+   breakout.score = BlendBreakoutScore(breakout, breakout.candle_measured);
    breakout.pass = (distance > 0.0 && breakout.score > 0.06);
 }
 

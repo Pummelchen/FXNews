@@ -40,13 +40,27 @@ node3.
 launchd session. Over SSH the session is `Background`, macOS forbids it from connecting to
 WindowServer, and MetaTrader 5 — a windowed application — initialises graphics and exits
 cleanly with code 0 before loading any script, producing `no Experts journal`. The symptom
-looks like a broken terminal or a missing broker account; it is neither. Confirm with
-`launchctl managername` (expects `Aqua`) and run the gate through:
+looks like a broken terminal or a missing broker account; it is neither.
+
+There are two ways in, and the second needs no privilege at all — use it (F-055):
 
 ```bash
+# 1. As root. Works, but needed a credential, and the audit should not need one.
 ssh <host> 'sudo launchctl asuser "$(id -u)" sudo -u <user> /bin/bash -lc \
   "cd ~/fxnews-phasee && ./tools/selftest-macos.sh"'
+
+# 2. As the console user, no sudo. Write a LaunchAgent with
+#    LimitLoadToSessionType=Aqua and bootstrap it into your OWN gui domain:
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.fxnews.phasee.plist
+launchctl bootout   "gui/$(id -u)/com.fxnews.phasee"
 ```
+
+Method 2 works because a non-root user may read and bootstrap into their own `gui/<uid>`
+domain, and `LimitLoadToSessionType=Aqua` puts the job in the GUI session where WindowServer
+is reachable. Note that `launchctl managername` reports `Background` **from inside such a
+job**, which makes it a misleading probe — the test that matters is whether the terminal
+actually starts. Method 2 was used for the 3.2 Phase E run and produced a complete green
+gate set with no credential involved.
 
 `node2` was the Phase E host (app 5.0.4501, Wine 9.14, same as the working development
 host). `node1` was abandoned after its bundled Wine 9.8 (app 5.0.4330) refused to start even

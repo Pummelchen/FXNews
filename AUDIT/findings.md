@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 60 | done 59 | open 0 | blocked 1 | S0:1 S1:14 S2:18 S3:27**
+**total 62 | done 61 | open 0 | blocked 1 | S0:1 S1:15 S2:19 S3:27**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -15,6 +15,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | E-4 | S1 | verification | DONE | `n/a (fleet)` | Provision an independent macOS host for Phase E |
 | E-5 | S1 | verification | DONE | `n/a (fleet)` | Phase E's self-test gate could not run over SSH: the spare Macs' terminal exits when launched outside the Aqua session |
 | E-6 | S1 | verification | DONE | `n/a (fleet)` | Phase E final verification from a fresh clone on a host that did not develop the fixes |
+| E-7 | S1 | verification | DONE | `n/a (fleet)` | Phase E for the 3.2 revision, from a fresh clone on an independent host, credential-free |
 | F-002 | S1 | scoring | DONE | `FXNews.mq5:4502` | UpdateSessionBaseline folds active_trigger_tick_volume into the tick-volume baseline unguarded, while the adjacent line explicitly guards the tick rate |
 | F-003 | S1 | scoring | DONE | `FXNews.mq5:4268,4704,5418,5917` | movement_5m_pips falls back to a 0.0 sentinel when the M1 copy fails and is then consumed as a measured value by three components |
 | F-004 | S1 | historical | DONE | `FXNews.mq5:2728` | Historical impulse evaluation forces acceleration_available and continuation_available to true, hard-coding weights for inputs that may be unmeasurable |
@@ -42,6 +43,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-050 | S2 | tooling | DONE | `.github/workflows/ci.yml; tools/selftest-macos.sh:89-96` | The CI workflow pinned every analysis tool except shellcheck, and the unpinned one failed the build |
 | F-052 | S2 | reporting | DONE | `FXNews.mq5 (historical bucket aggregation and ranking verdict)` | The ranking evaluation could not say WHY the ranking failed - caps or the score |
 | F-053 | S2 | scoring | DONE | `FXNews.mq5 (rank evaluation, measured not changed)` | MEASURED: the score does not rank 30m outcomes on the audit sample, and the caps are not the cause |
+| F-055 | S2 | verification | DONE | `AUDIT/environment.md (Phase E procedure)` | Phase E needed root for no reason: a LaunchAgent in the user's own GUI domain works |
 | F-010 | S3 | historical | DONE | `FXNews.mq5:2926-2930,3039` | The 85+ bucket in the historical report is unreachable (now empirically confirmed; the wiki already documents the empty bucket, so only the unannotated report row remains) |
 | F-012 | S3 | scoring | DONE | `FXNews.mq5:5330-5331` | DISPROVED: the wick penalty's missing denominator entry is the correct arrangement |
 | F-013 | S3 | dashboard | DONE | `FXNews.mq5:6325,6246` | DOMINANT FLOW's fallback group id is shared by every timeframe of a symbol - deliberate, not a defect |
@@ -149,6 +151,19 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 - **Fix:** Fresh clone of the audit branch on node2 (app 5.0.4501, Wine 9.14, Rosetta 2 installed by E-4), with all four gates run inside the Aqua session via launchctl asuser. No fixes were developed on node2.
 - **Evidence (after):** commit 98c608c, branch audit/2026-09-15, 23 tracked files, working tree clean. contracts: 0 violations across 9. census: 0 open findings, 0 allowed (zero placeholders). compile: 'Result: 0 errors, 0 warnings'. self-test: 'RESULT: 199 passed, 0 failed of 199 assertions' with SELFTEST PASSED. Scanners on the same host: ruff check, ruff format --check, mypy --strict, bandit, shellcheck, shfmt -d and a full-history gitleaks scan all PASS. Coverage: census.py 88%, contracts.py 74%, total 83%.
 - **Notes:** Run from a fresh clone on the independent host rather than from the development tree, which is what the brief requires and what makes the result evidence of the committed state rather than of the working copy. The ledger at this point holds no non-BLOCKED open task: 56 tasks, 55 DONE and 1 BLOCKED (F-025, credential rotation, which only a human can perform).
+
+### E-7 (S1, verification) — Phase E for the 3.2 revision, from a fresh clone on an independent host, credential-free
+
+- **Status:** DONE  |  **Category:** deps  |  **Host:** node2  |  **Commit:** 14b8253
+- **Location:** `n/a (fleet)`
+- **Discovered by:** Phase E
+- **Evidence (before):**
+
+  > Phase E verifies the final state, so it could not run until the 3.2 work was finished. Its self-test gate then sat blocked on a deleted credential until F-055 removed the need for one.
+
+- **Fix:** Fresh clone on node2 reset to origin/audit/2026-09-15, all gates run through the LaunchAgent method from F-055. No fixes were developed on node2.
+- **Evidence (after):** commit 14b8253, tree 0 modified, version 3.2. contracts 0/9; census 0 findings, 0 allowed; compile '0 errors, 0 warnings'; self-test 'RESULT: 218 passed, 0 failed of 218 assertions' / 'selftest: OK'; ruff check, ruff format --check, mypy --strict, bandit, shellcheck, shfmt -d and a full-history gitleaks scan all PASS; coverage census.py 88%, contracts.py 73%, total 83%; exit 0.
+- **Notes:** This is the gate that PR #11 waited on. It was deliberately NOT merged before this ran, because the audit's own rule is that Phase E gates the merge and #10 was merged only after passing.
 
 ### F-002 (S1, scoring) — UpdateSessionBaseline folds active_trigger_tick_volume into the tick-volume baseline unguarded, while the adjacent line explicitly guards the tick rate
 
@@ -498,6 +513,19 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 - **Fix:** No code change: this is the measured answer, recorded because it is material to a go-live decision and because it disproves a hypothesis this audit had advanced.
 - **Evidence (after):** Both bucketings fail in the same direction on both runs. VALIDATION: displayed 80+ -0.082 R vs 60+ -0.068 R; pre-cap 85+ -0.141 R vs 60+ -0.068 R. AUTOTUNE: displayed 80+ -0.229 R vs 60+ -0.004 R; pre-cap 85+ -0.256 R vs 60+ -0.004 R. The report states that both bucketings agree, so the failure is a property of the score rather than of the caps.
 - **Notes:** DISPROVES A HYPOTHESIS OF MINE. I had suggested the 75-79 bucket looked inverted because events capped down by weak_hold_cap (74) and overextended_cap (75) concentrate there. That does not explain the result: bucketing on the score before ANY cap applied fails in the same direction and by a larger margin. The lead was wrong and is recorded as wrong. WHAT THIS DOES NOT ESTABLISH: that the score is broken. The product documents the score as an event-quality ranking, not a probability or a trade instruction, and nothing here tests event quality - only whether it ranks forward return. The measured statement is narrower: on one symbol over 48.8 days the score did not rank 30m outcomes, and the caps are not why. Whether the score SHOULD rank returns, and whether a longer or multi-symbol sample would show an edge this one cannot, remain human decisions. No weights were changed, because tuning them against the sample that exposed the failure is curve-fitting.
+
+### F-055 (S2, verification) — Phase E needed root for no reason: a LaunchAgent in the user's own GUI domain works
+
+- **Status:** DONE  |  **Category:** deps  |  **Host:** node2  |  **Commit:** 14b8253
+- **Location:** `AUDIT/environment.md (Phase E procedure)`
+- **Discovered by:** the credential for launchctl asuser was deleted and Phase E was left blocked
+- **Evidence (before):**
+
+  > E-5 established that the MetaTrader terminal must run in the console user's Aqua session, and the remedy recorded was 'sudo launchctl asuser', which needs root. The audit then deleted the fleet credential, so Phase E's self-test could not be re-run at all - a verification gate depending on a secret, which is the wrong shape for a gate.
+
+- **Fix:** A LaunchAgent with LimitLoadToSessionType=Aqua bootstrapped into the caller's OWN gui/<uid> domain runs in the Aqua session and needs no privilege: a non-root user may read and bootstrap into gui/<uid> when they are the console user. AUDIT/environment.md now documents this as the preferred method and keeps the root method as a fallback.
+- **Evidence (after):** The complete Phase E gate set ran on node2 as user 501 with no sudo and no credential, at commit 14b8253: contracts 0 violations across 9, census 0 findings/0 allowed, compile 'Result: 0 errors, 0 warnings', self-test '218 passed, 0 failed of 218', all seven scanners PASS, coverage 83%, exit 0.
+- **Notes:** A misleading probe is recorded with it: 'launchctl managername' reports Background from INSIDE such a job, so it looks like the trick failed when it has worked. The test that matters is whether the terminal starts. The first attempt was written off on the strength of managername alone and only rewritten after testing the terminal directly - the same mistake as E-5's wrong broker-authorization hypothesis, in miniature.
 
 ### F-010 (S3, historical) — The 85+ bucket in the historical report is unreachable (now empirically confirmed; the wiki already documents the empty bucket, so only the unannotated report row remains)
 

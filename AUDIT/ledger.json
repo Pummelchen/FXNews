@@ -1058,6 +1058,39 @@
       "commit": "9ca78e0",
       "notes": "ROOT CAUSE NOT ESTABLISHED, and the entry says so. Measured and ruled out: the M1 .hcc files exist for both symbols (2018-2026 under Bases/ICMarketsSC-MT5-4/history), so it is not missing data on disk; SymbolSelect(symbol, true) before the request changes nothing; raising the history wait from 60 s to 420 s changes nothing; swapping which symbol is requested first changes nothing, so it is EURUSD specifically. GBPUSD returns 50 000 bars in the same window so the code path works. The engine's behaviour is correct and safe either way - skip, report, continue - which is why only the message changed. The SymbolSelect change was made to test the hypothesis, did not fix it, and was REVERTED rather than kept unproven. CONSEQUENCE FOR F-053: its ranking conclusion is single-symbol (GBPUSD, 48.8 days) and both the ledger and the changelog say so; the second symbol could not be obtained on this terminal.",
       "blockedReason": null
+    },
+    {
+      "id": "F-055",
+      "severity": "S2",
+      "module": "verification",
+      "file": "AUDIT/environment.md (Phase E procedure)",
+      "title": "Phase E needed root for no reason: a LaunchAgent in the user's own GUI domain works",
+      "category": "deps",
+      "status": "DONE",
+      "hostUsed": "node2",
+      "discoveredBy": "the credential for launchctl asuser was deleted and Phase E was left blocked",
+      "evidenceBefore": "E-5 established that the MetaTrader terminal must run in the console user's Aqua session, and the remedy recorded was 'sudo launchctl asuser', which needs root. The audit then deleted the fleet credential, so Phase E's self-test could not be re-run at all - a verification gate depending on a secret, which is the wrong shape for a gate.",
+      "fixSummary": "A LaunchAgent with LimitLoadToSessionType=Aqua bootstrapped into the caller's OWN gui/<uid> domain runs in the Aqua session and needs no privilege: a non-root user may read and bootstrap into gui/<uid> when they are the console user. AUDIT/environment.md now documents this as the preferred method and keeps the root method as a fallback.",
+      "evidenceAfter": "The complete Phase E gate set ran on node2 as user 501 with no sudo and no credential, at commit 14b8253: contracts 0 violations across 9, census 0 findings/0 allowed, compile 'Result: 0 errors, 0 warnings', self-test '218 passed, 0 failed of 218', all seven scanners PASS, coverage 83%, exit 0.",
+      "notes": "A misleading probe is recorded with it: 'launchctl managername' reports Background from INSIDE such a job, so it looks like the trick failed when it has worked. The test that matters is whether the terminal starts. The first attempt was written off on the strength of managername alone and only rewritten after testing the terminal directly - the same mistake as E-5's wrong broker-authorization hypothesis, in miniature.",
+      "commit": "14b8253"
+    },
+    {
+      "id": "E-7",
+      "severity": "S1",
+      "module": "verification",
+      "file": "n/a (fleet)",
+      "title": "Phase E for the 3.2 revision, from a fresh clone on an independent host, credential-free",
+      "category": "deps",
+      "status": "DONE",
+      "hostUsed": "node2",
+      "discoveredBy": "Phase E",
+      "evidenceBefore": "Phase E verifies the final state, so it could not run until the 3.2 work was finished. Its self-test gate then sat blocked on a deleted credential until F-055 removed the need for one.",
+      "fixSummary": "Fresh clone on node2 reset to origin/audit/2026-09-15, all gates run through the LaunchAgent method from F-055. No fixes were developed on node2.",
+      "evidenceAfter": "commit 14b8253, tree 0 modified, version 3.2. contracts 0/9; census 0 findings, 0 allowed; compile '0 errors, 0 warnings'; self-test 'RESULT: 218 passed, 0 failed of 218 assertions' / 'selftest: OK'; ruff check, ruff format --check, mypy --strict, bandit, shellcheck, shfmt -d and a full-history gitleaks scan all PASS; coverage census.py 88%, contracts.py 73%, total 83%; exit 0.",
+      "commit": "14b8253",
+      "notes": "This is the gate that PR #11 waited on. It was deliberately NOT merged before this ran, because the audit's own rule is that Phase E gates the merge and #10 was merged only after passing.",
+      "blockedReason": null
     }
   ]
 }

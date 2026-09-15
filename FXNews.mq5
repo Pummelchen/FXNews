@@ -2239,6 +2239,29 @@ void SelfTestBreakoutBlend()
    SelfTestGroup("breakout blend", before);
 }
 
+// The alert group's identity, which is the whole of F-013: two timeframes of one symbol
+// moving the same way are one event and must share a group, while the opposite direction
+// is a different claim about the market and must not. Pinned here because the grouping is
+// what decides which signals reach the operator.
+void SelfTestAlertGroupIdentity()
+{
+   int before = g_selftest_failed;
+
+   SelfTestCheck(OwnAlertGroup("EURUSD", DIR_UP) == OwnAlertGroup("EURUSD", DIR_UP),
+                 "alert group: the same symbol and direction share one group (F-013)");
+
+   SelfTestCheck(OwnAlertGroup("EURUSD", DIR_UP) != OwnAlertGroup("EURUSD", DIR_DOWN),
+                 "alert group: opposite directions on one symbol do not share a group");
+
+   SelfTestCheck(OwnAlertGroup("EURUSD", DIR_UP) != OwnAlertGroup("GBPUSD", DIR_UP),
+                 "alert group: two symbols do not share a group");
+
+   SelfTestCheck(StringFind(OwnAlertGroup("EURUSD", DIR_UP), "EURUSD") == 0,
+                 "alert group: the fallback id names the symbol it belongs to");
+
+   SelfTestGroup("alert group", before);
+}
+
 // One case per guard block in ValidateInputsCore, because the validation only ran at
 // OnInit and nothing could reach its rejection paths: the inputs are read-only, so
 // before the extraction no test could make one fail. Baseline first, then each field
@@ -2620,6 +2643,7 @@ void RunSelfTest()
    SelfTestComposerEngineGating();
    SelfTestSignalLifecycle();
    SelfTestHistoryRefresh();
+   SelfTestAlertGroupIdentity();
    SelfTestBreakoutBlend();
    SelfTestInputValidation();
    SelfTestRankingCheck();
@@ -7480,14 +7504,28 @@ void UpdateAlertGroups(const datetime now)
    }
 }
 
+// The fallback group id: one symbol, one direction. Every timeframe of that symbol shares
+// it, which is deliberate - the same pair moving the same way is one event seen at several
+// resolutions, and alerting once per timeframe would be the duplicate-alert problem this
+// grouping exists to solve. UpdateAlertGroups then elects the member with the highest
+// DirectionSortScore as the only one that alerts, so the strongest reading is the one that
+// fires, and the rest carry group_member_count > 1 and show as "(N)" on the dashboard
+// rather than disappearing. Filed as F-013 as a suspected bug on the strength of the old
+// comment, which said a signal without a basket reading "groups only with itself" and was
+// simply wrong about the code.
+string OwnAlertGroup(const string symbol, const int direction)
+{
+   return symbol + "_" + DirectionText(direction);
+}
+
 // Group id of a signal: the currency whose basket flow carries the move, in
 // the direction it flows. Without a basket reading, or when neither currency
-// supports the move, the signal groups only with itself.
+// supports the move, every timeframe of the symbol shares OwnAlertGroup().
 string DominantCurrencyFlow(const int index, const int direction)
 {
    int base = g_profiles[index].base_index;
    int quote = g_profiles[index].quote_index;
-   string own_group = g_profiles[index].symbol + "_" + DirectionText(direction);
+   string own_group = OwnAlertGroup(g_profiles[index].symbol, direction);
    if(!UseCurrencyStrength || base < 0 || quote < 0)
       return own_group;
 

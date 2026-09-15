@@ -26,7 +26,22 @@ known state.
 
 | Host | Installed by this audit | Purpose | Removal |
 | --- | --- | --- | --- |
-| `node1` | _pending Phase E_ | fresh-clone build + self-test | recorded when performed |
+| `node1` | Rosetta 2; `bandit 1.9.4` (pip, `--break-system-packages`); a staged copy of node3's `MetaTrader 5.app` at `~/mt5-app` (**removed**); `~/fxnews-phasee` and `~/fxnews-main` clones | Phase E attempt, abandoned — see E-5 | Rosetta 2 has no uninstaller; the staged app and the `fxnews-main` clone were deleted; `~/fxnews-phasee` (1.5 MB) retained |
+| `node2` | Rosetta 2; `~/fxnews-phasee` clone (1.5 MB) | **Phase E host** | `rm -rf ~/fxnews-phasee`; Rosetta 2 has no uninstaller |
+| `node3` | Rosetta 2; `bandit`, `pip-audit`, `coverage`, `PyYAML` (pip) | development, baseline and fix host | `pip uninstall` those four; the interpreter itself is unchanged |
+| `node4` | nothing | not used | — |
+| `deltasona` (VPS) | nothing | reachable, not used | — |
+
+**Fleet finding (E-5).** All four Macs are Apple Silicon and none had Rosetta 2 when the
+audit began, so no gate could run anywhere. Rosetta is now installed on node1, node2 and
+node3. Beyond that the spares differ from the development host in one way that matters:
+`node3`'s MetaTrader 5 authorises against a live broker account and runs the harness, while
+`node1` and `node2` have no broker authorization (their newest terminal logs hold zero
+`authorized on` lines and their last real activity is 2026-09-04) and their terminals
+**exit with code 0 at startup**, before loading any script or indicator — including with no
+startup config at all, so it is not a configuration problem. The same app version
+(5.0.4501) and Wine (9.14) work on node3, and a pristine `main` clone fails identically on
+node1, so the failure is environmental and unrelated to this audit's changes.
 
 ## 2. Local toolchain (`node3`)
 

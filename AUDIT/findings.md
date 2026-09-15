@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 53 | done 31 | open 22 | blocked 0 | S0:1 S1:11 S2:19 S3:22**
+**total 55 | done 32 | open 22 | blocked 1 | S0:1 S1:13 S2:19 S3:22**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -12,6 +12,8 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | E-1 | S0 | tooling | DONE | `tools/build-macos.sh:40` | Build and self-test gates cannot execute: bundled wine64 is x86_64 and Rosetta 2 was absent on all four Macs |
 | E-2 | S1 | tooling | DONE | `tools/selftest-macos.sh:34` | No MQL5 formatter, linter, static analyzer, SAST scanner or coverage tool exists |
 | E-3 | S1 | verification | DONE | `n/a (environment)` | The historical end-to-end gates cannot reach green in this environment until M1 history is available at run time |
+| E-4 | S1 | verification | DONE | `n/a (fleet)` | Provision an independent macOS host for Phase E |
+| E-5 | S1 | verification | BLOCKED | `n/a (fleet)` | Phase E's self-test gate cannot run on the independent hosts: their MetaTrader terminal exits at startup |
 | F-002 | S1 | scoring | DONE | `FXNews.mq5:4502` | UpdateSessionBaseline folds active_trigger_tick_volume into the tick-volume baseline unguarded, while the adjacent line explicitly guards the tick rate |
 | F-003 | S1 | scoring | DONE | `FXNews.mq5:4268,4704,5418,5917` | movement_5m_pips falls back to a 0.0 sentinel when the M1 copy fails and is then consumed as a measured value by three components |
 | F-004 | S1 | historical | DONE | `FXNews.mq5:2728` | Historical impulse evaluation forces acceleration_available and continuation_available to true, hard-coding weights for inputs that may be unmeasurable |
@@ -103,6 +105,31 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 - **Fix:** Resolved by the F-047 fix. The historical end-to-end gates now reach green in this environment and the historical engine was exercised on real broker history for the first time in this audit.
 - **Evidence (after):** Both historical modes now run end to end on real broker history. --validation exit 0: 50000 M1 bars, 2589 boundaries evaluated, Signals=601 (reproduced twice). --autotune exit 0: 9 candidates over 2584 boundaries, 'Current: signals=603 avgScore=74.7 PF=0.79 AvgR30=-0.134 Hit30=35.7%', a ranked best candidate, recommended settings printed, and 'Applied: no runtime change' - the advisory boundary holds. The AUTOTUNE wait also exercised the timeout branch: EURUSD consumed its full 60 s budget and was skipped while GBPUSD loaded ('2/2 symbols processed (GBPUSD, 50000 M1 bars, 48.8 days)').
 - **Notes:** Was filed BLOCKED with three options for a human. Option (1) - fix F-047 - was implemented and removed the blocker, so no human decision is outstanding. Residual, not blocking: a symbol needing more than the budget still reports unavailable; HistoricalHistoryWaitSeconds is tunable to 600. Observation for a human, outside code-correctness scope: on this single-symbol 48.8-day sample the score does not rank outcomes - bucket AvgR30 is -0.068, -0.105, -0.075, -0.237, -0.110 across <65 to 80-84, i.e. higher scores did not produce better R, and no candidate beat CURRENT. The report's own interpretation line says a useful score should show better R/PF in higher buckets, yet it prints the same text whether or not that holds. Filed as F-048. A go-live decision should treat the absence of a demonstrated ranking edge on this sample as material.
+
+### E-4 (S1, verification) — Provision an independent macOS host for Phase E
+
+- **Status:** DONE  |  **Category:** deps  |  **Host:** node1, node2  |  **Commit:** -
+- **Location:** `n/a (fleet)`
+- **Discovered by:** Phase E
+- **Evidence (before):**
+
+  > All four Macs lacked Rosetta 2, so no Mac in the fleet could execute the x86_64 Wine bundle and therefore none of them could run any gate. node1 and node2 additionally had no fresh clone of the repository.
+
+- **Fix:** Installed Rosetta 2 on node1 and node2 (the exact command is logged in AUDIT/environment.md); cloned the audit branch fresh on both. node1's bundled Wine was 9.8 (app 5.0.4330) and its terminal refused to start, so a copy of node3's newer app was staged into node1's home and used through the FXNEWS_WINE override added by F-024 rather than touching /Applications, which would have needed sudo. node2 turned out to already have app 5.0.4501 — the same version as the working development host — and was made the Phase E host.
+- **Evidence (after):** Fresh clone on node2: 21 tracked files, working tree clean at 64060cc. Zero-warning compile verified on the independent host: 'Result: 0 errors, 0 warnings'. contracts 0 violations and census 0 open findings verified on node1 and again on node2.
+- **Notes:** The compile gate is the one most likely to differ between machines, and it was reproduced on two hosts that did none of the development. The staged app on node1 was removed afterwards; node2's clone is retained for the retry described in E-5.
+
+### E-5 (S1, verification) — Phase E's self-test gate cannot run on the independent hosts: their MetaTrader terminal exits at startup
+
+- **Status:** BLOCKED  |  **Category:** deps  |  **Host:** node1, node2  |  **Commit:** -
+- **Location:** `n/a (fleet)`
+- **Discovered by:** Phase E
+- **Evidence (before):**
+
+  > On node2, from a fresh clone at 64060cc with Rosetta 2 installed and Wine 9.14 available, './tools/selftest-macos.sh' compiles both files with 0 errors and 0 warnings and then reports 'no Experts journal at .../MQL5/Logs/20260915.log'. The terminal log shows the cause: the terminal logs 'unstable and unsupported Wine 9.14' and 'exit with code 0' 0.05 s later, before the script or the indicator is loaded. On the working development host node3 the identical warning is followed 2.3 s later by 'script FXNewsSelfTest (EURUSD,M5) loaded successfully' and 'custom indicator FXNews (EURUSD,M5) loaded succesfully'. node1 fails identically. PRISTINE-BASELINE PROOF: a fresh clone of main (fa68540, no audit changes) fails identically on node1, and node1's terminal exits the same way when launched with NO startup config at all, so this is not caused by any change in this audit and not by the harness configuration.
+
+- **Notes:** Phase E is therefore PARTIAL, and the parts that did complete are the ones most at risk from a machine-specific pass: a fresh clone on two independent hosts, the zero-warning compile, the census and the contract check. The self-test gate (149 assertions) was NOT independently reproduced. On the evidence gathered, the difference between the working and failing hosts is broker authorization: node3's log holds '11013759: authorized on ICMarketsSC-MT5-4', while node1's and node2's newest logs hold zero 'authorized on' lines and their last real activity is 2026-09-04.
+- **BLOCKED:** The spare hosts' MetaTrader 5 terminals exit at startup before loading any script, so the self-test gate cannot run there. Tried: (1) Rosetta 2 installed on both spare hosts - terminal still exits; (2) node1's older bundled Wine 9.8 replaced with node3's Wine 9.14 through the FXNEWS_WINE override - still exits; (3) terminal launched with no startup config at all - still exits, so it is not the harness ini; (4) a pristine main clone - exits identically, proving the audit changes are not the cause; (5) node2 and node4 identified as already having app 5.0.4501, matching the working host - node2 still exits; (6) confirmed no terminal or wineserver process and no stale lock file was left behind by the diagnostics. Options for a human: (1) log in to a working demo account in MetaTrader 5 on node2 (its terminal has no broker authorization while the working host does), then re-run ./tools/selftest-macos.sh in ~/fxnews-phasee - this is the cheapest and most likely to work; (2) install the current MetaTrader 5 for macOS or Wine 10+ on a spare host, which is what the terminal itself requests ('please upgrade to Wine 10.0 or later'), then re-run; (3) copy the working 13 GB prefix from node3 to a spare host, which duplicates live broker credentials and is not recommended; (4) accept this audit's independent verification as the compile, census and contract gates only, and record that the self-test has not been reproduced off the development host.
 
 ### F-002 (S1, scoring) — UpdateSessionBaseline folds active_trigger_tick_volume into the tick-volume baseline unguarded, while the adjacent line explicitly guards the tick rate
 

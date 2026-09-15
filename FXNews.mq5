@@ -3268,6 +3268,15 @@ void AddHistoricalCoverageLines(const HistoricalBacktestStats &stats)
                                         stats.spread_from_median,
                                         stats.spread_from_symbol,
                                         stats.spread_unavailable));
+   // Two composite caps cannot bind in a historical run, so the reported score
+   // distribution must not be read as the live one. Hold is not resolvable below
+   // the scan timeframe and intra-bar re-entry is not tracked, so hold_score is
+   // saturated at 1.0 and fakeout_penalty is always 0; weak_hold_cap (:4984) and
+   // range_snapback_cap (:4988) are therefore inert here while both are active
+   // live. Disclosed rather than silently differing.
+   AddHistoricalReportLine("Model limits: hold below the scan timeframe is not resolvable and intra-bar");
+   AddHistoricalReportLine("  re-entry is not tracked, so hold_score saturates and fakeout_penalty is 0;");
+   AddHistoricalReportLine("  weak_hold_cap and range_snapback_cap cannot bind here, unlike a live scan.");
 }
 
 void AddHistoricalBucketLines(const string title, const HistoricalBacktestStats &stats)

@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 52 | done 26 | open 26 | blocked 0 | S0:1 S1:11 S2:18 S3:22**
+**total 52 | done 29 | open 23 | blocked 0 | S0:1 S1:11 S2:18 S3:22**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -41,9 +41,9 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-049 | S2 | tests | START | `FXNews.mq5 (UpdateAlertGroups, DispatchPendingAlerts, UpdateDashboard, BuildDiagnosticsLines)` | Alert dispatch, correlation grouping and dashboard rendering still have no automated coverage |
 | F-010 | S3 | historical | START | `FXNews.mq5:2926-2930,3039` | The 85+ bucket in the historical report is unreachable (now empirically confirmed; the wiki already documents the empty bucket, so only the unannotated report row remains) |
 | F-020 | S3 | scoring | DONE | `FXNews.mq5:8266-8270,4661,5114-5116` | RobustZ returning 0 on degenerate dispersion is the correct z, not an imputation (filed as a false-measured spread_z; disproved) |
-| F-026 | S3 | tooling | START | `tools/census.py:273,274` | ruff F541: two f-strings without placeholders |
-| F-027 | S3 | tooling | START | `tools/census.py` | ruff format drift: the only Python file is not formatted to the formatter's standard |
-| F-028 | S3 | tooling | START | `tools/build-macos.sh; tools/selftest-macos.sh` | shfmt drift in both shell scripts |
+| F-026 | S3 | tooling | DONE | `tools/census.py:273,274` | ruff F541: two f-strings without placeholders |
+| F-027 | S3 | tooling | DONE | `tools/census.py` | ruff format drift: the only Python file is not formatted to the formatter's standard |
+| F-028 | S3 | tooling | DONE | `tools/build-macos.sh; tools/selftest-macos.sh` | shfmt drift in both shell scripts |
 | F-029 | S3 | tooling | START | `tools/census.py:17,338` | tools/census-allow.txt is documented and defaulted to but does not exist |
 | F-030 | S3 | tooling | START | `.gitignore` | .coverage is not ignored, so the coverage artifact required by the audit brief can be committed by accident |
 | F-031 | S3 | repo | START | `git history` | One contributor appears under three different author identities |
@@ -460,34 +460,42 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-026 (S3, tooling) — ruff F541: two f-strings without placeholders
 
-- **Status:** START  |  **Category:** style  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** style  |  **Host:** node3  |  **Commit:** the F-026/F-027 commit
 - **Location:** `tools/census.py:273,274`
 - **Discovered by:** Phase B baseline (ruff check)
 - **Evidence (before):**
 
   > ruff check tools/census.py -> 'Found 2 errors' (F541 at :273 and :274); both are auto-fixable by removing the extraneous f prefix.
 
+- **Fix:** Removed the extraneous f prefix from the two adjacent regex fragments in census.py's declaration-detection pattern. The compiled pattern is identical; neither fragment interpolates anything.
+- **Evidence (after):** ruff check tools/census.py clean. The change cannot alter detection because the prefix was inert, and that was verified rather than assumed: a synthetic probe file with three planted findings (write-only local, placeholder literal, uncalled function) is detected identically before and after - 3 findings, exit 1 - while the real source still reports 0 findings, exit 0. mypy --strict and bandit clean.
+- **Notes:** Cleared as a prerequisite for F-016, which enforces ruff check in CI.
 
 ### F-027 (S3, tooling) — ruff format drift: the only Python file is not formatted to the formatter's standard
 
-- **Status:** START  |  **Category:** style  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** style  |  **Host:** node3  |  **Commit:** the F-026/F-027 commit
 - **Location:** `tools/census.py`
 - **Discovered by:** Phase B baseline (ruff format --check)
 - **Evidence (before):**
 
   > ruff format --check reports '1 file would be reformatted'.
 
+- **Fix:** Applied `ruff format tools/census.py`. Formatting only, which is why the diff touches most of the file.
+- **Evidence (after):** ruff format --check clean; ruff check clean; mypy --strict clean; bandit clean. Census behaviour unchanged: 3 findings on the synthetic probe, 0 on the real source.
+- **Notes:** Cleared as a prerequisite for F-016, which enforces ruff format --check in CI.
 
 ### F-028 (S3, tooling) — shfmt drift in both shell scripts
 
-- **Status:** START  |  **Category:** style  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** style  |  **Host:** node3  |  **Commit:** d80da2f
 - **Location:** `tools/build-macos.sh; tools/selftest-macos.sh`
 - **Discovered by:** Phase B baseline (shfmt -d)
 - **Evidence (before):**
 
   > shfmt -d -i 2 -ci reports differences in both files: one-line brace guards expanded, case arms split, redirect spacing normalised.
 
-- **Notes:** Cosmetic only; shellcheck is already clean. Applying it is safe but should be its own commit.
+- **Fix:** Applied `shfmt -i 2 -ci -w` to build-macos.sh and selftest-macos.sh; lib-mt5.sh was already conformant. Formatting only: no statement changed.
+- **Evidence (after):** Reformatting executable gates is behaviour-risky, so every gate was run afterwards instead of trusting a whitespace-only diff. shfmt -d reports no drift; shellcheck clean on all three files; tools/contracts.py reports 0 violations, which also proves the patterns it parses out of selftest-macos.sh survived; build 0 errors / 0 warnings; full selftest 145 passed, 0 failed of 145.
+- **Notes:** Cleared as a prerequisite for F-016, which enforces shfmt -d in CI.
 
 ### F-029 (S3, tooling) — tools/census-allow.txt is documented and defaulted to but does not exist
 

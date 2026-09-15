@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 55 | done 37 | open 18 | blocked 0 | S0:1 S1:13 S2:17 S3:24**
+**total 55 | done 38 | open 17 | blocked 0 | S0:1 S1:13 S2:17 S3:24**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -33,7 +33,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-017 | S2 | validation | DONE | `FXNews.mq5:942,988-995` | MaxQuoteAgeSeconds and FullHoldScoreSeconds have no upper bound, so extreme values silently disable the freshness gate or make the HYBRID hold clause unreachable |
 | F-018 | S2 | scoring | DONE | `FXNews.mq5:5026-5031` | single_feature_cap is applied without checking that the feature it measures was evaluated |
 | F-019 | S2 | scoring | DONE | `FXNews.mq5:4958-4959` | The +0.05 synergy bonus is awarded on component scores without checking that either engine passed or was measured |
-| F-021 | S2 | dashboard | START | `FXNews.mq5:7482,7419` | WrapLabelText wraps report lines at 63 characters but SetDashboardRow re-clips them to the measured pixel limit, truncating the wrapped tail |
+| F-021 | S2 | dashboard | DONE | `FXNews.mq5:7482,7419` | WrapLabelText wraps report lines at 63 characters but SetDashboardRow re-clips them to the measured pixel limit, truncating the wrapped tail |
 | F-023 | S2 | tests | DONE | `FXNews.mq5:930-1109` | No test could reach any ValidateInputs rejection path |
 | F-024 | S2 | tooling | DONE | `tools/build-macos.sh:47,116-120` | build-macos.sh cannot distinguish 'Wine cannot execute' from 'the compiler produced no result line', and reports the wrong exit code |
 | F-025 | S2 | ops | START | `session credential handling` | A live-looking GitHub PAT was supplied in plaintext and is present in the agent session transcript |
@@ -378,14 +378,16 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-021 (S2, dashboard) — WrapLabelText wraps report lines at 63 characters but SetDashboardRow re-clips them to the measured pixel limit, truncating the wrapped tail
 
-- **Status:** START  |  **Category:** logic  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** logic  |  **Host:** node3  |  **Commit:** HEAD
 - **Location:** `FXNews.mq5:7482,7419`
 - **Discovered by:** Phase B L2 + dashboard audit
 - **Evidence (before):**
 
   > WrapLabelText's width is the character cap (:7482) while SetDashboardRow applies FitDashboardText and the pixel-derived limit (:7419, :7469). On a narrow chart the second line of an already-wrapped report loses its tail to an ellipsis rather than wrapping again.
 
-- **Notes:** Tracker task 118 introduced the 63-character budget; the pixel fit and the character wrap disagree.
+- **Fix:** WrapLabelText takes the wrap width as a parameter and the report path passes DashboardTextLimit(), the same value SetDashboardRow clips to, so wrapping and clipping can no longer disagree. A non-positive width now returns no pieces instead of looping.
+- **Evidence (after):** New assertion: the same text wrapped at width 20 yields more pieces than at 63, every piece fits 20 characters, and both the first and last word survive joining - so no text is dropped. BEFORE (wrapper ignoring the width, old constant, signature unchanged): 172 passed, 1 failed of 173, exit 1. AFTER: 173 passed, 0 failed of 173. Build 0/0; census 0; contracts 0.
+- **Notes:** The tooltip already received the unwrapped line, so this was visible only on the label - which is why manual observation on a wide chart would not have shown it. Fixed by making the width explicit rather than by raising the character cap, which would only have moved the mismatch.
 
 ### F-023 (S2, tests) — No test could reach any ValidateInputs rejection path
 

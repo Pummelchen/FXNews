@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "repo": "Pummelchen/FXNews",
+  "branch": "audit/2026-09-15",
+  "baseCommit": "71ce980",
+  "started": "2026-09-15",
+  "templateAdaptation": "The audit brief targets a 20+ project polyglot monorepo (Swift 6.4/C#/.NET 10/C99/Python). This repository is one MQL5 product file plus three tool files. Non-applicable sections are documented in AUDIT/inventory.md section 6 rather than fabricated.",
+  "statusValues": ["START", "PROGRESS", "TEST", "AUDIT", "DONE", "BLOCKED"],
+  "severities": ["S0", "S1", "S2", "S3"],
+  "hosts": {
+    "dev": "node3",
+    "phaseE": "node1",
+    "spare": ["node2", "node4"],
+    "vps": "deltasona (Debian 13, not used)"
+  },
+  "baseline": {
+    "buildErrors": 0,
+    "buildWarnings": 0,
+    "selfTestPassed": 117,
+    "selfTestFailed": 0,
+    "censusOpenFindings": 0,
+    "mypyStrict": "clean",
+    "ruffFindings": 2,
+    "shellcheckFindings": 0,
+    "shfmtDrift": true,
+    "pythonCoveragePercent": 86,
+    "secretsFound": 0,
+    "dependencyCves": 0
+  },
+  "tasks": [
+    {
+      "id": "E-1",
+      "severity": "S0",
+      "module": "tooling",
+      "file": "tools/build-macos.sh:40",
+      "title": "Build and self-test gates cannot execute: bundled wine64 is x86_64 and Rosetta 2 was absent on all four Macs",
+      "category": "deps",
+      "status": "DONE",
+      "hostUsed": "node3",
+      "discoveredBy": "Phase A environment probe",
+      "evidenceBefore": "arch -x86_64 /usr/bin/true -> 'Bad CPU type in executable' on node1..node4; file wine64 -> 'Mach-O 64-bit executable x86_64'; build-macos.sh exited 3 ('MetaEditor wrote no log') instead of 2",
+      "fixSummary": "Installed Rosetta 2: sudo softwareupdate --install-rosetta --agree-to-license",
+      "evidenceAfter": "Rosetta install finished successfully; arch -x86_64 /usr/bin/true OK; wine64 --version -> wine-9.14; ./tools/build-macos.sh -> 0 errors, 0 warnings, exit 0",
+      "commit": null,
+      "notes": "Environment remediation on the audit host, not a source change. The underlying repo defect (the script cannot tell 'Wine cannot execute' from 'no result line') is filed as F-001.",
+      "blockedReason": null
+    },
+    {
+      "id": "E-2",
+      "severity": "S1",
+      "module": "tooling",
+      "file": "tools/selftest-macos.sh:34",
+      "title": "No MQL5 formatter, linter, static analyzer, SAST scanner or coverage tool exists; gates are limited to compiler + census + self-test",
+      "category": "deps",
+      "status": "DONE",
+      "hostUsed": "node3",
+      "discoveredBy": "Phase A toolchain probe",
+      "evidenceBefore": "No MQL5 tooling present in Homebrew, pip or the system toolchain; MQL5 is a closed language with no public parser",
+      "fixSummary": "Documented as a tooling gap rather than a blocker. Compensating controls: MetaEditor compiler as the only analyzer, tools/census.py for dead-code/placeholder coverage, and manual evidence-based L4/L5 review recorded in the ledger.",
+      "evidenceAfter": "AUDIT/environment.md section 2 records the gap and the compensating controls",
+      "commit": null,
+      "notes": "Not BLOCKED: a real substitute exists and is used for every finding.",
+      "blockedReason": null
+    }
+  ]
+}

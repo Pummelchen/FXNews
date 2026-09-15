@@ -2558,6 +2558,84 @@ void SelfTestHistoryEviction()
    SelfTestGroup("history eviction", before);
 }
 
+// The active-signals branch of the dashboard, which F-051 found reachable by no test: it needs a
+// running scan for the globals, but its two decisions - which profiles are selected, and how they
+// are ordered and bounded - are now pure and are asserted here. The drawing itself is covered by
+// the "dashboard rows" group, which runs against the harness's real chart.
+void SelfTestActiveSignalRows()
+{
+   int before = g_selftest_failed;
+
+   // Selection: active with a direction, above the floor, and a leader only when leaders are
+   // demanded. The floor comparison is the rounded one the product uses, so exactly 50 qualifies.
+   SelfTestCheck(EligibleForActiveSignalRow(true, DIR_UP, 90.0, true, false, 50.0),
+                 "active rows: an active signal above the floor is selected (F-051)");
+   SelfTestCheck(!EligibleForActiveSignalRow(false, DIR_UP, 90.0, true, false, 50.0),
+                 "active rows: an inactive profile is not selected");
+   SelfTestCheck(!EligibleForActiveSignalRow(true, DIR_NONE, 90.0, true, false, 50.0),
+                 "active rows: an active profile with no direction is not selected");
+   SelfTestCheck(!EligibleForActiveSignalRow(true, DIR_UP, 49.0, true, false, 50.0),
+                 "active rows: a signal below the display floor is not selected");
+   SelfTestCheck(EligibleForActiveSignalRow(true, DIR_UP, 50.0, false, false, 50.0),
+                 "active rows: the display floor is inclusive");
+   SelfTestCheck(!EligibleForActiveSignalRow(true, DIR_UP, 90.0, false, true, 50.0),
+                 "active rows: a non-leader is dropped when only leaders are shown");
+   SelfTestCheck(EligibleForActiveSignalRow(true, DIR_UP, 90.0, true, true, 50.0),
+                 "active rows: a leader survives when only leaders are shown");
+   SelfTestCheck(EligibleForActiveSignalRow(true, DIR_DOWN, 90.0, false, false, 50.0),
+                 "active rows: a short signal is selected on the same terms as a long one");
+
+   // Ordering: highest sort score first, and equal scores keep the lower profile index so the rank
+   // cannot swap between scans.
+   DashboardSignal signals[3];
+   for(int i = 0; i < 3; i++)
+   {
+      signals[i].profile_index = i;
+      signals[i].direction = DIR_UP;
+      signals[i].age_seconds = 10;
+      signals[i].blocked = false;
+      signals[i].sort_score = 0.0;
+   }
+   signals[0].sort_score = 10.0;
+   signals[1].sort_score = 30.0;
+   signals[2].sort_score = 20.0;
+   int ranked = SortDashboardSignalsTopN(signals, 3);
+   SelfTestCheck(ranked == 3 && signals[0].profile_index == 1 &&
+                 signals[1].profile_index == 2 && signals[2].profile_index == 0,
+                 "active rows: signals are ranked by descending sort score (F-051)");
+
+   signals[0].profile_index = 5;
+   signals[1].profile_index = 2;
+   signals[2].profile_index = 9;
+   signals[0].sort_score = 20.0;
+   signals[1].sort_score = 20.0;
+   signals[2].sort_score = 20.0;
+   ranked = SortDashboardSignalsTopN(signals, 3);
+   SelfTestCheck(ranked == 3 && signals[0].profile_index == 2 &&
+                 signals[1].profile_index == 5 && signals[2].profile_index == 9,
+                 "active rows: equal scores rank by profile index so the order is stable");
+
+   // Bounding: the row budget decides how many are ranked, and a budget of zero or less ranks none
+   // rather than all.
+   signals[0].profile_index = 0;
+   signals[1].profile_index = 1;
+   signals[2].profile_index = 2;
+   signals[0].sort_score = 10.0;
+   signals[1].sort_score = 30.0;
+   signals[2].sort_score = 20.0;
+   ranked = SortDashboardSignalsTopN(signals, 2);
+   SelfTestCheck(ranked == 2 && signals[0].sort_score == 30.0 && signals[1].sort_score == 20.0,
+                 "active rows: the row budget limits how many signals are ranked");
+   SelfTestCheck(SortDashboardSignalsTopN(signals, 0) == 0,
+                 "active rows: a zero row budget ranks nothing");
+   SelfTestCheck(SortDashboardSignalsTopN(signals, -5) == 0,
+                 "active rows: a negative row budget ranks nothing");
+   SelfTestCheck(SortDashboardSignalsTopN(signals, 99) == 3,
+                 "active rows: a budget larger than the signal set ranks them all");
+
+   SelfTestGroup("active signal rows", before);
+}
+
 // One case per guard block in ValidateInputsCore, because the validation only ran at
 // OnInit and nothing could reach its rejection paths: the inputs are read-only, so
 // before the extraction no test could make one fail. Baseline first, then each field
@@ -2970,6 +3048,7 @@ void RunSelfTest()
    SelfTestSignalLifecycle();
    SelfTestHistoryRefresh();
    SelfTestDashboardRows();
+   SelfTestActiveSignalRows();
    SelfTestHistoryEviction();
    SelfTestAlertDispatch();
    SelfTestAtrDefinition();
@@ -8480,6 +8559,25 @@ string ActivityStatusText()
                        TimeToString(TimeLocal(), TIME_SECONDS));
 }
 
+// Whether an active profile earns a row in the active-signals view: it is active with a
+// direction, it is a group leader when only leaders are shown, and its displayed score meets the
+// display floor. Extracted from CollectDashboardSignals so the selection rule - the thing that
+// decides which signals an operator sees - is assertable without a scan or a chart, which is what
+// F-051 found missing.
+bool EligibleForActiveSignalRow(const bool active,
+                                const int direction,
+                                const double displayed_score,
+                                const bool group_leader,
+                                const bool show_only_leaders,
+                                const double min_confidence)
+{
+   if(!active || direction == DIR_NONE)
+      return false;
+   if(show_only_leaders && !group_leader)
+      return false;
+   return MeetsThreshold(displayed_score, min_confidence);
+}
+
 void CollectDashboardSignals(DashboardSignal &signals[])
 {
    if(ArrayResize(signals, 0) != 0)
@@ -8495,11 +8593,13 @@ void CollectDashboardSignals(DashboardSignal &signals[])
          continue;
       }
 
-      if(ShowOnlyGroupLeaders && !g_profiles[i].group_leader_signal)
-         continue;
-
       int direction = g_profiles[i].active_direction;
-      if(!MeetsThreshold(DirectionDisplayedScore(i, direction), MinDisplayConfidence))
+      if(!EligibleForActiveSignalRow(true,
+                                     direction,
+                                     DirectionDisplayedScore(i, direction),
+                                     g_profiles[i].group_leader_signal,
+                                     ShowOnlyGroupLeaders,
+                                     MinDisplayConfidence))
          continue;
 
       DashboardSignal signal;

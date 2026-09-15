@@ -16,12 +16,14 @@ no CI workflow.
 | 3 | `tools/build-macos.sh` (141 lines) | Bash 3.2+ | none (script) | CLI flags `[path] [--install] [-h]` | macOS only | no — build gate |
 | 4 | `tools/selftest-macos.sh` (157 lines) | Bash 3.2+ | none (script) | CLI flags `[--validation\|--autotune]` | macOS only | no — test gate |
 | 5 | `tools/census.py` (355 lines) | Python 3.14 | none (script, stdlib only) | CLI `[source] [--allow FILE] [--json]` | **any** (cross-platform) | no — analysis gate |
-| 6 | `tools/mql5/FXNewsSelfTest.mq5` (86 lines) | MQL5 | MetaEditor 64-bit under Wine | `OnStart` | macOS only | no — test harness |
-| 7 | `README.md`, `CLAUDE.md`, `LICENSE`, `.gitignore`, `.github/traffic.json` | Markdown/JSON | n/a | n/a | any | docs/metadata |
+| 6 | `tools/contracts.py` (237 lines) | Python 3.14 | none (script, stdlib only) | CLI `[repo-root]` | **any** (cross-platform) | no — contract gate |
+| 7 | `tools/mql5/FXNewsSelfTest.mq5` (86 lines) | MQL5 | MetaEditor 64-bit under Wine | `OnStart` | macOS only | no — test harness |
+| 8 | `README.md`, `CLAUDE.md`, `LICENSE`, `.gitignore`, `.github/traffic.json` | Markdown/JSON | n/a | n/a | any | docs/metadata |
 
-`tools/lib-mt5.sh` was added during this audit by F-014/F-024. It holds the Wine
-prefix, the MetaTrader paths and the runnability probe that both gate scripts used
-to duplicate — and that one of them used to go without entirely.
+Two units were added during this audit: `tools/lib-mt5.sh` by F-014/F-024 (the Wine
+prefix, MetaTrader paths and runnability probe the gates used to duplicate, and one
+used to omit) and `tools/contracts.py` by F-015 (the cross-file string contracts,
+which also pins the F-011 dashboard-refresh call site).
 
 **Language-standard coverage (§1):** Swift — **N/A, none present**. C#/.NET — **N/A, none
 present**. C — **N/A, none present**. Python — present in exactly one file

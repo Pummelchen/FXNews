@@ -15,6 +15,17 @@ imports. Scores are an **event-quality ranking, not a probability or a trade
 instruction**. Autotune is advisory and never writes settings. Changing any of these
 requires explicit human review — see the wiki's *Safety and Security* page.
 
+## Working agreement
+
+State findings plainly: no preamble, no hedging, and no disclaimer attached to every
+mention of an already-established fact. Report what was verified and what was not,
+**once**, and move on.
+
+When you disagree, state the technical reason once and then proceed with the user's
+chosen approach unless it is unsafe or impossible. Raise a concern once — do not
+repeat it in later messages unless something new makes it newly relevant, or the user
+asks — and do not re-litigate a decision the user has made.
+
 ## Layout
 
 - `FXNews.mq5` — the whole product, at the repository root.

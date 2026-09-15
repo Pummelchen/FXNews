@@ -1789,6 +1789,62 @@ void SelfTestExhaustionAvailability()
    SelfTestGroup("exhaustion availability", before);
 }
 
+// Two composer rules read a component score without asking whether that component
+// was measured: the +0.05 synergy bonus (F-019) and the single-feature cap
+// (F-018). A leftover score in an unmeasured component could satisfy either, and a
+// disabled engine could never satisfy the bonus because its score stays 0.
+void SelfTestComposerEngineGating()
+{
+   int before = g_selftest_failed;
+
+   CompositeContext ctx;
+   ctx.direction = DIR_UP;
+   ctx.m5_move_directional = 0.0;
+   ctx.m15_move_directional = 0.0;
+   ctx.age_seconds = 0;
+   ctx.age_limit_seconds = 0;
+   ctx.max_spread_to_atr = 0.45;
+
+   // F-019: the bonus needs two measured engines, not two non-zero scores.
+   CompositeSignalScore bonus;
+   ResetCompositeSignalScore(bonus);
+   bonus.execution.pass = true;
+   bonus.execution.score = 0.60;
+   bonus.breakout.measured = true;
+   bonus.breakout.score = 0.60;
+   bonus.impulse.measured = true;
+   bonus.impulse.score = 0.60;
+   bonus.regime.score = 0.60;
+   ComposeSignalScore(bonus, ctx, false);
+   double both_measured = bonus.raw_score;
+
+   bonus.breakout.measured = false;   // its 0.60 is now a leftover, not a reading
+   ComposeSignalScore(bonus, ctx, false);
+   SelfTestCheck(bonus.raw_score < both_measured,
+                 "ComposeSignalScore grants the synergy bonus only to measured engines");
+
+   // F-018: the single-feature cap must ignore an unmeasured engine's leftover
+   // score, even when that leftover is high enough to look like confirmation.
+   // The measured engine sits just under the confirm level and the other
+   // components are perfect, so the capped score still exceeds the cap's own
+   // "above 80" gate: with the leftover counted, max(0.90, 0.59) = 0.90 looks
+   // like confirmation and the cap is skipped.
+   CompositeSignalScore single;
+   ResetCompositeSignalScore(single);
+   single.execution.pass = true;
+   single.execution.score = 1.0;
+   single.impulse.measured = true;
+   single.impulse.score = 0.59;       // the only real engine reading
+   single.breakout.measured = false;
+   single.breakout.score = 0.90;      // leftover from an earlier evaluation
+   single.regime.score = 1.0;
+   ComposeSignalScore(single, ctx, false);
+   SelfTestCheck(StringFind(single.cap_reasons, "single_feature_cap") >= 0,
+                 "ComposeSignalScore caps a single measured feature, ignoring a stale one");
+
+   SelfTestGroup("composer engine gating", before);
+}
+
 // The live signal state machine, driven from synthetic scores instead of from the
 // market. This closes the largest coverage hole the project had: the lifecycle was
 // verified only by manual runtime observation, and three defects fixed in 3.0
@@ -2133,6 +2189,7 @@ void RunSelfTest()
    SelfTestImpulseAvailability();
    SelfTestBreakoutHold();
    SelfTestExhaustionAvailability();
+   SelfTestComposerEngineGating();
    SelfTestSignalLifecycle();
    SelfTestHistoricalEngine();
    SelfTestSignalHistory();
@@ -5448,7 +5505,16 @@ void ComposeSignalScore(CompositeSignalScore &score, const CompositeContext &con
                    score.regime.score * regime_weight +
                    score.calendar.score * calendar_weight) / total_weight;
 
-   if(score.breakout.score >= 0.45 && score.impulse.score >= 0.45)
+   // The synergy bonus rewards two engines agreeing. It used to be granted on two
+   // non-zero scores, so a stale score in an unmeasured component could earn it,
+   // and a disabled engine could never earn it because its score stays 0. Require
+   // each engine to be enabled and actually measured: with one engine there is no
+   // second opinion to agree with, so there is no synergy to reward.
+   bool breakout_confirms = (UseTechnicalBreakoutEngine && score.breakout.measured &&
+                             score.breakout.score >= 0.45);
+   bool impulse_confirms = (UseImpulseBreakoutEngine && score.impulse.measured &&
+                            score.impulse.score >= 0.45);
+   if(breakout_confirms && impulse_confirms)
       raw01 = Clamp01(raw01 + 0.05);
 
    score.raw_score = 100.0 * SmoothStep(0.35, 0.92, raw01);
@@ -5516,9 +5582,19 @@ void ComposeSignalScore(CompositeSignalScore &score, const CompositeContext &con
    if(score.calendar.available && score.calendar.uncertainty_penalty >= 0.35)
       capped = ApplyScoreCap(capped, 88.0, caps, "calendar_uncertainty_cap");
 
+   // The strongest engine reading counts only if that engine was measured and is
+   // enabled: an unmeasured component's leftover score must not be able to satisfy
+   // the single-feature test and so suppress the cap (F-018). At least one engine
+   // is always measured here, because an unmeasured pair returns earlier as
+   // BLOCK_NO_MOVEMENT_DATA.
+   double best_engine_score = 0.0;
+   if(UseTechnicalBreakoutEngine && score.breakout.measured)
+      best_engine_score = MathMax(best_engine_score, score.breakout.score);
+   if(UseImpulseBreakoutEngine && score.impulse.measured)
+      best_engine_score = MathMax(best_engine_score, score.impulse.score);
+
    if(capped > 80.0 &&
-      (score.execution.score < 0.78 ||
-       MathMax(score.breakout.score, score.impulse.score) < ENGINE_CONFIRM_THRESHOLD))
+      (score.execution.score < 0.78 || best_engine_score < ENGINE_CONFIRM_THRESHOLD))
    {
       capped = ApplyScoreCap(capped, 79.0, caps, "single_feature_cap");
    }

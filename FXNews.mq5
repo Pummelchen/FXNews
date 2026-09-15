@@ -410,7 +410,12 @@ struct CompositeSignalScore
    bool valid;
    double raw_score;          // 0..100 before final caps
    double displayed_score;    // rounded dashboard score source
-   double age_free_score;     // displayed score before the event-age caps
+   // The score after the component-level caps (snapback, MTF reject, unsupported impulse,
+   // overextension) and BEFORE every remaining ceiling: the age caps, the calendar
+   // uncertainty cap, the single-feature cap, the elite cap and the absolute ceiling. The
+   // old comment said only "before the event-age caps", which understated what it excludes
+   // and made it look comparable to displayed_score (F-039).
+   double age_free_score;
    ExecutionQuality execution;
    BreakoutStructure breakout;
    ImpulseQuality impulse;
@@ -6163,8 +6168,11 @@ void ComposeSignalScore(CompositeSignalScore &score, const CompositeContext &con
       capped = ApplyScoreCap(capped, 89.0, caps, "elite_score_cap");
    }
 
-   if(capped > 95.0)
-      capped = 95.0;
+   // Recorded through ApplyScoreCap like every other ceiling. This was the one cap that
+   // clamped the score without adding a reason, so a score sitting at exactly 95 explained
+   // itself to the operator as nothing at all (F-040). ApplyScoreCap only appends when the
+   // cap actually binds, so scores below it are unaffected.
+   capped = ApplyScoreCap(capped, 95.0, caps, "absolute_score_ceiling");
 
    score.displayed_score = Clamp(capped, 0.0, 100.0);
    score.valid = (score.displayed_score > 0.0);

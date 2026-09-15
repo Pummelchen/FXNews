@@ -260,6 +260,57 @@ def check_diagnostics_object_count(violations: list[Violation], indicator: str) 
         )
 
 
+def check_score_ceiling_reasons(violations: list[Violation], indicator: str) -> None:
+    """The score ceilings must be recorded, and age_free_score must live up to its name.
+
+    Two composer invariants that only a full scan could otherwise reach (F-039, F-040):
+    every ceiling appends a reason, and age_free_score is captured before the age caps -
+    which is what its name claims and what its old comment obscured.
+    """
+    match = re.search(r"void ComposeSignalScore\(.*?\n\}", indicator, re.DOTALL)
+    if match is None:
+        violations.append(
+            Violation(
+                "score-ceiling-reasons", "ComposeSignalScore not found in FXNews.mq5"
+            )
+        )
+        return
+    body = match.group(0)
+
+    if re.search(r"capped\s*=\s*95\.0\s*;", body):
+        violations.append(
+            Violation(
+                "score-ceiling-reasons",
+                "the absolute 95 ceiling clamps 'capped' directly instead of going through ApplyScoreCap, "
+                "so it records no reason string (F-040)",
+            )
+        )
+    if "ApplyScoreCap(capped, 95.0" not in body:
+        violations.append(
+            Violation(
+                "score-ceiling-reasons",
+                "no ApplyScoreCap call for the 95.0 absolute ceiling was found (F-040)",
+            )
+        )
+
+    capture = body.find("score.age_free_score =")
+    age_cap = body.find("expired_event_cap")
+    if capture == -1:
+        violations.append(
+            Violation(
+                "score-ceiling-reasons", "ComposeSignalScore never sets age_free_score"
+            )
+        )
+    elif age_cap != -1 and capture > age_cap:
+        violations.append(
+            Violation(
+                "score-ceiling-reasons",
+                "age_free_score is captured after the event-age caps, so it is not age-free and its "
+                "documented meaning is wrong (F-039)",
+            )
+        )
+
+
 def main(argv: list[str]) -> int:
     """Run every contract check against the repository at argv[0] or the parent of tools/."""
     root = (
@@ -279,11 +330,12 @@ def main(argv: list[str]) -> int:
     check_dashboard_refresh(violations, indicator)
     check_ranking_disclosure(violations, indicator)
     check_diagnostics_object_count(violations, indicator)
+    check_score_ceiling_reasons(violations, indicator)
 
     for violation in violations:
         print(violation.as_text())
     print(
-        f"contracts: {len(violations)} violation(s) across 7 contracts, root {root.name}"
+        f"contracts: {len(violations)} violation(s) across 8 contracts, root {root.name}"
     )
     return 1 if violations else 0
 

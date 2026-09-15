@@ -3,7 +3,7 @@
 Generated from `AUDIT/ledger.json` by `AUDIT/render.py` — do not edit by hand.
 Branch `audit/2026-09-15`, base commit `71ce980`.
 
-**total 52 | done 23 | open 29 | blocked 0 | S0:1 S1:11 S2:18 S3:22**
+**total 52 | done 26 | open 26 | blocked 0 | S0:1 S1:11 S2:18 S3:22**
 
 Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
@@ -28,7 +28,7 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-013 | S2 | dashboard | START | `FXNews.mq5:6325,6246` | DominantCurrencyFlow's own_group key makes every timeframe of one symbol share a correlation group, so at most one of them can ever alert |
 | F-014 | S2 | tooling | DONE | `tools/build-macos.sh:40-43; tools/selftest-macos.sh:38-40` | The Wine path, WINEPREFIX and MT5 path constants are duplicated across the two gate scripts and can drift |
 | F-015 | S2 | tooling | DONE | `FXNews.mq5:1725; tools/mql5/FXNewsSelfTest.mq5:14,32-34; tools/selftest-macos.sh:72,139,159-163` | The indicator, the harness and the gate script are coupled by undocumented string literals with no contract test |
-| F-016 | S2 | ops | START | `.github/` | No CI workflow: the three release gates are never run automatically |
+| F-016 | S2 | ops | DONE | `.github/` | No CI workflow: the three release gates are never run automatically |
 | F-017 | S2 | validation | START | `FXNews.mq5:942,988-995` | MaxQuoteAgeSeconds and FullHoldScoreSeconds have no upper bound, so extreme values silently disable the freshness gate or make the HYBRID hold clause unreachable |
 | F-018 | S2 | scoring | DONE | `FXNews.mq5:5026-5031` | single_feature_cap is applied without checking that the feature it measures was evaluated |
 | F-019 | S2 | scoring | DONE | `FXNews.mq5:4958-4959` | The +0.05 synergy bonus is awarded on component scores without checking that either engine passed or was measured |
@@ -49,8 +49,8 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 | F-031 | S3 | repo | START | `git history` | One contributor appears under three different author identities |
 | F-032 | S3 | docs | DONE | `tools/selftest-macos.sh:13` | The gate script's header comment states the wrong assertion count (72; actual 117) |
 | F-033 | S3 | docs | DONE | `_fxnews-wiki/Testing-and-Validation.md:11,30` | The wiki Testing page hard-codes the assertion total on the same page that promises it never has to |
-| F-034 | S3 | docs | START | `_fxnews-wiki/Known-Limitations.md:7` | Known-Limitations calls all three gates macOS-only, but census.py is cross-platform |
-| F-035 | S3 | docs | START | `_fxnews-wiki/Development-Guide.md:23` | Development-Guide both denies and documents the release process, and lists 'test' among commands that do not exist |
+| F-034 | S3 | docs | DONE | `_fxnews-wiki/Known-Limitations.md:7` | Known-Limitations calls all three gates macOS-only, but census.py is cross-platform |
+| F-035 | S3 | docs | DONE | `_fxnews-wiki/Development-Guide.md:23` | Development-Guide both denies and documents the release process, and lists 'test' among commands that do not exist |
 | F-036 | S3 | docs | START | `_fxnews-wiki/Project-Tracker.md:3,7,9` | The tracker describes itself as open tasks and known bugs while showing 120/120 done, and its line-number baseline still says version 2.3 |
 | F-037 | S3 | docs | START | `CLAUDE.md:24-30` | The documented version-bump procedure requires a deployment clone at MQL5/Indicators/FXNews/ that does not exist on this machine |
 | F-038 | S3 | scoring | START | `FXNews.mq5:4948-4949` | Unreachable guard: total_weight can never be zero |
@@ -308,14 +308,16 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-016 (S2, ops) — No CI workflow: the three release gates are never run automatically
 
-- **Status:** START  |  **Category:** deps  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** deps  |  **Host:** node3  |  **Commit:** 2dbd184
 - **Location:** `.github/`
 - **Discovered by:** Phase B L0/L7
 - **Evidence (before):**
 
   > .github contains only traffic.json; there is no workflow. Known-Limitations.md:7 lists this. The MQL5 compile gate cannot run on a stock GitHub runner, but census.py, shellcheck, ruff, mypy, the secret scan and the new contract test all can, and they are exactly the gates that catch the classes of defect this audit found.
 
-- **Notes:** Scope the workflow to the Linux-runnable gates and state explicitly in the README that the compile and self-test gates remain manual.
+- **Fix:** New .github/workflows/ci.yml runs the Linux-runnable gates on every push and pull request: census, contracts, ruff check, ruff format --check, mypy --strict, bandit, shellcheck, shfmt -d and a gitleaks scan of the full history (fetch-depth 0). Tool versions are pinned in the workflow and match AUDIT/environment.md. The workflow states in its own header, and the README and wiki now state, that the two MetaTrader gates are NOT covered and a green workflow is not a release gate.
+- **Evidence (after):** All nine CI steps were run locally and pass (census, contracts, ruff check, ruff format --check, mypy --strict, bandit, shellcheck, shfmt -d, gitleaks). The pinned release downloads were verified reachable (HTTP 200 for shfmt 3.14.1 and gitleaks 8.30.1) and the three PyPI pins exist. The workflow YAML parses: 1 job, 12 steps. This task was only possible after F-026, F-027 and F-028 cleared the findings that would have made the first run red.
+- **Notes:** Deliberately does not attempt the MQL5 gates in CI. Doing so would require installing Wine, Rosetta 2 and MetaTrader with broker history on a hosted runner, and a workflow that pretended to cover them would be worse than none.
 
 ### F-017 (S2, validation) — MaxQuoteAgeSeconds and FullHoldScoreSeconds have no upper bound, so extreme values silently disable the freshness gate or make the HYBRID hold clause unreachable
 
@@ -544,23 +546,29 @@ Severity follows the audit brief §7. Work order: all S0, then S1, S2, S3.
 
 ### F-034 (S3, docs) — Known-Limitations calls all three gates macOS-only, but census.py is cross-platform
 
-- **Status:** START  |  **Category:** docs  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** wiki
 - **Location:** `_fxnews-wiki/Known-Limitations.md:7`
 - **Discovered by:** Phase B docs audit
 - **Evidence (before):**
 
   > ':7' states 'The three gates ... are macOS-only'. tools/census.py requires only Python 3.14 (verified running on macOS but with no platform-specific code), and Development-Guide.md:9-10 correctly pairs it with the macOS-only self-test.
 
+- **Fix:** Corrected the wiki pages that stated things no longer true, and two that were already wrong: the four gates, which of them CI can run, the tool list, the self-test's coverage (the live signal lifecycle is now covered by the self-test) and the release process, which IS documented in Release-Checklist.md. Known-Limitations.md and Testing-and-Validation.md now distinguish the cross-platform gates from the macOS-only MetaTrader gates and say exactly what the CI workflow does and does not cover.
+- **Evidence (after):** grep for 'three gates' / 'All three' / 'macOS-only' across the wiki returns no stale claim; Testing-and-Validation.md gained a 'What CI Covers, and What It Cannot' section and its gate table lists contracts.py; Home.md's project-structure paragraph no longer says there is no CI workflow.
+- **Notes:** The original finding was that Known-Limitations called all three gates macOS-only although census.py is cross-platform. The correction grew to cover the CI workflow added by F-016 and the lifecycle coverage added by F-008, because all three make the same page wrong in the same way. Nothing was dropped: every stale statement in those pages was corrected, not just the one filed.
 
 ### F-035 (S3, docs) — Development-Guide both denies and documents the release process, and lists 'test' among commands that do not exist
 
-- **Status:** START  |  **Category:** docs  |  **Host:** node3  |  **Commit:** -
+- **Status:** DONE  |  **Category:** docs  |  **Host:** node3  |  **Commit:** wiki
 - **Location:** `_fxnews-wiki/Development-Guide.md:23`
 - **Discovered by:** Phase B docs audit
 - **Evidence (before):**
 
   > ':23' says 'there is no repository-local install, lint, typecheck, format, test, migration, Docker, or deployment command' and 'The release and distribution process is not currently documented', while Release-Checklist.md exists and the same page describes the census and self-test gates as commands.
 
+- **Fix:** Corrected the wiki pages that stated things no longer true, and two that were already wrong: the four gates, which of them CI can run, the tool list, the self-test's coverage (the live signal lifecycle is now covered by the self-test) and the release process, which IS documented in Release-Checklist.md. Development-Guide.md no longer claims there is no lint/typecheck/format/test command while describing the gates two lines above, and no longer says the release process is undocumented while linking to the Release Checklist.
+- **Evidence (after):** Development-Guide.md:23 rewritten; the page now names the four gates, says which are cross-platform, and points at Release-Checklist.md for the release sequence.
+- **Notes:** Shares the wiki commit with F-034; both are pure documentation corrections in the same repository.
 
 ### F-036 (S3, docs) — The tracker describes itself as open tasks and known bugs while showing 120/120 done, and its line-number baseline still says version 2.3
 

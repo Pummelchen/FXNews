@@ -41,11 +41,11 @@ repeat it in later messages unless something new makes it newly relevant, or the
 asks — and do not re-litigate a decision the user has made.
 
 **Work in this repository only.** Never commit, push, open a pull request against, or
-otherwise modify any other repository — explicitly including the `TinyTitan` master
-from which `RELEASE.md` is generated. `RELEASE.md` is a deployed copy: when it is wrong,
-report the exact correction and why, and leave it. A fix that belongs upstream is the
-owner's to apply. Touching another repository requires an instruction that names it, and
-"the fix lives there" is not one.
+otherwise modify any other repository. A change that appears to belong elsewhere is
+reported to the owner with the exact edit and the reason, not applied. Touching another
+repository requires an instruction that names it, and "the fix lives there" is not one.
+`RELEASE.md` here is this repository's own file: edit it here, and never go elsewhere to
+change it.
 
 ## Layout
 
@@ -172,24 +172,23 @@ to that budget and put detail in the tooltip.
   compiled artifact is a release output, not source. The `.ex5` is MetaTrader
   bytecode, not a macOS binary, so macOS architecture and `lipo` rules do not apply.
 
-<!-- release-rules:begin -->
 ## Releasing
 
-**Read [`RELEASE.md`](RELEASE.md) before cutting a release.** It carries the
-generic rules every Pummelchen repository follows, plus this repository's own
-section. Do not improvise a release.
+**Read [`RELEASE.md`](RELEASE.md) before cutting a release.** It is this repository's
+own release standard — edited here, not deployed from anywhere — and it carries both
+the general rules and this repository's own section. Do not improvise a release.
 
 The non-negotiables:
 
-- **Apple Silicon only** — build native `arm64` (M1–M6). Never `--arch x86_64`,
-  never `ARCHS=arm64 x86_64`, and never `lipo -create`, which is how a universal
-  binary gets made.
-- **Assert it** — `lipo -archs <binary>` must report exactly `arm64`. A build that
-  silently produced a fat binary is a release defect, not a build option.
-- **Every release carries the artifacts.** A tag alone is not a release.
-- **Identity is single-sourced and enforced** — never bump one declaration of the
-  version or build number on its own; the build or CI must fail on a mismatch.
+- **Every release carries the artifacts.** A tag alone is not a release. Here that
+  means `FXNews.mq5`, `FXNews.ex5` and a checksum file covering both.
+- **Identity is single-sourced.** The `#property version` line in `FXNews.mq5` is the
+  source, and the release tag is taken verbatim from it. Never bump one declaration of
+  the version on its own.
 - **Dry run first**; publish only on an explicit flag.
 - **Never fetch a model, dataset or dependency to make a gate pass.** A check that
   cannot run is reported *not checked*, and the release notes must name it.
-<!-- release-rules:end -->
+- **The Apple Silicon and `lipo` rules do not apply here.** The `.ex5` is MetaTrader
+  bytecode, not a macOS host binary, so there is no architecture to assert. Do not
+  attach a `lipo -archs` check to this repository — it would be a gate that cannot
+  fail. See `RELEASE.md` Part 2.

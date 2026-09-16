@@ -178,6 +178,8 @@ Leave previous releases' notes and performance tables alone.
   `.github/copilot-instructions.md`, `AGENT.md`, and only then `AGENTS.md` — so any
   of those six silently replaces this file for every Zed user. Check for them whenever
   the instruction file changes.
+- **An archived repository is read-only.** Nothing can be committed to it, so no
+  release step may depend on one. Name the exclusion rather than leaving a gap.
 - **A check that has never been seen to fail is not yet trusted.**
 
 ---

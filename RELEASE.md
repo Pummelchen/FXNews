@@ -186,7 +186,7 @@ Leave previous releases' notes and performance tables alone.
 
 # Part 2 — This repository
 
-## FXNews — MQL5, source and compiled artifact
+## FXNews — MQL5, source and compiled artifact, 1 release
 
 **A release is the source file and the compiled indicator, and nothing else.**
 
@@ -210,5 +210,7 @@ Leave previous releases' notes and performance tables alone.
   binaries) **do not apply**: the `.ex5` is MetaTrader 5 bytecode, and macOS's only
   involvement is hosting the Wine-based compiler. Do not attach a `lipo -archs`
   assertion to this repository — it would be a gate that cannot fail.
-- **No releases yet.** If one is cut, the checklist above is the whole process; the
-  generic macOS packaging sections of Part 1 do not apply here.
+- **Released** `v3.300` on 2026-09-16 — the first release, from source commit
+  `361d873`. `FXNews.mq5`, `FXNews.ex5` and `FXNews-3.300.sha256` are attached, and
+  the notes quote the digests the checksum file carries. The checklist above is the
+  whole process; the generic macOS packaging sections of Part 1 do not apply here.

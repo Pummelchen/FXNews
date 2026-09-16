@@ -18,7 +18,9 @@ across a symbol/timeframe basket from a single chart. `FXNews.mq5` is one
 file persistence and no order placement. Everything around it (`tools/`, `AUDIT/`)
 is macOS-side build, gate and audit tooling driving MetaEditor under Wine. It is
 feature-complete at source version 3.3 and distributed as source plus a locally
-compiled `.ex5`. There are **no GitHub releases and no tags**.
+compiled `.ex5`. Released as
+[`v3.300`](https://github.com/Pummelchen/FXNews/releases/tag/v3.300) with both attached; the process
+is in [`RELEASE.md`](RELEASE.md).
 
 ## Product boundaries
 

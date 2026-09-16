@@ -109,9 +109,21 @@ python3 -m pip install --upgrade bandit pip-audit coverage
 | --- | --- | --- |
 | MetaTrader 5.app | 5.0.4501 | `/Applications/MetaTrader 5.app` (621 MB) |
 | bundled `wine64` | MetaQuotes build, Mach-O **x86_64** | `/Applications/MetaTrader 5.app/Contents/SharedSupport/wine/bin/wine64` |
-| WINEPREFIX | — | `$HOME/Library/Application Support/net.metaquotes.wine.metatrader5` (13 GB) |
-| `terminal64.exe` | recorded in baseline | `<prefix>/drive_c/Program Files/MetaTrader 5/terminal64.exe` (112 MB) |
-| `MetaEditor64.exe` | recorded in baseline | `<prefix>/drive_c/Program Files/MetaTrader 5/MetaEditor64.exe` (109 MB) |
+| WINEPREFIX | — | `$HOME/Library/Application Support/net.metaquotes.wine.metatrader5` |
+| `terminal64.exe` | **5.0.0.6198** (build 6198) | `<prefix>/drive_c/Program Files/MetaTrader 5/terminal64.exe` |
+| `MetaEditor64.exe` | **5.0.0.6198** (build 6198) | `<prefix>/drive_c/Program Files/MetaTrader 5/MetaEditor64.exe` |
+
+The terminal and MetaEditor builds were recorded on 2026-09-16, which closes the release
+checklist's "record the MetaTrader 5 and MetaEditor build numbers" item. The number is not a plain
+string in either binary, which is why it had gone unrecorded: `strings` finds no version, and the
+MetaEditor compile log carries none either. It is the PE `VS_VERSIONINFO` resource, read with a
+short parser over the `.rsrc` section, and `terminal64.exe` also reports 6198 in its own journal
+(57 occurrences across the log files), which corroborates it from a second, independent source.
+
+Note that the app **bundle** version (5.0.4501, `CFBundleShortVersionString`) is a different number
+from the Windows binaries' build (6198). The build is the one that matters for a MetaTrader
+question; the bundle version is the macOS packaging version. The wiki previously said "build 6193",
+which is unattested — 6193 appears in neither the version resources nor the terminal's logs.
 
 **Platform coupling (finding E-1).** The bundled `wine64` is an **x86_64** Mach-O. On
 Apple Silicon every gate therefore requires Rosetta 2. Rosetta was **absent on all four

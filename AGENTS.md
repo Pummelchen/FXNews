@@ -40,6 +40,13 @@ chosen approach unless it is unsafe or impossible. Raise a concern once — do n
 repeat it in later messages unless something new makes it newly relevant, or the user
 asks — and do not re-litigate a decision the user has made.
 
+**Work in this repository only.** Never commit, push, open a pull request against, or
+otherwise modify any other repository — explicitly including the `TinyTitan` master
+from which `RELEASE.md` is generated. `RELEASE.md` is a deployed copy: when it is wrong,
+report the exact correction and why, and leave it. A fix that belongs upstream is the
+owner's to apply. Touching another repository requires an instruction that names it, and
+"the fix lives there" is not one.
+
 ## Layout
 
 - `FXNews.mq5` — the whole product, at the repository root.

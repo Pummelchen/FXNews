@@ -86,3 +86,19 @@ Rosetta 2. Gates at this revision: `build-macos.sh` 0 errors / 0 warnings; `cens
 `--validation` complete (2 symbols, 183 897 M1 bars, 6 036 boundaries, 1 181 signals); `--autotune`
 complete; `--install` verified. CI gates re-run locally: ruff check, ruff format --check,
 `mypy --strict` on 3 files, bandit, shellcheck, shfmt, gitleaks over full history.
+
+## Correction — 2026-09-16
+
+One entry under *Checks that did not run* is superseded. It said the MetaEditor build number was "not
+readable from this host" and that `strings` found no version resource and the MQL5 logs carried none.
+That was accurate when this release was cut, and it is left above as the record of what was known
+then. The number was found later the same day:
+
+**MetaTrader 5 and MetaEditor are build 6198.** Both `terminal64.exe` and `MetaEditor64.exe` carry
+file version `5.0.0.6198` in the PE `VS_VERSIONINFO` resource — which is why `strings` cannot see it,
+and why it had gone unrecorded — and the terminal's own journal corroborates it. It is recorded in
+`AUDIT/environment.md` and on the wiki's *Known Limitations* page.
+
+The application bundle's `5.0.4501` is the macOS packaging version and is **not** the build; both
+numbers are now stated with their provenance. The other entry under *Checks that did not run* — the
+interactive runtime validation — still stands: it has not been performed.
